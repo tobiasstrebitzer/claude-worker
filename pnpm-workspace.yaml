@@ -1,0 +1,12 @@
+# claude-worker pnpm workspace. packages/ + apps/ with `workspace:*` deps SYMLINKED
+# (linkWorkspacePackages), and each publishable package exposes a `@claude-worker/source`
+# export condition so apps resolve straight to TS source (packages/*/src) in dev with no build
+# step. Packages build to build/ via tsdown only on prepack/CI (never in dev). Turbo orchestrates.
+packages:
+  - packages/*
+  - apps/*
+linkWorkspacePackages: true
+
+allowBuilds:
+  esbuild: true
+  '@swc/core': true
