@@ -1,0 +1,34 @@
+{
+  "name": "@claude-worker/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Full session-control web app for claude-worker: session list, create/resume flow, live panel, settings. Dashboard consumer of @claude-worker/ui. Run the server with `pnpm server`, then `pnpm web`.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsgo -p tsconfig.json"
+  },
+  "dependencies": {
+    "@claude-worker/client": "workspace:*",
+    "@claude-worker/protocol": "workspace:*",
+    "@claude-worker/react": "workspace:*",
+    "@claude-worker/ui": "workspace:*",
+    "@fontsource/inter": "^5.2.8",
+    "@fontsource/jetbrains-mono": "^5.2.8",
+    "@tanstack/react-router": "^1.170.16",
+    "lucide-react": "^1.21.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.1",
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react-swc": "^3.9.0",
+    "tailwindcss": "^4.3.1",
+    "vite": "^6.3.0"
+  }
+}

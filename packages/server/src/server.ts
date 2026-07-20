@@ -2,14 +2,36 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { Duplex } from 'node:stream'
 import { resolve as resolvePath, sep } from 'node:path'
 import { WebSocketServer, type WebSocket } from 'ws'
+import { listSessions as sdkListSessions } from '@anthropic-ai/claude-agent-sdk'
 import type { SessionRunner, SessionRunnerConfig } from '@claude-worker/core'
 import {
   PROTOCOL_VERSION,
   type ClientFrame,
   type CreateSessionRequest,
+  type SdkSessionSummary,
   type ServerFrame,
 } from '@claude-worker/protocol'
 import { SessionRegistry } from './registry.ts'
+
+export type SdkSessionLister = (options: {
+  dir?: string
+  limit?: number
+  offset?: number
+}) => Promise<SdkSessionSummary[]>
+
+const defaultSdkSessionLister: SdkSessionLister = async (options) => {
+  const sessions = await sdkListSessions(options)
+  return sessions.map((s) => ({
+    sessionId: s.sessionId,
+    summary: s.summary,
+    lastModified: s.lastModified,
+    createdAt: s.createdAt,
+    customTitle: s.customTitle,
+    firstPrompt: s.firstPrompt,
+    gitBranch: s.gitBranch,
+    cwd: s.cwd,
+  }))
+}
 
 /**
  * Return a principal (any truthy value, attached to nothing yet) to accept the request,
@@ -43,6 +65,9 @@ export type WorkerServerOptions = {
    * operator's own subscription; the server then logs a one-time notice instead.
    */
   requireApiKey?: boolean
+  /** Injectable lister for GET /sdk-sessions (tests). Defaults to the SDK's listSessions,
+   * which reads the Agent SDK's on-disk session store. */
+  listSdkSessions?: SdkSessionLister
 }
 
 export type WorkerServer = {
@@ -145,7 +170,43 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
     return null
   }
 
+  const listSdkSessions = options.listSdkSessions ?? defaultSdkSessionLister
+
+  const handleSdkSessions = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    if (req.method !== 'GET') {
+      json(res, 405, { error: 'method not allowed' })
+      return
+    }
+    const url = new URL(req.url ?? '/', 'http://internal')
+    const dir = url.searchParams.get('dir') ?? undefined
+    const roots = options.allowedCwdRoots
+    if (roots && roots.length > 0) {
+      // Without a dir the SDK lists sessions across ALL projects — never wider than
+      // the cwd policy this server enforces on session creation.
+      if (!dir) {
+        json(res, 400, { error: 'dir is required when allowedCwdRoots is set' })
+        return
+      }
+      if (!cwdAllowed(dir, roots)) {
+        json(res, 403, { error: 'dir is outside the allowed roots' })
+        return
+      }
+    }
+    const limit = Number(url.searchParams.get('limit') ?? '') || undefined
+    const offset = Number(url.searchParams.get('offset') ?? '') || undefined
+    json(res, 200, { sdkSessions: await listSdkSessions({ dir, limit, offset }) })
+  }
+
   const handleRequest = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    const pathname = new URL(req.url ?? '/', 'http://internal').pathname
+    if (pathname === basePath + '/sdk-sessions') {
+      if (!(await authenticate(req))) {
+        json(res, 401, { error: 'unauthorized' })
+        return
+      }
+      await handleSdkSessions(req, res)
+      return
+    }
     const route = parseRoute(req.url ?? '/')
     if (!route || route.ws) {
       json(res, 404, { error: 'not found' })

@@ -2,17 +2,16 @@
   "name": "@claude-worker/react",
   "version": "0.1.0",
   "type": "module",
-  "description": "Embeddable claude-worker session panel for React: useClaudeSession hook, transcript view, tool-call cards, permission approve/deny prompts, composer, interrupt. Headless-ish — data-attribute styling hooks plus an optional default stylesheet.",
+  "description": "Headless React layer for claude-worker: useClaudeSession hook + pure transcript reducer. No styling opinion — @claude-worker/ui is the styled layer on top.",
   "main": "./build/index.mjs",
   "types": "./build/index.d.mts",
-  "files": ["build", "styles.css"],
+  "files": ["build"],
   "exports": {
     ".": {
       "@claude-worker/source": "./src/index.ts",
       "types": "./build/index.d.mts",
       "default": "./build/index.mjs"
-    },
-    "./styles.css": "./styles.css"
+    }
   },
   "scripts": {
     "clean": "rimraf build",

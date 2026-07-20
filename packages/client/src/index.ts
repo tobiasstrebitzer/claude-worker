@@ -3,6 +3,7 @@ import type {
   ClientFrame,
   CreateSessionRequest,
   PermissionMode,
+  SdkSessionSummary,
   ServerFrame,
   SessionEvent,
   SessionInfo,
@@ -190,6 +191,22 @@ export class ClaudeWorkerClient {
   async deleteSession(id: string): Promise<SessionInfo> {
     const body = await this.#call('DELETE', `/sessions/${encodeURIComponent(id)}`)
     return (body as { session: SessionInfo }).session
+  }
+
+  /** List the Agent SDK's on-disk sessions (for resume across server restarts).
+   * Feed a result's `sessionId` to createSession({ resume }). */
+  async listSdkSessions(params?: {
+    dir?: string
+    limit?: number
+    offset?: number
+  }): Promise<SdkSessionSummary[]> {
+    const search = new URLSearchParams()
+    if (params?.dir) search.set('dir', params.dir)
+    if (params?.limit !== undefined) search.set('limit', String(params.limit))
+    if (params?.offset !== undefined) search.set('offset', String(params.offset))
+    const qs = search.size > 0 ? `?${search.toString()}` : ''
+    const body = await this.#call('GET', `/sdk-sessions${qs}`)
+    return (body as { sdkSessions: SdkSessionSummary[] }).sdkSessions
   }
 
   attach(sessionId: string, options?: AttachOptions): SessionHandle {

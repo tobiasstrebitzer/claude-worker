@@ -1,8 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
 import { ClaudeWorkerClient } from '@claude-worker/client'
 import type { PermissionMode, SessionInfo } from '@claude-worker/protocol'
-import { SessionPanel } from '@claude-worker/react'
+import { Button, Input, SessionList, SessionPanel } from '@claude-worker/ui'
 
+/**
+ * Minimal-chrome consumer of @claude-worker/ui — proves the library is portable without
+ * the full apps/web dashboard: one sidebar, one panel, no router.
+ */
 export function App() {
   const client = useMemo(
     () => new ClaudeWorkerClient({ baseUrl: `${location.origin}/v1` }),
@@ -17,8 +21,8 @@ export function App() {
 
   const refresh = () => client.listSessions().then(setSessions).catch((e) => setError(String(e)))
   useEffect(() => {
-    refresh()
-    const timer = setInterval(refresh, 5000)
+    void refresh()
+    const timer = setInterval(() => void refresh(), 5000)
     return () => clearInterval(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -40,55 +44,45 @@ export function App() {
   }
 
   return (
-    <div className="demo-layout">
-      <aside className="demo-sidebar">
-        <h1>claude-worker demo</h1>
-        <div className="demo-form">
-          <label>
-            Project directory
-            <input value={cwd} placeholder="/path/to/repo" onChange={(e) => setCwd(e.target.value)} />
-          </label>
-          <label>
-            Initial prompt
-            <input
-              value={prompt}
-              placeholder="e.g. /verify-content 42"
-              onChange={(e) => setPrompt(e.target.value)}
-            />
-          </label>
-          <label>
-            Permission mode
-            <select value={mode} onChange={(e) => setMode(e.target.value as PermissionMode)}>
-              <option value="default">default (ask)</option>
-              <option value="acceptEdits">acceptEdits</option>
-              <option value="plan">plan</option>
-              <option value="dontAsk">dontAsk</option>
-            </select>
-          </label>
-          <button onClick={create} disabled={!cwd}>
+    <div className='flex h-dvh bg-bg'>
+      <aside className='flex w-72 shrink-0 flex-col gap-3 overflow-y-auto border-r border-border bg-sidebar p-3'>
+        <h1 className='px-1 text-body-sm font-semibold text-fg-1'>claude-worker demo</h1>
+        <div className='flex flex-col gap-2'>
+          <Input
+            value={cwd}
+            placeholder='/path/to/repo'
+            spellCheck={false}
+            className='font-mono'
+            onChange={(e) => setCwd(e.target.value)}
+          />
+          <Input
+            value={prompt}
+            placeholder='Initial prompt (optional)'
+            onChange={(e) => setPrompt(e.target.value)}
+          />
+          <select
+            value={mode}
+            onChange={(e) => setMode(e.target.value as PermissionMode)}
+            className='h-8 rounded-md border border-border bg-bg px-2 text-body-sm text-text outline-none'>
+            <option value='default'>default (ask)</option>
+            <option value='acceptEdits'>acceptEdits</option>
+            <option value='plan'>plan</option>
+            <option value='dontAsk'>dontAsk</option>
+          </select>
+          <Button onClick={() => void create()} disabled={!cwd}>
             New session
-          </button>
-          {error && <p className="demo-error">{error}</p>}
+          </Button>
+          {error ? <p className='text-body-sm text-danger'>{error}</p> : null}
         </div>
-        <ul className="demo-sessions">
-          {sessions.map((session) => (
-            <li key={session.id}>
-              <button
-                data-active={session.id === activeId ? '' : undefined}
-                onClick={() => setActiveId(session.id)}
-              >
-                <span className="demo-session-status" data-status={session.status} />
-                {session.cwd.split('/').at(-1)} · {session.status}
-              </button>
-            </li>
-          ))}
-        </ul>
+        <SessionList sessions={sessions} activeId={activeId} onSelect={setActiveId} />
       </aside>
-      <main className="demo-main">
+      <main className='flex min-w-0 flex-1 flex-col'>
         {activeId ? (
           <SessionPanel key={activeId} client={client} sessionId={activeId} />
         ) : (
-          <div className="demo-empty">Create or select a session</div>
+          <div className='flex flex-1 items-center justify-center text-body-sm text-fg-4'>
+            Create or select a session
+          </div>
         )}
       </main>
     </div>

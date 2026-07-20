@@ -18,6 +18,7 @@ describe('transcript reducer', () => {
         sdkSessionId: 'sdk-1',
         model: 'claude-test-1',
         cwd: '/tmp/p',
+        apiKeySource: 'user',
         tools: [],
         skills: [],
         slashCommands: [],
@@ -123,5 +124,84 @@ describe('transcript reducer', () => {
       ev({ type: 'permission_resolved', requestId: 'req-1', behavior: 'deny', resolvedBy: 'timeout' }),
     )
     expect(resolved.pendingApprovals).toHaveLength(0)
+  })
+
+  it('accumulates thinking deltas and supersedes them with the full message', () => {
+    seq = 0
+    const state = run(initialTranscriptState, [
+      {
+        type: 'stream_delta',
+        event: { type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: 'Hmm, ' } },
+        parentToolUseId: null,
+        uuid: 's1',
+      },
+      {
+        type: 'stream_delta',
+        event: { type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: 'ok.' } },
+        parentToolUseId: null,
+        uuid: 's2',
+      },
+    ])
+    expect(state.items).toEqual([
+      { kind: 'thinking', id: 'streaming-thinking', text: 'Hmm, ok.', parentToolUseId: null },
+    ])
+
+    const done = applyEvent(
+      state,
+      ev({
+        type: 'assistant_message',
+        message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'Hmm, ok.' }] },
+        parentToolUseId: null,
+        uuid: 'a1',
+      }),
+    )
+    expect(done.items).toHaveLength(1)
+    expect(done.items[0]).toMatchObject({ kind: 'thinking', id: 'a1-0', text: 'Hmm, ok.' })
+  })
+
+  it('treats turn_result cost as session-cumulative (last-seen, not summed)', () => {
+    seq = 0
+    const turn = (totalCostUsd: number): SessionEventBody => ({
+      type: 'turn_result',
+      subtype: 'success',
+      isError: false,
+      durationMs: 100,
+      numTurns: 1,
+      totalCostUsd,
+      result: 'ok',
+    })
+    const state = run(initialTranscriptState, [turn(0.02), turn(0.05)])
+    expect(state.totalCostUsd).toBeCloseTo(0.05)
+  })
+
+  it('dedupes backfilled history against SDK-replayed user messages by uuid', () => {
+    seq = 0
+    const state = run(initialTranscriptState, [
+      // backfill copy (from getSessionMessages)
+      {
+        type: 'user_message',
+        message: { role: 'user', content: 'earlier prompt' },
+        parentToolUseId: null,
+        replay: true,
+        uuid: 'u-hist-1',
+      },
+      {
+        type: 'assistant_message',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'earlier reply' }] },
+        parentToolUseId: null,
+        replay: true,
+        uuid: 'a-hist-1',
+      },
+      // SDK's own replay of the same user message on resume
+      {
+        type: 'user_message',
+        message: { role: 'user', content: 'earlier prompt' },
+        parentToolUseId: null,
+        replay: true,
+        uuid: 'u-hist-1',
+      },
+    ])
+    expect(state.items.filter((i) => i.kind === 'user')).toHaveLength(1)
+    expect(state.items.map((i) => i.kind)).toEqual(['user', 'assistant_text'])
   })
 })

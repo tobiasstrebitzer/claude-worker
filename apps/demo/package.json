@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Bare demo consumer proving the embeddable claim: a Vite + React app that creates sessions against a local claude-worker server and mounts the panel. Run the server with `pnpm server`, then `pnpm demo`.",
+  "description": "Minimal-chrome consumer proving @claude-worker/ui is portable: a Vite + React app that creates sessions against a local claude-worker server and mounts the styled panel. Run the server with `pnpm server`, then `pnpm demo`.",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -13,14 +13,16 @@
   "dependencies": {
     "@claude-worker/client": "workspace:*",
     "@claude-worker/protocol": "workspace:*",
-    "@claude-worker/react": "workspace:*",
+    "@claude-worker/ui": "workspace:*",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.3.1",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react-swc": "^3.9.0",
+    "tailwindcss": "^4.3.1",
     "vite": "^6.3.0"
   }
 }

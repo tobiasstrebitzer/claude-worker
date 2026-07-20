@@ -18,21 +18,26 @@ for the message stream, and embeddable panel components with approve/deny contro
 | `@claude-worker/core` | The session runner: wraps `query()`, owns the streaming input, promotes `canUseTool` calls into pending approvals, normalizes SDK messages into protocol events, keeps a seq-numbered event log for attach/replay. Pure library, no transport. |
 | `@claude-worker/server` | The gateway: HTTP + WebSocket, session registry (create/list/attach/interrupt/kill), pluggable auth hook. Runs anywhere Node ≥22 runs. |
 | `@claude-worker/client` | Typed protocol client for browsers and Node: REST + WebSocket attach with auto-reconnect and replay-from-last-seq. Zero runtime deps. |
-| `@claude-worker/react` | The embeddable panel: transcript, streaming text, tool-call cards, permission prompts, composer, interrupt. Headless-ish (`cw-*` classes + data attributes; optional default stylesheet). |
-| `apps/demo` | Bare Vite + React consumer proving the embeddable claim. |
+| `@claude-worker/react` | The headless React layer: `useClaudeSession` hook + pure transcript reducer. No styling opinion. |
+| `@claude-worker/ui` | The styled agent-control component library: session panel (status bar, streaming transcript, tool-call cards, permission prompts, composer), session list, and the underlying primitives. Tailwind v4 + Base UI + cva; light/dark via tokens. See `packages/ui/README.md` for consumer wiring. |
+| `apps/web` | Full session-control web app (dashboard): session list, create/resume flow, live panel, settings. |
+| `apps/demo` | Minimal-chrome Vite + React consumer proving `@claude-worker/ui` is portable. |
 
 ## Quickstart
 
 ```bash
 pnpm install
 pnpm server   # unauthenticated dev gateway on 127.0.0.1:8787 (loopback only!)
-pnpm demo     # Vite demo on http://localhost:5190, proxying /v1 to the gateway
+pnpm web      # dashboard on http://localhost:5191, proxying /v1 to the gateway
+pnpm demo     # minimal demo on http://localhost:5190
 ```
 
-Create a session in the demo UI: point it at a project directory, give it a prompt (plain text or
+Create a session in the web UI: point it at a project directory, give it a prompt (plain text or
 a skill invocation like `/verify-content 42`), pick a permission mode, and watch the live
 transcript. Tool calls not covered by the permission mode surface as approve/deny cards; the tool
-blocks until you decide (deny-on-timeout after 5 minutes by default).
+blocks until you decide (deny-on-timeout after 5 minutes by default). Closed or restarted-away
+sessions can be resumed from the SDK's on-disk store (“Resume a previous session”) — the server
+backfills the prior transcript as replay events.
 
 ### Embedding in your own app
 
@@ -53,8 +58,7 @@ Client side:
 
 ```tsx
 import { ClaudeWorkerClient } from '@claude-worker/client'
-import { SessionPanel } from '@claude-worker/react'
-import '@claude-worker/react/styles.css'
+import { SessionPanel } from '@claude-worker/ui' // Tailwind v4 host: see packages/ui/README.md
 
 const client = new ClaudeWorkerClient({ baseUrl: 'https://my-app/worker/v1', headers: { ... } })
 const session = await client.createSession({
@@ -66,9 +70,9 @@ const session = await client.createSession({
 <SessionPanel client={client} sessionId={session.id} />
 ```
 
-Or skip the components and consume the stream directly: `client.attach(sessionId).on('event', …)`,
-or go one level lower and use `SessionRunner` from `@claude-worker/core` in-process with no server
-at all.
+Or use the headless layer (`useClaudeSession` from `@claude-worker/react`) with your own
+rendering, consume the stream directly (`client.attach(sessionId).on('event', …)`), or go one
+level lower and use `SessionRunner` from `@claude-worker/core` in-process with no server at all.
 
 ## Permissions are the sharp edge
 
@@ -131,7 +135,7 @@ stays 100% Anthropic-owned code.
 pnpm typecheck   # tsgo (TypeScript 7 native preview) across the workspace
 pnpm test        # vitest (core runner, server integration, transcript reducer)
 pnpm lint        # oxlint
-pnpm build       # tsdown -> build/ (packages), vite (demo)
+pnpm build       # tsdown -> build/ (packages), vite (apps)
 ```
 
 Workspace layout follows the source-link convention: apps and tests resolve packages straight to

@@ -12,12 +12,18 @@ queues, serverless, multi-tenant SaaS, and claude.ai auth are explicit non-goals
   approvals (`canUseTool`), SDKMessage→event normalization, seq-numbered event log. No transport.
 - `packages/server` — HTTP + WS gateway (`node:http` + `ws`), session registry, auth hook.
 - `packages/client` — REST + WS client on platform `fetch`/`WebSocket`. Zero runtime deps.
-- `packages/react` — panel components + `useClaudeSession`. `src/transcript.ts` is a pure reducer
-  (framework-free, unit-tested); keep rendering logic out of it.
-- `apps/demo` — Vite consumer of client+react against a local server.
+- `packages/react` — the **headless** React layer: `useClaudeSession` + `src/transcript.ts`, a
+  pure reducer (framework-free, unit-tested); keep rendering logic out of it. No styling.
+- `packages/ui` — the **styled** agent-control library (Tailwind v4 + `@base-ui/react` + cva):
+  primitives in `src/components/ui`, agent components (SessionPanel/Transcript/ToolCallCard/
+  PermissionPrompt/Composer/SessionList) in `src/components/agent`. Ships source styles
+  (`@claude-worker/ui/theme.css` + `@source`-scanned classnames — consumer wiring in its README).
+  Design tokens copied from a sibling app; light/dark swaps on `<html data-theme>`.
+- `apps/web` — session-control dashboard (TanStack Router, hash history) consuming client+ui.
+- `apps/demo` — minimal-chrome consumer of client+ui proving portability.
 
-Dependency direction: `protocol ← core ← server`, `protocol ← client ← react ← demo`. The browser
-side (client/react/demo) must never import core/server or the Agent SDK.
+Dependency direction: `protocol ← core ← server`, `protocol ← client ← react ← ui ← web|demo`.
+The browser side (client/react/ui/apps) must never import core/server or the Agent SDK.
 
 ## Tooling conventions (mirrors a sibling app)
 
@@ -68,5 +74,18 @@ README "Auth & Anthropic's terms") — keep that section's status honest as thin
   options).
 - Unmodeled SDK messages pass through as `sdk_event` — extend the protocol first-class instead of
   parsing payloads client-side.
+- `total_cost_usd`/`num_turns` on SDK result messages are **session-cumulative** — roll up with
+  last-seen, never sum.
+- On `resume`, the SDK re-streams only *user* messages; the runner backfills full history from
+  `getSessionMessages` as `replay: true` events, and the transcript reducer dedupes the doubled
+  user messages by uuid. `historyFn`/`listSdkSessions` are injectable on runner/server for tests.
+- The SDK does **not** echo streamed-input user messages back at all — the runner emits the
+  `user_message` event itself in `sendMessage()` (the one place input enters).
+- Allowing a permission **must** echo the tool input: the SDK's `PermissionResult` requires
+  `updatedInput` to be a record on allow (undefined → ZodError → the tool errors). The fake
+  harness can't catch schema bugs like this — permission changes need a real-SDK smoke.
+- `packages/ui` renders markdown via streamdown, which styles itself with Tailwind classes split
+  across `dist/` **chunk files** — consumers must `@source` the whole streamdown `dist` dir, and
+  under pnpm it lives at `packages/ui/node_modules/streamdown`, not the workspace root.
 - `createWorkerServer` refuses to start without `authenticate` unless `allowUnauthenticated: true`
   (loopback dev only). Keep it that way.

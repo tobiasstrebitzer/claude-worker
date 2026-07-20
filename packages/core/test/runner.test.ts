@@ -151,6 +151,20 @@ describe('SessionRunner', () => {
     expect(events.every((e, i) => e.seq === i + 1)).toBe(true)
   })
 
+  it('emits user_message events for sent input (the SDK does not echo them)', async () => {
+    const { runner, events } = makeRunner({ prompt: 'first' })
+    void runner.start()
+    runner.sendMessage('second')
+    await tick()
+
+    const userEvents = events.filter(
+      (e): e is Extract<SessionEvent, { type: 'user_message' }> => e.type === 'user_message',
+    )
+    expect(userEvents.map((e) => e.message.content)).toEqual(['first', 'second'])
+    expect(userEvents.every((e) => typeof e.uuid === 'string' && e.uuid.length > 0)).toBe(true)
+    expect(userEvents.every((e) => !e.synthetic && !e.replay)).toBe(true)
+  })
+
   it('sends the initial prompt and queued user messages into the SDK input stream', async () => {
     const { harness, runner } = makeRunner({ prompt: '/verify-content 42' })
     void runner.start()
@@ -193,6 +207,26 @@ describe('SessionRunner', () => {
 
     const resolved = events.find((e) => e.type === 'permission_resolved')
     expect(resolved).toMatchObject({ requestId: request.id, behavior: 'allow', resolvedBy: 'client' })
+  })
+
+  it('allow without updatedInput echoes the original input (SDK requires a record)', async () => {
+    const { harness, runner } = makeRunner()
+    void runner.start()
+    harness.emit(initMessage)
+    await tick()
+
+    const resultPromise = harness.captured.options!.canUseTool!(
+      'Write',
+      { file_path: '/tmp/x.txt', content: 'hi' },
+      { signal: new AbortController().signal, toolUseID: 'tool-2' },
+    )
+    await tick()
+    runner.resolvePermission(runner.pendingApprovals[0]!.id, { behavior: 'allow' })
+    await expect(resultPromise).resolves.toEqual({
+      behavior: 'allow',
+      updatedInput: { file_path: '/tmp/x.txt', content: 'hi' },
+      toolUseID: 'tool-2',
+    })
   })
 
   it('denies on timeout by default', async () => {
@@ -261,5 +295,80 @@ describe('SessionRunner', () => {
     await runner.start()
     expect(events.some((e) => e.type === 'session_error')).toBe(true)
     expect(runner.status).toBe('failed')
+  })
+
+  it('tracks cost/turn rollups and title on info()', async () => {
+    const { harness, runner } = makeRunner({ prompt: 'do the thing' })
+    void runner.start()
+    harness.emit(initMessage)
+    harness.emit(resultMessage)
+    await tick()
+
+    const info = runner.info()
+    expect(info.title).toBe('do the thing')
+    expect(info.totalCostUsd).toBe(0.01)
+    expect(info.numTurns).toBe(1)
+    expect(info.lastActivityAt).toBeGreaterThan(0)
+
+    // meta.title beats the derived prompt title.
+    const { runner: named } = makeRunner({ prompt: 'p', meta: { title: 'My session' } })
+    expect(named.info().title).toBe('My session')
+  })
+
+  it('backfills resumed-session history as replay events before live events', async () => {
+    const history = [
+      {
+        type: 'user' as const,
+        uuid: 'uuid-h1',
+        session_id: 'sdk-session-1',
+        message: { role: 'user', content: 'earlier prompt' },
+        parent_tool_use_id: null,
+      },
+      {
+        type: 'assistant' as const,
+        uuid: 'uuid-h2',
+        session_id: 'sdk-session-1',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'earlier reply' }] },
+        parent_tool_use_id: null,
+      },
+      {
+        type: 'system' as const,
+        uuid: 'uuid-h3',
+        session_id: 'sdk-session-1',
+        message: {},
+        parent_tool_use_id: null,
+      },
+    ]
+    const historyFn = vi.fn(async () => history)
+    const { harness, runner, events } = makeRunner({ resume: 'sdk-session-1', historyFn })
+    void runner.start()
+    await tick()
+    harness.emit(initMessage)
+    await tick()
+
+    expect(historyFn).toHaveBeenCalledWith('sdk-session-1', { dir: '/tmp/project' })
+    const types = events.map((e) => e.type)
+    expect(types.slice(0, 2)).toEqual(['user_message', 'assistant_message'])
+    expect(types).toContain('system_init')
+    const replayUser = events[0] as Extract<SessionEvent, { type: 'user_message' }>
+    expect(replayUser.replay).toBe(true)
+    expect(replayUser.uuid).toBe('uuid-h1')
+    const replayAssistant = events[1] as Extract<SessionEvent, { type: 'assistant_message' }>
+    expect(replayAssistant.replay).toBe(true)
+    // system entries are skipped
+    expect(events).toHaveLength(events.filter((e) => e.type !== 'sdk_event').length)
+  })
+
+  it('resume without history and historyFn failures are non-fatal', async () => {
+    const historyFn = vi.fn(async () => {
+      throw new Error('no transcript')
+    })
+    const { harness, runner, events } = makeRunner({ resume: 'sdk-session-x', historyFn })
+    void runner.start()
+    await tick()
+    harness.emit(initMessage)
+    await tick()
+    expect(events.map((e) => e.type)).toContain('system_init')
+    expect(runner.status).toBe('running')
   })
 })

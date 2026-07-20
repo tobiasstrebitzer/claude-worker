@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import {
+  getSessionMessages,
   query as sdkQuery,
   type CanUseTool,
   type Options,
@@ -7,6 +8,7 @@ import {
   type Query,
   type SDKMessage,
   type SDKUserMessage,
+  type SessionMessage,
 } from '@anthropic-ai/claude-agent-sdk'
 import type {
   CreateSessionRequest,
@@ -18,12 +20,17 @@ import type {
   SessionStatus,
 } from '@claude-worker/protocol'
 import { InputQueue } from './input-queue.ts'
-import { normalizeSdkMessage } from './normalize.ts'
+import { normalizeSdkMessage, toApiMessage } from './normalize.ts'
 
 export type QueryFn = (params: {
   prompt: AsyncIterable<SDKUserMessage>
   options?: Options
 }) => Query
+
+export type HistoryFn = (
+  sdkSessionId: string,
+  options: { dir?: string },
+) => Promise<SessionMessage[]>
 
 export type PermissionDecision =
   | { behavior: 'allow'; updatedInput?: Record<string, unknown> }
@@ -39,6 +46,11 @@ export type SessionRunnerConfig = CreateSessionRequest & {
   extraOptions?: Partial<Options>
   /** Timeout for pending approvals when the request itself doesn't set one. Default 300000. */
   defaultApprovalTimeoutMs?: number
+  /** With `resume`: emit the resumed session's history as replay events before the query
+   * starts, so late-attaching clients get a full transcript. Default true. */
+  backfillHistory?: boolean
+  /** Injectable history reader (tests). Defaults to the SDK's getSessionMessages. */
+  historyFn?: HistoryFn
 }
 
 export type SessionEventListener = (event: SessionEvent) => void
@@ -71,6 +83,9 @@ export class SessionRunner {
   #apiKeySource: string | undefined
   #permissionMode: PermissionMode | undefined
   #pending = new Map<string, PendingApproval>()
+  #totalCostUsd: number | undefined
+  #numTurns: number | undefined
+  #lastActivityAt: number | undefined
   #input = new InputQueue()
   #query: Query | undefined
   #started = false
@@ -118,7 +133,19 @@ export class SessionRunner {
       lastSeq: this.#seq,
       pendingPermissionCount: this.#pending.size,
       meta: this.#config.meta,
+      title: this.#title(),
+      totalCostUsd: this.#totalCostUsd,
+      numTurns: this.#numTurns,
+      lastActivityAt: this.#lastActivityAt,
     }
+  }
+
+  #title(): string | undefined {
+    const metaTitle = this.#config.meta?.title
+    if (typeof metaTitle === 'string' && metaTitle.length > 0) return metaTitle
+    const prompt = this.#config.prompt
+    if (!prompt) return undefined
+    return prompt.length > 80 ? prompt.slice(0, 77) + '…' : prompt
   }
 
   /** Begin the session. Idempotent; returns the run promise (resolves when the query ends). */
@@ -138,6 +165,14 @@ export class SessionRunner {
       message: { role: 'user', content: text },
       parent_tool_use_id: null,
       session_id: this.#sdkSessionId,
+    })
+    // The SDK does not echo streamed-input user messages back, so the transcript
+    // would never show them — emit the event here (the one place input enters).
+    this.#emit({
+      type: 'user_message',
+      message: { role: 'user', content: text },
+      parentToolUseId: null,
+      uuid: randomUUID(),
     })
   }
 
@@ -194,6 +229,8 @@ export class SessionRunner {
   async #run(): Promise<void> {
     const queryFn = this.#config.queryFn ?? (sdkQuery as QueryFn)
     try {
+      await this.#backfillHistory()
+      if (this.#closed) return
       this.#query = queryFn({ prompt: this.#input, options: this.#buildOptions() })
       for await (const message of this.#query) {
         this.#handleMessage(message)
@@ -212,6 +249,46 @@ export class SessionRunner {
         })
         this.#setStatus('failed')
         this.close('error')
+      }
+    }
+  }
+
+  /**
+   * On resume, emit the prior session's transcript as replay events (seq'd before any
+   * live event). The SDK only re-streams *user* messages on resume; assistant history
+   * would otherwise be lost to clients attaching after a server restart. Duplicated
+   * user messages are deduped client-side by uuid.
+   */
+  async #backfillHistory(): Promise<void> {
+    const c = this.#config
+    if (!c.resume || c.backfillHistory === false) return
+    const historyFn = c.historyFn
+      ?? ((sessionId: string, options: { dir?: string }) => getSessionMessages(sessionId, options))
+    let messages: SessionMessage[]
+    try {
+      messages = await historyFn(c.resume, { dir: c.cwd })
+    } catch {
+      // Best-effort: a missing/unreadable transcript must not block the resume itself.
+      return
+    }
+    for (const m of messages) {
+      if (this.#closed) return
+      if (m.type === 'user') {
+        this.#emit({
+          type: 'user_message',
+          message: toApiMessage(m.message),
+          parentToolUseId: m.parent_tool_use_id,
+          replay: true,
+          uuid: m.uuid,
+        })
+      } else if (m.type === 'assistant') {
+        this.#emit({
+          type: 'assistant_message',
+          message: toApiMessage(m.message),
+          parentToolUseId: m.parent_tool_use_id,
+          replay: true,
+          uuid: m.uuid,
+        })
       }
     }
   }
@@ -274,8 +351,13 @@ export class SessionRunner {
     const body = normalizeSdkMessage(msg)
     if (body) {
       this.#emit(body)
-      // Fallback for SDK versions without session_state_changed.
-      if (body.type === 'turn_result' && this.#pending.size === 0) this.#setStatus('idle')
+      if (body.type === 'turn_result') {
+        // total_cost_usd / num_turns are session-cumulative on each result message.
+        this.#totalCostUsd = body.totalCostUsd
+        this.#numTurns = body.numTurns
+        // Fallback for SDK versions without session_state_changed.
+        if (this.#pending.size === 0) this.#setStatus('idle')
+      }
     }
   }
 
@@ -335,7 +417,9 @@ export class SessionRunner {
     if (decision.behavior === 'allow') {
       pending.resolve({
         behavior: 'allow',
-        updatedInput: decision.updatedInput,
+        // The SDK requires a record here even for an unmodified allow — echo the
+        // original input back when the client didn't rewrite it.
+        updatedInput: decision.updatedInput ?? pending.request.input,
         toolUseID: pending.request.toolUseId,
       })
     } else {
@@ -369,6 +453,7 @@ export class SessionRunner {
 
   #emit(body: SessionEventBody): void {
     const event: SessionEvent = { ...body, seq: ++this.#seq, ts: Date.now() }
+    this.#lastActivityAt = event.ts
     this.#events.push(event)
     for (const listener of this.#listeners) {
       try {

@@ -1,0 +1,320 @@
+/*
+ * @claude-worker/ui theme — design tokens + Tailwind v4 theme mapping.
+ *
+ * Consumer wiring (the app's tailwind entry CSS):
+ *
+ *   @import 'tailwindcss';
+ *   @import '@claude-worker/ui/theme.css';
+ *   @source '../node_modules/@claude-worker/ui';   (or the package src path in a monorepo)
+ *
+ * Do NOT import tailwindcss here — the consumer owns that. Theme switching is driven by
+ * <html data-theme="light|dark"> (set it before first paint to avoid a flash).
+ *
+ * Two tiers: a raw palette swapped by [data-theme], then `@theme inline` mapping raw
+ * tokens to Tailwind utilities (`inline` preserves the var() reference so flipping
+ * data-theme re-themes with zero JS).
+ */
+
+:root,
+[data-theme='light'] {
+  /* ---------- Backgrounds ---------- */
+  --bg: #ffffff;
+  --bg-surface: #fafafa;
+  --bg-surface-hover: #f2f2f2;
+  --bg-code: #f5f5f5;
+  --bg-elevated: #ffffffcc;
+
+  /* ---------- Borders ---------- */
+  --border: #ebebeb;
+  --border-light: #e0e0e0;
+  --border-strong: #c9c9c9;
+
+  /* ---------- Foreground / Text ---------- */
+  --fg-1: #171717;
+  --fg-2: #454545;
+  --fg-3: #737373;
+  --fg-4: #a1a1a1;
+  --fg-disabled: #c9c9c9;
+
+  /* ---------- Accent = the inverse of the canvas ---------- */
+  --accent: #171717;
+  --accent-hover: #000000;
+  --accent-dim: #737373;
+  --accent-bg: #f2f2f2;
+  --accent-ring: #17171733;
+
+  /* ---------- Semantic ---------- */
+  --success: #0f7b4f;
+  --success-bg: #edfaf3;
+  --warning: #a35200;
+  --warning-bg: #fff6ed;
+  --danger: #d93036;
+  --danger-bg: #fef1f1;
+  --info: #0072f5;
+  --info-bg: #eff6ff;
+
+  /* ---------- Elevation (flat by default; shadows are for overlays only) ---------- */
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow: 0 4px 12px rgba(0, 0, 0, 0.06);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.1);
+
+  /* ---------- Inset frame ---------- */
+  --shine: #dcdcdc;
+  --frame-shadow: var(--shadow-xs);
+
+  /* ---------- aliases (bridge for the @theme utilities) ---------- */
+  --surface: var(--bg-surface);
+  --sidebar: #f4f4f4;
+  --text: var(--fg-1);
+  --text-muted: var(--fg-3);
+  --accent-tint: var(--accent-bg);
+  --accent-fg: #ffffff;
+  --warn: var(--warning);
+  --ring: var(--fg-1);
+}
+
+[data-theme='dark'] {
+  /* ---------- Backgrounds ---------- */
+  --bg: #000000;
+  --bg-surface: #0a0a0a;
+  --bg-surface-hover: #141414;
+  --bg-code: #141414;
+  --bg-elevated: #0a0a0acc;
+
+  /* ---------- Borders ---------- */
+  --border: #1f1f1f;
+  --border-light: #292929;
+  --border-strong: #3d3d3d;
+
+  /* ---------- Foreground / Text ---------- */
+  --fg-1: #ededed;
+  --fg-2: #a1a1a1;
+  --fg-3: #8f8f8f;
+  --fg-4: #6e6e6e;
+  --fg-disabled: #454545;
+
+  /* ---------- Accent = the inverse of the canvas ---------- */
+  --accent: #ededed;
+  --accent-hover: #ffffff;
+  --accent-dim: #8f8f8f;
+  --accent-bg: #1f1f1f;
+  --accent-ring: #ffffff3d;
+
+  /* ---------- Semantic ---------- */
+  --success: #3ecf8e;
+  --success-bg: #0d2a1d;
+  --warning: #f5a623;
+  --warning-bg: #2a1f04;
+  --danger: #ff6166;
+  --danger-bg: #2a1114;
+  --info: #0091ff;
+  --info-bg: #0a1f33;
+
+  /* ---------- Elevation ---------- */
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --shadow-sm: 0 2px 4px rgba(0, 0, 0, 0.5);
+  --shadow: 0 4px 12px rgba(0, 0, 0, 0.6);
+  --shadow-md: 0 8px 20px rgba(0, 0, 0, 0.6);
+  --shadow-lg: 0 24px 48px rgba(0, 0, 0, 0.7);
+
+  /* ---------- Inset frame ---------- */
+  --shine: #303030;
+  --frame-shadow:
+    0 4px 24px rgba(0, 0, 0, 0.55),
+    0 2px 6px rgba(0, 0, 0, 0.45);
+
+  /* ---------- aliases ---------- */
+  --surface: var(--bg-surface);
+  --sidebar: #131313;
+  --text: var(--fg-1);
+  --text-muted: var(--fg-3);
+  --accent-tint: var(--accent-bg);
+  --accent-fg: #0a0a0a;
+  --warn: var(--warning);
+  --ring: var(--fg-1);
+}
+
+/* Theme-independent tokens — type tracking, easing, fonts.
+ * Hosts get real fonts by importing @fontsource/inter + @fontsource/jetbrains-mono;
+ * the stacks below degrade gracefully without them. */
+:root {
+  --tracking-tight: -0.02em;
+  --tracking-normal: 0;
+  --tracking-wide: 0.04em;
+  --tracking-caps: 0.1em;
+
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+
+  --cw-font-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --cw-font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', 'Cascadia Code', Menlo, Consolas, monospace;
+
+  --motion-fast: 120ms;
+  --motion-base: 150ms;
+  --motion-slow: 220ms;
+
+  /* Stock-name bridge → raw custom properties (shadcn idiom compatibility). */
+  --primary: var(--accent);
+  --primary-foreground: var(--accent-fg);
+  --secondary: var(--surface);
+  --secondary-foreground: var(--text);
+  --muted: var(--sidebar);
+  --muted-foreground: var(--text-muted);
+  --background: var(--bg);
+  --foreground: var(--text);
+  --destructive: var(--danger);
+  --radius: var(--radius-md);
+}
+
+/* Drive dark: off the same <html data-theme> the tokens swap on. */
+@custom-variant dark (&:where([data-theme='dark'], [data-theme='dark'] *));
+
+@theme inline {
+  /* Semantic colors → utilities. */
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-sidebar: var(--sidebar);
+  --color-border: var(--border);
+  --color-text: var(--text);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-tint: var(--accent-tint);
+  --color-accent-fg: var(--accent-fg);
+  --color-success: var(--success);
+  --color-warn: var(--warn);
+  --color-danger: var(--danger);
+  --color-ring: var(--ring);
+
+  --color-surface-hover: var(--bg-surface-hover);
+  --color-code: var(--bg-code);
+  --color-border-light: var(--border-light);
+  --color-border-strong: var(--border-strong);
+  --color-fg-1: var(--fg-1);
+  --color-fg-2: var(--fg-2);
+  --color-fg-3: var(--fg-3);
+  --color-fg-4: var(--fg-4);
+  --color-accent-bg: var(--accent-bg);
+  --color-accent-dim: var(--accent-dim);
+  --color-success-bg: var(--success-bg);
+  --color-warning: var(--warning);
+  --color-warning-bg: var(--warning-bg);
+  --color-danger-bg: var(--danger-bg);
+  --color-info: var(--info);
+  --color-info-bg: var(--info-bg);
+
+  /* Stock-name bridge → utilities (bg-primary / text-muted-foreground / ...). */
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-destructive: var(--destructive);
+
+  /* Font roles */
+  --font-sans: var(--cw-font-sans);
+  --font-mono: var(--cw-font-mono);
+
+  /* Type scale — size + line-height. Display sizes carry tight tracking. */
+  --text-display-xl: 2.5rem;
+  --text-display-xl--line-height: 3rem;
+  --text-display-xl--letter-spacing: -0.02em;
+  --text-display-lg: 2rem;
+  --text-display-lg--line-height: 2.5rem;
+  --text-display-lg--letter-spacing: -0.02em;
+  --text-display-md: 1.5rem;
+  --text-display-md--line-height: 2rem;
+  --text-display-md--letter-spacing: -0.02em;
+  --text-display-sm: 1.25rem;
+  --text-display-sm--line-height: 1.75rem;
+  --text-display-sm--letter-spacing: -0.02em;
+  --text-heading-1: 1.5rem;
+  --text-heading-1--line-height: 2rem;
+  --text-heading-2: 1.25rem;
+  --text-heading-2--line-height: 1.75rem;
+  --text-heading-3: 1rem;
+  --text-heading-3--line-height: 1.5rem;
+  --text-body: 0.9375rem;
+  --text-body--line-height: 1.5rem;
+  --text-body-sm: 0.8125rem;
+  --text-body-sm--line-height: 1.25rem;
+  --text-label: 0.75rem;
+  --text-label--line-height: 1rem;
+  --text-label--letter-spacing: 0.02em;
+  --text-code: 0.84375rem;
+  --text-code--line-height: 1.375rem;
+
+  /* Radii — 6px is the workhorse. */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-full: 9999px;
+
+  /* Motion */
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-emphasized: cubic-bezier(0.3, 0, 0, 1);
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    margin: 0;
+    background-color: var(--bg);
+    color: var(--text);
+    font-family: var(--cw-font-sans);
+    font-size: var(--text-body);
+    line-height: 1.5rem;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Standard focus ring: accent-derived, 2px + 2px offset. */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+
+  /* Lucide icons ship a hardcoded 24px; default them to 16px. :where() keeps specificity 0. */
+  :where(svg.lucide) {
+    width: 1rem;
+    height: 1rem;
+  }
+}
+
+/* The inset frame's gradient "shine" edge (app shells). Do NOT add bg-* on top. */
+.frame-shine {
+  border: 1px solid transparent;
+  background:
+    linear-gradient(var(--bg), var(--bg)) padding-box,
+    linear-gradient(
+        135deg,
+        var(--shine) 0%,
+        color-mix(in srgb, var(--shine) 55%, transparent) 55%,
+        color-mix(in srgb, var(--shine) 30%, transparent) 100%
+      )
+      border-box;
+  box-shadow: var(--frame-shadow);
+}

@@ -1,7 +1,7 @@
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import type { ApiMessage, ContentBlock, SessionEventBody } from '@claude-worker/protocol'
 
-function toApiMessage(message: unknown): ApiMessage {
+export function toApiMessage(message: unknown): ApiMessage {
   const m = message as {
     role?: 'user' | 'assistant'
     content: string | ContentBlock[]

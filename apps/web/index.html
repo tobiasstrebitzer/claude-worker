@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>claude-worker</title>
+    <script>
+      ;(function () {
+        var el = document.documentElement
+        try {
+          var t = localStorage.getItem('claude-worker.theme')
+          var dark =
+            t === 'dark' || (t !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches)
+          el.setAttribute('data-theme', dark ? 'dark' : 'light')
+        } catch (e) {
+          el.setAttribute('data-theme', 'light')
+        }
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

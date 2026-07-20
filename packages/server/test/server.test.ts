@@ -246,4 +246,34 @@ describe('createWorkerServer', () => {
       ).status,
     ).toBe(200)
   })
+
+  it('lists SDK on-disk sessions via GET /sdk-sessions', async () => {
+    const lister = vi.fn(async () => [
+      {
+        sessionId: 'sdk-1',
+        summary: 'earlier session',
+        lastModified: 1000,
+        cwd: '/tmp/project',
+      },
+    ])
+    running = createWorkerServer({
+      allowUnauthenticated: true,
+      allowedCwdRoots: ['/tmp'],
+      listSdkSessions: lister,
+    })
+    const { port } = await running.listen(0, '127.0.0.1')
+    const base = `http://127.0.0.1:${port}/v1`
+
+    // dir required when roots are configured; must be inside them
+    expect((await fetch(`${base}/sdk-sessions`)).status).toBe(400)
+    expect((await fetch(`${base}/sdk-sessions?dir=/etc`)).status).toBe(403)
+
+    const res = await fetch(`${base}/sdk-sessions?dir=/tmp/project&limit=10`)
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { sdkSessions: Array<{ sessionId: string }> }
+    expect(body.sdkSessions.map((s) => s.sessionId)).toEqual(['sdk-1'])
+    expect(lister).toHaveBeenCalledWith({ dir: '/tmp/project', limit: 10, offset: undefined })
+
+    expect((await fetch(`${base}/sdk-sessions`, { method: 'POST' })).status).toBe(405)
+  })
 })

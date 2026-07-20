@@ -120,6 +120,8 @@ export type SessionEventBody =
       message: ApiMessage
       /** Set when the message was produced inside a subagent (Task tool). */
       parentToolUseId: string | null
+      /** True when backfilled from a resumed session's history. */
+      replay?: boolean
       uuid: string
     }
   | {
@@ -273,9 +275,36 @@ export type SessionInfo = {
   lastSeq: number
   pendingPermissionCount: number
   meta?: Record<string, unknown>
+  /** Display title: `meta.title` if the host set one, else derived (e.g. first prompt). */
+  title?: string
+  /** Cumulative cost across all turns so far (sum of turn_result totals). */
+  totalCostUsd?: number
+  /** Cumulative turn count across the session. */
+  numTurns?: number
+  /** Epoch ms of the most recent emitted event. */
+  lastActivityAt?: number
+}
+
+/**
+ * A session in the Agent SDK's on-disk store (independent of this server's registry).
+ * Listed so hosts can offer "resume" across server restarts: feed `sessionId` to
+ * CreateSessionRequest.resume. Mirrors the SDK's SDKSessionInfo, kept browser-safe.
+ */
+export type SdkSessionSummary = {
+  sessionId: string
+  /** Custom title, auto summary, or first prompt — whichever the SDK has. */
+  summary: string
+  /** Epoch ms of last modification. */
+  lastModified: number
+  createdAt?: number
+  customTitle?: string
+  firstPrompt?: string
+  gitBranch?: string
+  cwd?: string
 }
 
 export type ListSessionsResponse = { sessions: SessionInfo[] }
 export type CreateSessionResponse = { session: SessionInfo }
 export type GetSessionResponse = { session: SessionInfo }
+export type ListSdkSessionsResponse = { sdkSessions: SdkSessionSummary[] }
 export type ErrorResponse = { error: string }

@@ -61,6 +61,7 @@ export const initialTranscriptState: TranscriptState = {
 }
 
 const STREAMING_ID = 'streaming'
+const STREAMING_THINKING_ID = 'streaming-thinking'
 
 function blockText(content: ToolResultBlock['content']): string {
   if (content === undefined) return ''
@@ -127,9 +128,11 @@ export function applyEvent(state: TranscriptState, event: SessionEvent): Transcr
     }
 
     case 'assistant_message': {
-      // The full message supersedes any in-flight streamed text.
+      // The full message supersedes any in-flight streamed text/thinking.
       let items = base.items.filter(
-        (item) => !(item.kind === 'assistant_text' && item.id === STREAMING_ID),
+        (item) =>
+          !(item.kind === 'assistant_text' && item.id === STREAMING_ID) &&
+          !(item.kind === 'thinking' && item.id === STREAMING_THINKING_ID),
       )
       const blocks = contentToBlocks(event.message.content)
       blocks.forEach((block, index) => {
@@ -166,27 +169,44 @@ export function applyEvent(state: TranscriptState, event: SessionEvent): Transcr
     case 'stream_delta': {
       const delta = event.event as {
         type: string
-        delta?: { type?: string; text?: string }
+        delta?: { type?: string; text?: string; thinking?: string }
       }
-      if (delta.type !== 'content_block_delta' || delta.delta?.type !== 'text_delta') return base
-      const existing = base.items.find(
-        (item): item is Extract<TranscriptItem, { kind: 'assistant_text' }> =>
-          item.kind === 'assistant_text' && item.id === STREAMING_ID,
-      )
-      const item: TranscriptItem = {
-        kind: 'assistant_text',
-        id: STREAMING_ID,
-        text: (existing?.text ?? '') + (delta.delta.text ?? ''),
-        streaming: true,
-        parentToolUseId: event.parentToolUseId,
+      if (delta.type !== 'content_block_delta') return base
+      if (delta.delta?.type === 'text_delta') {
+        const existing = base.items.find(
+          (item): item is Extract<TranscriptItem, { kind: 'assistant_text' }> =>
+            item.kind === 'assistant_text' && item.id === STREAMING_ID,
+        )
+        const item: TranscriptItem = {
+          kind: 'assistant_text',
+          id: STREAMING_ID,
+          text: (existing?.text ?? '') + (delta.delta.text ?? ''),
+          streaming: true,
+          parentToolUseId: event.parentToolUseId,
+        }
+        return { ...base, items: upsert(base.items, item) }
       }
-      return { ...base, items: upsert(base.items, item) }
+      if (delta.delta?.type === 'thinking_delta') {
+        const existing = base.items.find(
+          (item): item is Extract<TranscriptItem, { kind: 'thinking' }> =>
+            item.kind === 'thinking' && item.id === STREAMING_THINKING_ID,
+        )
+        const item: TranscriptItem = {
+          kind: 'thinking',
+          id: STREAMING_THINKING_ID,
+          text: (existing?.text ?? '') + (delta.delta.thinking ?? ''),
+          parentToolUseId: event.parentToolUseId,
+        }
+        return { ...base, items: upsert(base.items, item) }
+      }
+      return base
     }
 
     case 'turn_result':
       return {
         ...base,
-        totalCostUsd: base.totalCostUsd + event.totalCostUsd,
+        // total_cost_usd is session-cumulative on each SDK result message.
+        totalCostUsd: event.totalCostUsd,
         items: [
           ...base.items,
           {
