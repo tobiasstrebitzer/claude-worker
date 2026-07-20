@@ -68,6 +68,7 @@ export function App() {
             <option value='acceptEdits'>acceptEdits</option>
             <option value='plan'>plan</option>
             <option value='dontAsk'>dontAsk</option>
+            <option value='auto'>auto</option>
           </select>
           <Button onClick={() => void create()} disabled={!cwd}>
             New session

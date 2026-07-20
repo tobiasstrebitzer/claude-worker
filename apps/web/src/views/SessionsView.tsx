@@ -30,6 +30,7 @@ const PERMISSION_MODES: Array<{ value: PermissionMode; label: string }> = [
   { value: 'default', label: 'default — ask for approval' },
   { value: 'acceptEdits', label: 'acceptEdits — auto-approve file edits' },
   { value: 'plan', label: 'plan — read-only planning' },
+  { value: 'auto', label: 'auto — model decides when to ask' },
   { value: 'bypassPermissions', label: 'bypassPermissions — no prompts (danger)' },
 ]
 
