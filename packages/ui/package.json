@@ -67,5 +67,8 @@
     "components",
     "tailwind",
     "ui"
-  ]
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
 }

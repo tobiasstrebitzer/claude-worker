@@ -49,5 +49,8 @@
     "agent-sdk",
     "session",
     "runner"
-  ]
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
 }

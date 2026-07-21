@@ -54,5 +54,8 @@
     "react",
     "hooks",
     "headless"
-  ]
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
 }

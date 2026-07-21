@@ -43,5 +43,8 @@
     "protocol",
     "websocket",
     "types"
-  ]
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
 }

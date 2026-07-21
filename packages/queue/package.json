@@ -50,5 +50,8 @@
     "queue",
     "jobs",
     "webhooks"
-  ]
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
 }

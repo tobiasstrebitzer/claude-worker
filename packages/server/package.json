@@ -56,5 +56,8 @@
     "server",
     "websocket",
     "gateway"
-  ]
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
 }
