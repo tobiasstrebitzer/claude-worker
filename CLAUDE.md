@@ -52,7 +52,7 @@ CLI-control-request changes need a smoke; the fake harness can't validate those 
 - test: `pnpm test`
 - push: yes (github.com/tobiasstrebitzer/claude-worker, branch `master`; repo private pending
   review — re-enable the docs.yml push trigger once Pages is on)
-- version_bump: yes (aligned across all 7 packages; 0.1.0 first published 2026-07-21)
+- version_bump: yes (aligned across all 7 packages; 0.1.0 on npm, 0.1.1 tagged awaiting publish)
 - publish: yes — npm `@claude-worker` org via keybridge (`/npm-publish`); run the gatekeeper
   audit first. MIT (LICENSE per package; ui intentionally ships `src/`, allowlisted in
   `.claude/gatekeeper.json`).
