@@ -3,8 +3,10 @@ import type {
   ClientFrame,
   CreateJobRequest,
   CreateSessionRequest,
+  JobEvent,
   JobInfo,
   PermissionMode,
+  QueueServerFrame,
   QueueStats,
   SdkSessionSummary,
   ServerFrame,
@@ -20,6 +22,8 @@ export type ClientOptions = {
   headers?: Record<string, string>
   /** Override WS URL construction (auth tickets, proxies). */
   buildWsUrl?: (sessionId: string, afterSeq: number) => string
+  /** Override the queue WS URL (`{baseUrl}/queue/ws` by default). */
+  buildQueueWsUrl?: () => string
   /** Injectable for non-browser environments/tests. Defaults to globalThis.WebSocket. */
   WebSocketImpl?: typeof WebSocket
   fetchImpl?: typeof fetch
@@ -175,6 +179,101 @@ export class SessionHandle {
   }
 }
 
+export type QueueHandleEvents = {
+  /** Fired on every (re)attach with the server's current stats. */
+  attached: QueueStats
+  /** Every job lifecycle/progress event, live. */
+  event: JobEvent
+  /** Refreshed stats pushed after job lifecycle changes. */
+  stats: QueueStats
+  /** WS connectivity: true on open, false on close. */
+  connectionChange: boolean
+}
+
+/**
+ * Live view of the server's job queue over `{basePath}/queue/ws`. The stream is
+ * read-only — submit/cancel stay on the REST methods. There is no replay: on
+ * (re)connect, re-list jobs and treat the stream as updates from there.
+ */
+export class QueueHandle {
+  #client: ClaudeWorkerClient
+  #reconnect: boolean
+  #ws: WebSocket | undefined
+  #listeners = new Map<keyof QueueHandleEvents, Set<Listener<never>>>()
+  #closed = false
+  #retries = 0
+  #connectTimer: ReturnType<typeof setTimeout> | undefined
+
+  constructor(client: ClaudeWorkerClient, options: { reconnect?: boolean } = {}) {
+    this.#client = client
+    this.#reconnect = options.reconnect ?? true
+    // Deferred a tick for the same StrictMode reason as SessionHandle.
+    this.#connectTimer = setTimeout(() => this.#connect(), 0)
+  }
+
+  on<K extends keyof QueueHandleEvents>(
+    kind: K,
+    listener: Listener<QueueHandleEvents[K]>,
+  ): () => void {
+    let set = this.#listeners.get(kind)
+    if (!set) {
+      set = new Set()
+      this.#listeners.set(kind, set)
+    }
+    set.add(listener as Listener<never>)
+    return () => set.delete(listener as Listener<never>)
+  }
+
+  detach(): void {
+    this.#closed = true
+    clearTimeout(this.#connectTimer)
+    this.#ws?.close()
+    this.#ws = undefined
+  }
+
+  #emit<K extends keyof QueueHandleEvents>(kind: K, payload: QueueHandleEvents[K]): void {
+    const set = this.#listeners.get(kind)
+    if (!set) return
+    for (const listener of set) {
+      try {
+        ;(listener as Listener<QueueHandleEvents[K]>)(payload)
+      } catch {
+        // listener errors must not break the stream
+      }
+    }
+  }
+
+  #connect(): void {
+    if (this.#closed) return
+    const ws = this.#client.openQueueSocket()
+    this.#ws = ws
+    ws.onopen = () => {
+      this.#retries = 0
+      this.#emit('connectionChange', true)
+    }
+    ws.onmessage = (msg: MessageEvent) => {
+      const frame = JSON.parse(String(msg.data)) as QueueServerFrame
+      if (frame.type === 'queue_attached') {
+        this.#emit('attached', frame.stats)
+        this.#emit('stats', frame.stats)
+      } else if (frame.type === 'job_event') {
+        this.#emit('event', frame.event)
+      } else if (frame.type === 'queue_stats') {
+        this.#emit('stats', frame.stats)
+      }
+    }
+    ws.onclose = () => {
+      this.#emit('connectionChange', false)
+      if (this.#closed || !this.#reconnect) return
+      const delay = Math.min(500 * 2 ** this.#retries++, 10_000)
+      this.#connectTimer = setTimeout(() => this.#connect(), delay)
+    }
+    ws.onerror = () => {
+      // onclose follows; reconnect handled there
+    }
+  }
+}
+
 export class ClaudeWorkerClient {
   #options: ClientOptions
   #fetch: typeof fetch
@@ -256,11 +355,25 @@ export class ClaudeWorkerClient {
     return new SessionHandle(this, sessionId, options)
   }
 
+  /** Stream the job queue live (requires the server to be configured with `queue`).
+   * Servers without a queue refuse the socket — check REST first or expect retries. */
+  attachQueue(options?: { reconnect?: boolean }): QueueHandle {
+    return new QueueHandle(this, options)
+  }
+
   /** @internal used by SessionHandle */
   openSocket(sessionId: string, afterSeq: number): WebSocket {
     const url =
       this.#options.buildWsUrl?.(sessionId, afterSeq) ??
       `${this.#options.baseUrl.replace(/^http/, 'ws')}/sessions/${encodeURIComponent(sessionId)}/ws?afterSeq=${afterSeq}`
+    return new this.#WebSocketImpl(url)
+  }
+
+  /** @internal used by QueueHandle */
+  openQueueSocket(): WebSocket {
+    const url =
+      this.#options.buildQueueWsUrl?.() ??
+      `${this.#options.baseUrl.replace(/^http/, 'ws')}/queue/ws`
     return new this.#WebSocketImpl(url)
   }
 

@@ -13,11 +13,14 @@ work behind its `QueueAdapter` interface.
 - `packages/core` — `SessionRunner` over the Agent SDK's `query()`: input queue, pending
   approvals (`canUseTool`), SDKMessage→event normalization, seq-numbered event log. No transport.
 - `packages/queue` — job queue over the runner: `QueueAdapter` contract (in-memory bundled;
-  claimNext must stay atomic for future shared backends) + `JobQueue` (concurrency, per-session +
-  daily token budgets, ordered webhook delivery). Jobs are one-shot: first turn_result completes
-  them and closes the session. No transport.
+  claimNext must stay atomic for future shared backends and skip future `nextRunAt`) + `JobQueue`
+  (concurrency, per-session + daily token budgets, ordered webhook delivery, retries with
+  backoff (`attempts`), wall-clock watchdog (`maxJobDurationMs` + force-close grace), terminal-job
+  retention pruning). Jobs are one-shot: first turn_result completes them and closes the session.
+  No transport.
 - `packages/server` — HTTP + WS gateway (`node:http` + `ws`), session registry, auth hook;
-  `queue` option mounts `/jobs` + `/queue` routes (job sessions are ordinary registry sessions).
+  `queue` option mounts `/jobs` + `/queue` routes plus a `/queue/ws` stream of JobEvents + stats
+  (job sessions are ordinary registry sessions).
 - `packages/client` — REST + WS client on platform `fetch`/`WebSocket`. Zero runtime deps.
 - `packages/react` — the **headless** React layer: `useClaudeSession` + `src/transcript.ts`, a
   pure reducer (framework-free, unit-tested); keep rendering logic out of it. No styling.

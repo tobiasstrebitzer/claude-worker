@@ -61,6 +61,16 @@ const successResult = (tokens = 100): SessionEventBody => ({
   usage: { input_tokens: tokens / 2, output_tokens: tokens / 2 },
 })
 
+const errorResult = (): SessionEventBody => ({
+  type: 'turn_result',
+  subtype: 'error_max_turns',
+  isError: true,
+  durationMs: 100,
+  numTurns: 3,
+  totalCostUsd: 0.2,
+  errors: ['hit max turns'],
+})
+
 function makeQueue(options: Partial<JobQueueOptions> = {}) {
   const runners: FakeRunner[] = []
   const createRunner = vi.fn(() => {
@@ -137,15 +147,7 @@ describe('JobQueue', () => {
     const { queue, runners } = makeQueue()
     const job = await queue.submit(jobRequest())
     await tick()
-    runners[0]!.emit({
-      type: 'turn_result',
-      subtype: 'error_max_turns',
-      isError: true,
-      durationMs: 100,
-      numTurns: 3,
-      totalCostUsd: 0.2,
-      errors: ['hit max turns'],
-    })
+    runners[0]!.emit(errorResult())
     await tick()
     expect(await queue.get(job.id)).toMatchObject({
       status: 'failed',
@@ -276,6 +278,121 @@ describe('JobQueue', () => {
     })
     // one failed attempt + three successes
     expect(fetchImpl).toHaveBeenCalledTimes(4)
+  })
+
+  it('announces submissions to local observers but never to the webhook', async () => {
+    const delivered: JobEvent[] = []
+    const fetchImpl = vi.fn(async (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      delivered.push(JSON.parse(String(init?.body)) as JobEvent)
+      return { ok: true, status: 200 } as Response
+    })
+    const { queue, runners, events } = makeQueue({ fetchImpl })
+    await queue.submit(jobRequest({ webhook: { url: 'https://example.test/hook' } }))
+    expect(events.map((e) => e.type)).toContain('job_submitted')
+    await tick()
+    runners[0]!.emit(successResult())
+    await vi.waitFor(() => {
+      expect(delivered.map((e) => e.type)).toEqual(['job_started', 'job_completed'])
+    })
+  })
+
+  it('validates retry attempts', async () => {
+    const { queue } = makeQueue()
+    await expect(queue.submit(jobRequest({ attempts: 0 }))).rejects.toThrow(/attempts/)
+    await expect(queue.submit(jobRequest({ attempts: 1.5 }))).rejects.toThrow(/attempts/)
+  })
+
+  it('re-queues a failed run with backoff, then completes on a later attempt', async () => {
+    const { queue, runners, events } = makeQueue()
+    const job = await queue.submit(jobRequest({ attempts: 2, retryDelayMs: 5 }))
+    await tick()
+    runners[0]!.emit(assistantWithUsage(90)) // 100 estimated tokens for attempt 1
+    runners[0]!.emit(errorResult())
+    await tick()
+
+    const queued = await queue.get(job.id)
+    expect(queued).toMatchObject({
+      status: 'queued',
+      attempt: 2,
+      maxAttempts: 2,
+      error: 'hit max turns',
+    })
+    expect(queued?.nextRunAt).toBeDefined()
+    expect(queued?.sessionId).toBeUndefined()
+    expect(events.some((e) => e.type === 'job_retrying')).toBe(true)
+    expect(events.some((e) => e.type === 'job_completed')).toBe(false)
+
+    // backoff elapses → a fresh session runs attempt 2
+    await vi.waitFor(() => expect(runners).toHaveLength(2))
+    runners[1]!.emit(successResult(100))
+    await tick()
+    const done = await queue.get(job.id)
+    expect(done).toMatchObject({ status: 'succeeded', attempt: 2 })
+    // usage accumulates across attempts (100 estimated + 100 from the result)
+    expect(done?.usage.tokens).toBe(200)
+    expect(done?.usage.numTurns).toBe(4)
+    expect(done?.usage.totalCostUsd).toBeCloseTo(0.25)
+    expect(done?.nextRunAt).toBeUndefined()
+  })
+
+  it('fails terminally once attempts are exhausted', async () => {
+    const { queue, runners, events } = makeQueue()
+    const job = await queue.submit(jobRequest({ attempts: 2, retryDelayMs: 1 }))
+    await tick()
+    runners[0]!.emit(errorResult())
+    await vi.waitFor(() => expect(runners).toHaveLength(2))
+    runners[1]!.emit(errorResult())
+    await tick()
+    expect(await queue.get(job.id)).toMatchObject({ status: 'failed', attempt: 2 })
+    expect(events.filter((e) => e.type === 'job_completed')).toHaveLength(1)
+  })
+
+  it('does not retry canceled jobs', async () => {
+    const { queue, runners } = makeQueue()
+    const job = await queue.submit(jobRequest({ attempts: 3, retryDelayMs: 1 }))
+    await tick()
+    await queue.cancel(job.id)
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(runners).toHaveLength(1)
+    expect((await queue.get(job.id))?.status).toBe('canceled')
+  })
+
+  it('kills runs that exceed the wall-clock cap, even when the CLI never responds', async () => {
+    const { queue, runners } = makeQueue({ maxJobDurationMs: 10, killGraceMs: 10 })
+    const job = await queue.submit(jobRequest())
+    await tick()
+    await vi.waitFor(() => expect(runners[0]!.interrupt).toHaveBeenCalled())
+    // stuck CLI: no turn_result ever arrives → force-finalized after the grace period
+    await vi.waitFor(async () => {
+      expect((await queue.get(job.id))?.status).toBe('failed')
+    })
+    expect((await queue.get(job.id))?.error).toMatch(/max duration/)
+    expect(runners[0]!.closed).toBe(true)
+    expect((await queue.stats()).running).toBe(0)
+  })
+
+  it('the per-job maxDurationMs tightens the server cap, never widens it', async () => {
+    const { queue, runners } = makeQueue({ maxJobDurationMs: 60_000, killGraceMs: 5 })
+    await queue.submit(jobRequest({ maxDurationMs: 5 }))
+    await tick()
+    await vi.waitFor(() => expect(runners[0]!.interrupt).toHaveBeenCalled())
+  })
+
+  it('prunes terminal jobs past the retention window, never queued/running ones', async () => {
+    const adapter = new InMemoryQueueAdapter()
+    const { queue, runners } = makeQueue({
+      adapter,
+      retention: { maxAgeMs: 0, sweepIntervalMs: 60_000 },
+    })
+    const job = await queue.submit(jobRequest())
+    await tick()
+    runners[0]!.emit(successResult())
+    // the post-completion sweep expires it (maxAgeMs 0 = immediately)
+    await vi.waitFor(async () => expect(await queue.get(job.id)).toBeNull())
+
+    const fresh = await queue.submit(jobRequest())
+    expect(await adapter.prune(0)).toBe(0)
+    expect(await queue.get(fresh.id)).not.toBeNull()
   })
 
   it("progress: 'completion' suppresses webhook progress but keeps lifecycle deliveries", async () => {

@@ -86,6 +86,8 @@ const worker = createWorkerServer({
     maxConcurrency: 2,          // concurrent job sessions
     sessionTokenLimit: 200_000, // tokens per job (input+output+cache); exceeding kills the run
     dailyTokenLimit: 2_000_000, // global budget per UTC day; queued jobs held once exhausted
+    maxJobDurationMs: 1_800_000,          // wall-clock watchdog: kills runs a stuck CLI would wedge
+    retention: { maxAgeMs: 86_400_000 },  // expire terminal jobs (in-memory grows unboundedly otherwise)
     // adapter: myRedisAdapter, // defaults to the bundled in-memory adapter
   },
 })
@@ -98,9 +100,16 @@ Schedule and control jobs with the client SDK (or plain REST — `POST/GET/DELET
 const job = await client.createJob({
   session: { cwd: '/srv/checkout', prompt: '/verify-content 42' },
   webhook: { url: 'https://my-app.test/hooks/claude', headers: { authorization: '…' } },
+  attempts: 3, // failed (not canceled) runs re-queue with exponential backoff
 })
-// job_started → job_progress (per assistant message / permission request) → job_completed
-// arrive at the webhook; poll client.getJob(job.id) or attach(job.sessionId) to watch live.
+// job_started → job_progress (per assistant message / permission request) → job_retrying (on a
+// failed attempt with attempts left) → job_completed arrive at the webhook; poll
+// client.getJob(job.id) or attach(job.sessionId) to watch live.
+
+// Or stream the whole queue over WS (`/v1/queue/ws`) instead of polling:
+const queueHandle = client.attachQueue()
+queueHandle.on('event', (e) => console.log(e.type, e.job.id))
+queueHandle.on('stats', (stats) => console.log(stats.running, 'running'))
 ```
 
 A job is one unattended run: the session executes the prompt, the first run result completes the

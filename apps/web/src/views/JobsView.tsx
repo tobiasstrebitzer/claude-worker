@@ -84,6 +84,7 @@ function ScheduleJobCard({ onScheduled }: { onScheduled: () => void }) {
   const [prompt, setPrompt] = useState('')
   const [mode, setMode] = useState<PermissionMode>('acceptEdits')
   const [maxTokens, setMaxTokens] = useState('')
+  const [attempts, setAttempts] = useState('')
   const [webhookUrl, setWebhookUrl] = useState('')
   const [creating, setCreating] = useState(false)
 
@@ -97,6 +98,11 @@ function ScheduleJobCard({ onScheduled }: { onScheduled: () => void }) {
       toast.error('Max tokens must be a positive number')
       return
     }
+    const attemptCount = attempts.trim() ? Number(attempts.trim()) : undefined
+    if (attemptCount !== undefined && (!Number.isInteger(attemptCount) || attemptCount < 1)) {
+      toast.error('Attempts must be a whole number of at least 1')
+      return
+    }
     setCreating(true)
     try {
       localStorage.setItem(CWD_KEY, cwd.trim())
@@ -108,6 +114,7 @@ function ScheduleJobCard({ onScheduled }: { onScheduled: () => void }) {
           settingSources: ['user', 'project'],
         },
         maxTokens: tokens,
+        attempts: attemptCount,
         webhook: webhookUrl.trim() ? { url: webhookUrl.trim() } : undefined,
       })
       setPrompt('')
@@ -174,6 +181,16 @@ function ScheduleJobCard({ onScheduled }: { onScheduled: () => void }) {
               className='min-w-28 font-mono'
             />
           </label>
+          <label className='flex min-w-0 flex-col gap-1'>
+            <span className='text-label font-medium text-fg-3'>Attempts (optional)</span>
+            <Input
+              value={attempts}
+              onChange={(e) => setAttempts(e.target.value)}
+              placeholder='1'
+              inputMode='numeric'
+              className='min-w-20 font-mono'
+            />
+          </label>
           <label className='flex min-w-0 flex-1 flex-col gap-1'>
             <span className='text-label font-medium text-fg-3'>Webhook URL (optional)</span>
             <Input
@@ -222,6 +239,14 @@ function JobRow({ job, onChanged }: { job: JobInfo; onChanged: () => void }) {
         <div className='flex flex-wrap gap-x-3 font-mono text-label text-fg-4'>
           <span className='truncate'>{job.cwd}</span>
           <span className='shrink-0'>{formatRelativeTime(job.finishedAt ?? job.startedAt ?? job.createdAt)}</span>
+          {job.maxAttempts !== undefined && job.maxAttempts > 1 ? (
+            <span className='shrink-0'>
+              attempt {job.attempt ?? 1}/{job.maxAttempts}
+              {job.status === 'queued' && job.nextRunAt !== undefined && job.nextRunAt > Date.now()
+                ? ' — retry pending'
+                : ''}
+            </span>
+          ) : null}
           {job.usage.tokens > 0 ? (
             <span className='shrink-0'>{formatTokens(job.usage.tokens)} tok</span>
           ) : null}
@@ -253,7 +278,7 @@ function JobRow({ job, onChanged }: { job: JobInfo; onChanged: () => void }) {
 }
 
 export function JobsView() {
-  const { jobs, stats, enabled, error, refresh } = useJobs()
+  const { jobs, stats, enabled, live, error, refresh } = useJobs()
   const sorted = [...jobs].sort((a, b) => b.createdAt - a.createdAt)
 
   return (
@@ -266,9 +291,16 @@ export function JobsView() {
               Scheduled one-shot runs with concurrency and token budgets.
             </p>
           </div>
-          <Button variant='ghost' size='icon-sm' aria-label='Refresh' onClick={() => void refresh()}>
-            <RefreshCw className='size-4' />
-          </Button>
+          <div className='flex items-center gap-2'>
+            {enabled ? (
+              <Badge variant={live ? 'success' : 'neutral'} dot>
+                {live ? 'Live' : 'Polling'}
+              </Badge>
+            ) : null}
+            <Button variant='ghost' size='icon-sm' aria-label='Refresh' onClick={() => void refresh()}>
+              <RefreshCw className='size-4' />
+            </Button>
+          </div>
         </header>
 
         {error ? (

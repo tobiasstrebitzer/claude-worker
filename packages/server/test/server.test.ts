@@ -2,7 +2,14 @@ import { createServer, type Server } from 'node:http'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import WebSocket from 'ws'
 import type { Options, Query, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
-import type { JobEvent, JobInfo, QueueStats, ServerFrame, SessionInfo } from '@claude-worker/protocol'
+import type {
+  JobEvent,
+  JobInfo,
+  QueueServerFrame,
+  QueueStats,
+  ServerFrame,
+  SessionInfo,
+} from '@claude-worker/protocol'
 import { createWorkerServer, type WorkerServer } from '../src/index.ts'
 
 function fakeHarness() {
@@ -378,6 +385,72 @@ describe('createWorkerServer', () => {
     } finally {
       await new Promise((resolve) => receiver.close(resolve))
     }
+  })
+
+  it('streams job lifecycle and stats over the queue WS', async () => {
+    const harness = fakeHarness()
+    running = createWorkerServer({
+      allowUnauthenticated: true,
+      allowedCwdRoots: ['/tmp'],
+      buildRunnerConfig: (req) => ({ ...req, queryFn: harness.queryFn }),
+      queue: { maxConcurrency: 1 },
+    })
+    const { port } = await running.listen(0, '127.0.0.1')
+    const base = `http://127.0.0.1:${port}/v1`
+
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/v1/queue/ws`)
+    const frames: QueueServerFrame[] = []
+    ws.on('message', (data) => frames.push(JSON.parse(String(data)) as QueueServerFrame))
+    await vi.waitFor(() => {
+      expect(frames.some((f) => f.type === 'queue_attached')).toBe(true)
+    })
+    const attached = frames.find((f) => f.type === 'queue_attached')
+    expect(attached?.type === 'queue_attached' && attached.stats.maxConcurrency).toBe(1)
+
+    const createRes = await fetch(`${base}/jobs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ session: { cwd: '/tmp/project', prompt: 'go' } }),
+    })
+    const { job } = (await createRes.json()) as { job: JobInfo }
+
+    const eventTypes = () =>
+      frames.filter((f) => f.type === 'job_event').map((f) => (f as { event: JobEvent }).event.type)
+    await vi.waitFor(() => {
+      expect(eventTypes()).toContain('job_submitted')
+      expect(eventTypes()).toContain('job_started')
+    })
+
+    harness.emit(initMessage)
+    harness.emit({
+      type: 'result',
+      subtype: 'success',
+      duration_ms: 500,
+      duration_api_ms: 400,
+      is_error: false,
+      num_turns: 1,
+      result: 'done',
+      stop_reason: 'end_turn',
+      total_cost_usd: 0.03,
+      usage: { input_tokens: 100, output_tokens: 50 },
+      modelUsage: {},
+      permission_denials: [],
+      uuid: 'uuid-r1',
+      session_id: 'sdk-1',
+    } as unknown as SDKMessage)
+
+    await vi.waitFor(() => {
+      const completed = frames.find(
+        (f) => f.type === 'job_event' && f.event.type === 'job_completed' && f.event.job.id === job.id,
+      )
+      expect(completed).toBeDefined()
+    })
+    // lifecycle changes push refreshed stats
+    await vi.waitFor(() => {
+      const stats = frames.filter((f) => f.type === 'queue_stats')
+      expect(stats.length).toBeGreaterThan(0)
+    })
+    ws.close()
   })
 
   it('lists SDK on-disk sessions via GET /sdk-sessions', async () => {

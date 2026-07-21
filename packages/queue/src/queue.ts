@@ -25,6 +25,17 @@ export type JobQueueOptions = {
   /** Global token budget per UTC day; when exhausted, queued jobs are held until the
    * day rolls over (running jobs finish and are accounted). */
   dailyTokenLimit?: number
+  /** Wall-clock cap per job run; exceeding it interrupts the run and fails the job.
+   * The watchdog for stuck CLIs — without it, a run that never yields a result keeps
+   * its job (and concurrency slot) forever. */
+  maxJobDurationMs?: number
+  /** How long a killed run (token/duration limit) may wind down after interrupt()
+   * before the queue force-finalizes it and closes the session. Default 5000. */
+  killGraceMs?: number
+  /** Expire terminal jobs: prune those finished more than `maxAgeMs` ago, sweeping
+   * every `sweepIntervalMs` (default min(maxAgeMs, 60s)) and after each completion.
+   * Unset = keep forever (the in-memory adapter then grows unboundedly). */
+  retention?: { maxAgeMs: number; sweepIntervalMs?: number }
   /** Patch job session configs (inject queryFn, env, tool policy) before they run. */
   buildRunnerConfig?: (req: CreateSessionRequest) => SessionRunnerConfig
   /** Webhook transport. Defaults to global fetch. */
@@ -49,6 +60,10 @@ type RunningJob = {
   finalized: boolean
   /** Per-job webhook chain so deliveries stay ordered. */
   deliveries: Promise<void>
+  /** Watchdog: fires killReason when the run exceeds its wall-clock cap. */
+  durationTimer?: ReturnType<typeof setTimeout>
+  /** Backstop after a kill: force-finalizes if interrupt() never yields a result. */
+  forceTimer?: ReturnType<typeof setTimeout>
 }
 
 const dayKey = (epochMs: number): string => new Date(epochMs).toISOString().slice(0, 10)
@@ -98,11 +113,20 @@ export class JobQueue {
   #pumping = false
   #closed = false
   #offWork: (() => void) | undefined
+  #sweepTimer: ReturnType<typeof setInterval> | undefined
+  /** Pending retry-backoff wakeups, cleared on close(). */
+  #retryTimers = new Set<ReturnType<typeof setTimeout>>()
 
   constructor(options: JobQueueOptions) {
     this.#options = options
     this.#adapter = options.adapter ?? new InMemoryQueueAdapter()
     this.#offWork = this.#adapter.onWork?.(() => void this.#pump())
+    const retention = options.retention
+    if (retention) {
+      const interval = retention.sweepIntervalMs ?? Math.min(retention.maxAgeMs, 60_000)
+      this.#sweepTimer = setInterval(() => this.#sweep(), interval)
+      this.#sweepTimer.unref?.()
+    }
   }
 
   async submit(request: CreateJobRequest): Promise<JobInfo> {
@@ -112,16 +136,29 @@ export class JobQueue {
     if (request.session.resume || request.session.forkSession) {
       throw new Error('resume/forkSession are not supported for queued jobs')
     }
+    const attempts = request.attempts ?? 1
+    if (!Number.isInteger(attempts) || attempts < 1) {
+      throw new Error('attempts must be a positive integer')
+    }
+    if (request.retryDelayMs !== undefined && !(request.retryDelayMs >= 0)) {
+      throw new Error('retryDelayMs must be >= 0')
+    }
     const info: JobInfo = {
       id: randomUUID(),
       status: 'queued',
       cwd: request.session.cwd,
       prompt: request.session.prompt,
       createdAt: Date.now(),
+      attempt: 1,
+      maxAttempts: attempts,
       usage: { tokens: 0, totalCostUsd: 0, numTurns: 0 },
       meta: request.meta,
     }
-    await this.#adapter.add({ info, request })
+    const record: JobRecord = { info, request }
+    await this.#adapter.add(record)
+    this.#emit(record, { type: 'job_submitted', job: info, ts: Date.now() }, undefined, {
+      skipWebhook: true,
+    })
     void this.#pump()
     return info
   }
@@ -143,7 +180,7 @@ export class JobQueue {
       running.canceled = true
       running.killReason = 'canceled'
       await this.#finalize(running, {
-        usage: { ...running.record.info.usage, tokens: running.estimatedTokens },
+        usage: { tokens: running.estimatedTokens, totalCostUsd: 0, numTurns: 0 },
         status: 'canceled',
         error: 'canceled',
       })
@@ -179,6 +216,17 @@ export class JobQueue {
   close(): void {
     this.#closed = true
     this.#offWork?.()
+    clearInterval(this.#sweepTimer)
+    for (const timer of this.#retryTimers) clearTimeout(timer)
+    this.#retryTimers.clear()
+  }
+
+  #sweep(): void {
+    const retention = this.#options.retention
+    if (!retention) return
+    this.#adapter.prune(retention.maxAgeMs).catch(() => {
+      // sweep failures must not break the queue; the next sweep retries
+    })
   }
 
   async #pump(): Promise<void> {
@@ -231,7 +279,31 @@ export class JobQueue {
     })
     if (updated) job.record = updated
     this.#emit(job.record, { type: 'job_started', job: job.record.info, ts: Date.now() })
+    const durationLimit = this.#effectiveDurationLimit(record.request)
+    if (durationLimit !== undefined) {
+      job.durationTimer = setTimeout(
+        () => this.#kill(job, `job exceeded max duration (${durationLimit}ms)`),
+        durationLimit,
+      )
+      job.durationTimer.unref?.()
+    }
     job.unsubscribe = runner.subscribe((event) => void this.#handleEvent(job, event))
+  }
+
+  /** Kill a run: interrupt it and, if the CLI never yields a result (stuck process),
+   * force-finalize after the grace period so the job can't hang forever. */
+  #kill(job: RunningJob, reason: string): void {
+    if (job.finalized || job.killReason) return
+    job.killReason = reason
+    void job.runner.interrupt().catch(() => {})
+    job.forceTimer = setTimeout(() => {
+      void this.#finalize(job, {
+        usage: { tokens: job.estimatedTokens, totalCostUsd: 0, numTurns: 0 },
+        status: job.canceled ? 'canceled' : 'failed',
+        error: reason,
+      })
+    }, this.#options.killGraceMs ?? 5000)
+    job.forceTimer.unref?.()
   }
 
   async #handleEvent(job: RunningJob, event: SessionEvent): Promise<void> {
@@ -244,9 +316,8 @@ export class JobQueue {
         if (event.replay) return
         job.estimatedTokens += sumUsage(event.message.usage)
         const limit = this.#effectiveTokenLimit(job.record.request)
-        if (limit !== undefined && job.estimatedTokens > limit && !job.killReason) {
-          job.killReason = `session token limit exceeded (${job.estimatedTokens} > ${limit})`
-          void job.runner.interrupt().catch(() => {})
+        if (limit !== undefined && job.estimatedTokens > limit) {
+          this.#kill(job, `session token limit exceeded (${job.estimatedTokens} > ${limit})`)
         }
         const progress = textPreview(event.message)
         if (progress) this.#progress(job, progress)
@@ -288,14 +359,14 @@ export class JobQueue {
       }
       case 'session_error':
         await this.#finalize(job, {
-          usage: { ...job.record.info.usage, tokens: job.estimatedTokens },
+          usage: { tokens: job.estimatedTokens, totalCostUsd: 0, numTurns: 0 },
           status: job.canceled ? 'canceled' : 'failed',
           error: job.killReason ?? event.message,
         })
         return
       case 'session_closed':
         await this.#finalize(job, {
-          usage: { ...job.record.info.usage, tokens: job.estimatedTokens },
+          usage: { tokens: job.estimatedTokens, totalCostUsd: 0, numTurns: 0 },
           status: job.canceled ? 'canceled' : 'failed',
           error: job.killReason ?? 'session closed before completing',
         })
@@ -312,16 +383,67 @@ export class JobQueue {
     return limits.length > 0 ? Math.min(...limits) : undefined
   }
 
+  #effectiveDurationLimit(request: CreateJobRequest): number | undefined {
+    const limits = [request.maxDurationMs, this.#options.maxJobDurationMs].filter(
+      (n): n is number => typeof n === 'number',
+    )
+    return limits.length > 0 ? Math.min(...limits) : undefined
+  }
+
+  /** End the current run. `patch.usage` is this attempt's usage alone — prior attempts'
+   * totals live on the stored info and are folded in here. A failed (not canceled) run
+   * with attempts left re-queues with backoff instead of completing. */
   async #finalize(job: RunningJob, patch: Partial<JobInfo>): Promise<void> {
     if (job.finalized) return
     job.finalized = true
     job.unsubscribe()
+    clearTimeout(job.durationTimer)
+    clearTimeout(job.forceTimer)
     this.#running.delete(job.record.info.id)
     job.runner.close('server')
-    const tokens = patch.usage?.tokens ?? 0
-    if (tokens > 0) await this.#adapter.addDailyTokens(dayKey(Date.now()), tokens)
+    const attemptUsage = patch.usage ?? { tokens: 0, totalCostUsd: 0, numTurns: 0 }
+    if (attemptUsage.tokens > 0) {
+      await this.#adapter.addDailyTokens(dayKey(Date.now()), attemptUsage.tokens)
+    }
+    const prior = job.record.info.usage
+    const usage = {
+      tokens: prior.tokens + attemptUsage.tokens,
+      totalCostUsd: prior.totalCostUsd + attemptUsage.totalCostUsd,
+      numTurns: prior.numTurns + attemptUsage.numTurns,
+    }
+    const attempt = job.record.info.attempt ?? 1
+    const maxAttempts = job.record.request.attempts ?? 1
+    if (patch.status === 'failed' && attempt < maxAttempts && !this.#closed) {
+      const baseDelay = job.record.request.retryDelayMs ?? 5000
+      const delay = baseDelay * 2 ** (attempt - 1)
+      const updated = await this.#adapter.update(job.record.info.id, {
+        status: 'queued',
+        attempt: attempt + 1,
+        nextRunAt: Date.now() + delay,
+        error: patch.error,
+        usage,
+        sessionId: undefined,
+        sdkSessionId: undefined,
+        startedAt: undefined,
+        result: undefined,
+      })
+      if (updated) {
+        job.record = updated
+        this.#emit(updated, { type: 'job_retrying', job: updated.info, ts: Date.now() }, job)
+        const timer = setTimeout(() => {
+          this.#retryTimers.delete(timer)
+          void this.#pump()
+        }, delay)
+        timer.unref?.()
+        this.#retryTimers.add(timer)
+      }
+      void this.#pump()
+      return
+    }
     const updated = await this.#adapter.update(job.record.info.id, {
       ...patch,
+      usage,
+      nextRunAt: undefined,
       finishedAt: Date.now(),
     })
     if (updated) {
@@ -330,6 +452,7 @@ export class JobQueue {
       // deliveries (the running-map entry is already gone).
       this.#emit(job.record, { type: 'job_completed', job: updated.info, ts: Date.now() }, job)
     }
+    this.#sweep()
     void this.#pump()
   }
 
@@ -348,14 +471,19 @@ export class JobQueue {
   }
 
   /** Notify the local observer and, when configured, the job's webhook (ordered per job). */
-  #emit(record: JobRecord, event: JobEvent, chainOwner?: RunningJob): void {
+  #emit(
+    record: JobRecord,
+    event: JobEvent,
+    chainOwner?: RunningJob,
+    { skipWebhook = false }: { skipWebhook?: boolean } = {},
+  ): void {
     try {
       this.#options.onEvent?.(event)
     } catch {
       // observer errors must not break the queue
     }
     const webhook = record.request.webhook
-    if (!webhook) return
+    if (!webhook || skipWebhook) return
     const running = chainOwner ?? this.#running.get(record.info.id)
     const deliver = () => this.#deliver(webhook.url, webhook.headers, event)
     if (running) running.deliveries = running.deliveries.then(deliver)

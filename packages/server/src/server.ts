@@ -11,6 +11,7 @@ import {
   type CreateJobRequest,
   type CreateSessionRequest,
   type JobEvent,
+  type QueueServerFrame,
   type SdkSessionSummary,
   type ServerFrame,
 } from '@claude-worker/protocol'
@@ -83,6 +84,13 @@ export type QueueServerOptions = {
   sessionTokenLimit?: number
   /** Global job-token budget per UTC day; queued jobs are held once exhausted. */
   dailyTokenLimit?: number
+  /** Wall-clock cap per job run — the watchdog against stuck CLIs. */
+  maxJobDurationMs?: number
+  /** Grace between interrupting a killed run and force-closing it. Default 5000. */
+  killGraceMs?: number
+  /** Expire terminal jobs after `maxAgeMs` (the in-memory adapter otherwise grows
+   * unboundedly). */
+  retention?: { maxAgeMs: number; sweepIntervalMs?: number }
   /** Queue backend. Defaults to the bundled in-memory adapter (single process,
    * no persistence) — redis/bullmq/pubsub adapters implement the same interface. */
   adapter?: QueueAdapter
@@ -148,9 +156,35 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
   const wss = new WebSocketServer({ noServer: true })
   let subscriptionNoticeShown = false
 
+  // Live queue watchers (`{basePath}/queue/ws`): every job event is fanned out, and
+  // lifecycle changes push refreshed stats so dashboards stay current without polling.
+  const queueSockets = new Set<WebSocket>()
+  const sendQueueFrame = (ws: WebSocket, frame: QueueServerFrame): void => {
+    if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(frame))
+  }
+  const broadcastJobEvent = (event: JobEvent): void => {
+    if (queueSockets.size === 0) return
+    for (const ws of queueSockets) sendQueueFrame(ws, { type: 'job_event', event })
+    if (event.type !== 'job_progress') {
+      void queue
+        ?.stats()
+        .then((stats) => {
+          for (const ws of queueSockets) sendQueueFrame(ws, { type: 'queue_stats', stats })
+        })
+        .catch(() => {})
+    }
+  }
+
   const queue = options.queue
     ? new JobQueue({
         ...options.queue,
+        onEvent: (event) => {
+          try {
+            options.queue?.onEvent?.(event)
+          } finally {
+            broadcastJobEvent(event)
+          }
+        },
         // Job sessions are ordinary registry sessions (attachable/watchable) and go
         // through the same config hook and auth-provenance watcher as client sessions.
         createRunner: (config) => {
@@ -390,6 +424,30 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
 
   server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     void (async () => {
+      const pathname = new URL(req.url ?? '/', 'http://internal').pathname
+      if (pathname === basePath + '/queue/ws') {
+        if (!queue) {
+          socket.write('HTTP/1.1 404 Not Found\r\n\r\n')
+          socket.destroy()
+          return
+        }
+        if (!(await authenticate(req))) {
+          socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n')
+          socket.destroy()
+          return
+        }
+        wss.handleUpgrade(req, socket, head, (ws) => {
+          queueSockets.add(ws)
+          ws.on('close', () => queueSockets.delete(ws))
+          void queue
+            .stats()
+            .then((stats) =>
+              sendQueueFrame(ws, { type: 'queue_attached', protocolVersion: PROTOCOL_VERSION, stats }),
+            )
+            .catch(() => {})
+        })
+        return
+      }
       const route = parseRoute(req.url ?? '/')
       if (!route?.ws || !route.id) {
         socket.destroy()
@@ -498,6 +556,8 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
       new Promise((resolve) => {
         queue?.close()
         registry.closeAll()
+        for (const ws of queueSockets) ws.close()
+        queueSockets.clear()
         wss.close()
         server.close(() => resolve())
         server.closeAllConnections()

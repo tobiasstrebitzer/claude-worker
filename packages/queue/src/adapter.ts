@@ -17,15 +17,20 @@ export interface QueueAdapter {
   /** Persist a newly submitted job (status 'queued'). */
   add(job: JobRecord): Promise<void>
   /**
-   * Atomically claim the oldest queued job, transitioning it to 'running'.
-   * Returns null when nothing is claimable.
+   * Atomically claim the oldest claimable queued job, transitioning it to 'running'.
+   * A queued job whose `nextRunAt` is in the future (retry backoff) is not claimable
+   * yet. Returns null when nothing is claimable.
    */
   claimNext(): Promise<JobRecord | null>
   get(id: string): Promise<JobRecord | null>
   /** All known jobs, oldest first. Backends may cap retention of terminal jobs. */
   list(): Promise<JobRecord[]>
-  /** Merge a partial info patch into a job. Returns the updated record, or null if unknown. */
+  /** Merge a partial info patch into a job (a key explicitly set to undefined clears
+   * that field). Returns the updated record, or null if unknown. */
   update(id: string, patch: Partial<JobInfo>): Promise<JobRecord | null>
+  /** Delete terminal jobs (succeeded/failed/canceled) that finished more than
+   * `olderThanMs` ago. Returns how many were removed. */
+  prune(olderThanMs: number): Promise<number>
   /**
    * Add tokens to a day's global counter and return the new total. `dayKey` is a UTC
    * 'YYYY-MM-DD'; keeping the counter in the adapter makes daily budgets hold across
@@ -53,8 +58,12 @@ export class InMemoryQueueAdapter implements QueueAdapter {
   }
 
   claimNext(): Promise<JobRecord | null> {
+    const now = Date.now()
     for (const job of this.#jobs.values()) {
-      if (job.info.status === 'queued') {
+      if (
+        job.info.status === 'queued' &&
+        (job.info.nextRunAt === undefined || job.info.nextRunAt <= now)
+      ) {
         job.info = { ...job.info, status: 'running' }
         return Promise.resolve(job)
       }
@@ -75,6 +84,20 @@ export class InMemoryQueueAdapter implements QueueAdapter {
     if (!job) return Promise.resolve(null)
     job.info = { ...job.info, ...patch }
     return Promise.resolve(job)
+  }
+
+  prune(olderThanMs: number): Promise<number> {
+    const cutoff = Date.now() - olderThanMs
+    let removed = 0
+    for (const [id, job] of this.#jobs) {
+      const { status, finishedAt } = job.info
+      const terminal = status === 'succeeded' || status === 'failed' || status === 'canceled'
+      if (terminal && (finishedAt ?? 0) <= cutoff) {
+        this.#jobs.delete(id)
+        removed++
+      }
+    }
+    return Promise.resolve(removed)
   }
 
   addDailyTokens(dayKey: string, tokens: number): Promise<number> {

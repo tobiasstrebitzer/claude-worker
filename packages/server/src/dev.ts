@@ -16,6 +16,10 @@ const { listen } = createWorkerServer({
     maxConcurrency: envNumber('CLAUDE_WORKER_QUEUE_CONCURRENCY') ?? 2,
     sessionTokenLimit: envNumber('CLAUDE_WORKER_QUEUE_SESSION_TOKENS'),
     dailyTokenLimit: envNumber('CLAUDE_WORKER_QUEUE_DAILY_TOKENS'),
+    // Watchdog + retention keep the dev queue from wedging on a stuck CLI or
+    // growing without bound across a long-lived server.
+    maxJobDurationMs: envNumber('CLAUDE_WORKER_QUEUE_MAX_JOB_MS') ?? 30 * 60 * 1000,
+    retention: { maxAgeMs: envNumber('CLAUDE_WORKER_QUEUE_RETENTION_MS') ?? 24 * 60 * 60 * 1000 },
   },
 })
 

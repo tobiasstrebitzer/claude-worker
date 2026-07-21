@@ -428,6 +428,13 @@ export type CreateJobRequest = {
   webhook?: WebhookConfig
   /** Per-job token cap; the effective cap is min(this, the server's sessionTokenLimit). */
   maxTokens?: number
+  /** Per-job wall-clock cap; the effective cap is min(this, the server's maxJobDurationMs). */
+  maxDurationMs?: number
+  /** Total run attempts: failed (not canceled) runs re-queue until this many attempts
+   * have been made. Default 1 (no retries). */
+  attempts?: number
+  /** Delay before the first retry, doubled for each subsequent one. Default 5000. */
+  retryDelayMs?: number
   /** Host bookkeeping echoed back on JobInfo. */
   meta?: Record<string, unknown>
 }
@@ -461,9 +468,16 @@ export type JobInfo = {
   createdAt: number
   startedAt?: number
   finishedAt?: number
+  /** 1-based run attempt this info reflects. */
+  attempt?: number
+  /** Total attempts configured on the request (see CreateJobRequest.attempts). */
+  maxAttempts?: number
+  /** For a job re-queued by retry backoff: earliest time the next attempt may start. */
+  nextRunAt?: number
+  /** Cumulative across attempts. */
   usage: JobUsage
   result?: JobResult
-  /** Failure or cancellation reason. */
+  /** Failure or cancellation reason (for a queued retry: the previous attempt's error). */
   error?: string
   meta?: Record<string, unknown>
 }
@@ -475,10 +489,15 @@ export type JobProgress = {
   preview?: string
 }
 
-/** Webhook delivery payload (also the queue's local event shape). */
+/** Webhook delivery payload (also the queue's local event shape). `job_submitted` goes
+ * to local observers and the queue WS only — the submitter already has the POST
+ * response, so webhooks start at `job_started`. `job_retrying` marks a failed run that
+ * was re-queued (`job.nextRunAt` says when); `job_completed` is always terminal. */
 export type JobEvent =
+  | { type: 'job_submitted'; job: JobInfo; ts: number }
   | { type: 'job_started'; job: JobInfo; ts: number }
   | { type: 'job_progress'; job: JobInfo; progress: JobProgress; ts: number }
+  | { type: 'job_retrying'; job: JobInfo; ts: number }
   | { type: 'job_completed'; job: JobInfo; ts: number }
 
 export type QueueStats = {
@@ -492,6 +511,14 @@ export type QueueStats = {
   /** True when the daily budget is exhausted and queued jobs are being held. */
   paused: boolean
 }
+
+/** Frames sent on the queue WS (`{basePath}/queue/ws`). The stream is one-way
+ * (server→client): every job's lifecycle as it happens, plus refreshed stats after
+ * lifecycle changes. Clients send nothing; job mutations stay on REST. */
+export type QueueServerFrame =
+  | { type: 'queue_attached'; protocolVersion: number; stats: QueueStats }
+  | { type: 'job_event'; event: JobEvent }
+  | { type: 'queue_stats'; stats: QueueStats }
 
 export type CreateJobResponse = { job: JobInfo }
 export type GetJobResponse = { job: JobInfo }

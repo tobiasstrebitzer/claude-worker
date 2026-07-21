@@ -2,11 +2,16 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { JobInfo, QueueStats } from '@claude-worker/protocol'
 import { client } from './client.ts'
 
-/** Poll the server's job queue. `enabled: false` means the server has no queue configured. */
-export function useJobs(intervalMs = 3000) {
+/**
+ * Live view of the server's job queue: jobs stream in over `/queue/ws` (upserted by id),
+ * with a slow REST poll as a safety net and for the initial list. `enabled: false` means
+ * the server has no queue configured; `live` reflects the WS connection.
+ */
+export function useJobs(fallbackIntervalMs = 15_000) {
   const [jobs, setJobs] = useState<JobInfo[]>([])
   const [stats, setStats] = useState<QueueStats | undefined>()
   const [enabled, setEnabled] = useState(true)
+  const [live, setLive] = useState(false)
   const [error, setError] = useState<string | undefined>()
   const timer = useRef<ReturnType<typeof setInterval> | undefined>(undefined)
 
@@ -30,9 +35,35 @@ export function useJobs(intervalMs = 3000) {
 
   useEffect(() => {
     void refresh()
-    timer.current = setInterval(() => void refresh(), intervalMs)
+    timer.current = setInterval(() => void refresh(), fallbackIntervalMs)
     return () => clearInterval(timer.current)
-  }, [refresh, intervalMs])
+  }, [refresh, fallbackIntervalMs])
 
-  return { jobs, stats, enabled, error, refresh }
+  // Attach the WS only once REST confirmed a queue exists — a queue-less server
+  // refuses the socket and the handle would loop on reconnect.
+  const ready = enabled && stats !== undefined
+  useEffect(() => {
+    if (!ready) return
+    const handle = client.attachQueue()
+    const offs = [
+      // Reconnects have no replay: re-list to catch anything missed while detached.
+      handle.on('attached', () => void refresh()),
+      handle.on('stats', setStats),
+      handle.on('connectionChange', setLive),
+      handle.on('event', (event) => {
+        setJobs((prev) => {
+          const next = prev.some((j) => j.id === event.job.id)
+            ? prev.map((j) => (j.id === event.job.id ? event.job : j))
+            : [...prev, event.job]
+          return next
+        })
+      }),
+    ]
+    return () => {
+      for (const off of offs) off()
+      handle.detach()
+    }
+  }, [ready, refresh])
+
+  return { jobs, stats, enabled, live, error, refresh }
 }
