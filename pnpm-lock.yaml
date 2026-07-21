@@ -175,6 +175,31 @@ importers:
         specifier: ^0.21.10
         version: 0.21.10(@typescript/native-preview@7.0.0-dev.20260707.2)(oxc-resolver@11.24.2)(typescript@6.0.3)
 
+  packages/queue:
+    dependencies:
+      '@claude-worker/core':
+        specifier: workspace:*
+        version: link:../core
+      '@claude-worker/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+    devDependencies:
+      '@anthropic-ai/claude-agent-sdk':
+        specifier: ^0.2.86
+        version: 0.2.141(zod@4.4.3)
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.20.1
+      rimraf:
+        specifier: ^6.1.3
+        version: 6.1.3
+      tsdown:
+        specifier: ^0.21.10
+        version: 0.21.10(@typescript/native-preview@7.0.0-dev.20260707.2)(oxc-resolver@11.24.2)(typescript@6.0.3)
+      vitest:
+        specifier: ^3.2.0
+        version: 3.2.7(@types/debug@4.1.13)(@types/node@22.20.1)(jiti@2.7.0)(lightningcss@1.32.0)
+
   packages/react:
     dependencies:
       '@claude-worker/client':
@@ -211,6 +236,9 @@ importers:
       '@claude-worker/protocol':
         specifier: workspace:*
         version: link:../protocol
+      '@claude-worker/queue':
+        specifier: workspace:*
+        version: link:../queue
       ws:
         specifier: ^8.18.0
         version: 8.21.1

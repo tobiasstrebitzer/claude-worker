@@ -1,8 +1,12 @@
 import type {
   ContentBlock,
+  ContextUsage,
   ModelOption,
+  PermissionMode,
   PermissionRequest,
+  RateLimitInfo,
   SessionEvent,
+  SessionInfo,
   SessionStatus,
   SlashCommandInfo,
   ToolResultBlock,
@@ -52,6 +56,13 @@ export type TranscriptState = {
   models?: ModelOption[]
   /** Slash commands the CLI accepts (from the `capabilities` event). */
   commands?: SlashCommandInfo[]
+  /** Seeded from `system_init`, updated on `permission_mode_changed`. */
+  permissionMode?: PermissionMode
+  /** Latest context-window snapshot; absent until the first turn completes. */
+  contextUsage?: ContextUsage
+  /** Latest rate-limit snapshot per window ('five_hour', 'seven_day', ...).
+   * Absent for API-key sessions — render nothing, not 0%. */
+  rateLimits?: Record<string, RateLimitInfo>
   items: TranscriptItem[]
   pendingApprovals: PermissionRequest[]
   totalCostUsd: number
@@ -93,6 +104,24 @@ function upsert(items: TranscriptItem[], item: TranscriptItem): TranscriptItem[]
   return next
 }
 
+/**
+ * Seed transcript state from the attach snapshot (the `attached` frame's SessionInfo).
+ * A promptless session emits no `system_init` until its first message, so fields like
+ * `permissionMode` and `model` would otherwise stay empty — fill only what events
+ * haven't set yet; the event stream stays authoritative.
+ */
+export function seedFromSessionInfo(state: TranscriptState, info: SessionInfo): TranscriptState {
+  return {
+    ...state,
+    // Before any event has arrived, the snapshot status is fresher than 'starting'.
+    status: state.lastSeq === 0 ? info.status : state.status,
+    model: state.model ?? info.model,
+    permissionMode: state.permissionMode ?? info.permissionMode,
+    cwd: state.cwd ?? info.cwd,
+    sdkSessionId: state.sdkSessionId ?? info.sdkSessionId,
+  }
+}
+
 export function applyEvent(state: TranscriptState, event: SessionEvent): TranscriptState {
   if (event.seq <= state.lastSeq) return state
   const base: TranscriptState = { ...state, lastSeq: event.seq }
@@ -104,6 +133,7 @@ export function applyEvent(state: TranscriptState, event: SessionEvent): Transcr
         model: event.model,
         cwd: event.cwd,
         sdkSessionId: event.sdkSessionId,
+        permissionMode: event.permissionMode,
       }
 
     case 'status_changed':
@@ -115,6 +145,19 @@ export function applyEvent(state: TranscriptState, event: SessionEvent): Transcr
     case 'model_changed':
       // undefined = reset to the server default; keep showing the last known model.
       return event.model === undefined ? base : { ...base, model: event.model }
+
+    case 'permission_mode_changed':
+      return { ...base, permissionMode: event.mode }
+
+    case 'context_usage':
+      return { ...base, contextUsage: event.usage }
+
+    case 'rate_limit': {
+      // Keyed by window so five_hour and seven_day updates don't clobber each other.
+      const key = event.info.rateLimitType
+      if (!key) return base
+      return { ...base, rateLimits: { ...base.rateLimits, [key]: event.info } }
+    }
 
     case 'user_message': {
       let items = base.items

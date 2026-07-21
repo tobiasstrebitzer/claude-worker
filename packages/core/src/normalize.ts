@@ -7,12 +7,14 @@ export function toApiMessage(message: unknown): ApiMessage {
     content: string | ContentBlock[]
     model?: string
     stop_reason?: string | null
+    usage?: ApiMessage['usage']
   }
   return {
     role: m.role ?? 'assistant',
     content: m.content,
     model: m.model,
     stop_reason: m.stop_reason,
+    usage: m.usage,
   }
 }
 
@@ -57,6 +59,17 @@ export function normalizeSdkMessage(msg: SDKMessage): SessionEventBody | null {
         result: msg.subtype === 'success' ? msg.result : undefined,
         errors: msg.subtype === 'success' ? undefined : msg.errors,
         usage: msg.usage,
+      }
+    case 'rate_limit_event':
+      return {
+        type: 'rate_limit',
+        info: {
+          status: msg.rate_limit_info.status,
+          rateLimitType: msg.rate_limit_info.rateLimitType,
+          utilization: msg.rate_limit_info.utilization,
+          resetsAt: msg.rate_limit_info.resetsAt,
+          isUsingOverage: msg.rate_limit_info.isUsingOverage,
+        },
       }
     case 'system':
       // init and session_state_changed are handled by the runner directly.

@@ -88,6 +88,7 @@ export class SessionRunner {
   #lastActivityAt: number | undefined
   #input = new InputQueue()
   #query: Query | undefined
+  #capabilitiesEmitted = false
   #started = false
   #closed = false
   #runPromise: Promise<void> | undefined
@@ -191,6 +192,7 @@ export class SessionRunner {
   async setPermissionMode(mode: PermissionMode): Promise<void> {
     await this.#query?.setPermissionMode(mode)
     this.#permissionMode = mode
+    this.#emit({ type: 'permission_mode_changed', mode })
   }
 
   /** Switch the model for subsequent responses; undefined = back to the default. */
@@ -241,8 +243,14 @@ export class SessionRunner {
       this.#query = queryFn({ prompt: this.#input, options: this.#buildOptions() })
       // Without an initial prompt the CLI stays silent (no init handshake) until the
       // first message arrives, so 'starting' would never resolve — the session is
-      // already accepting input, which is what 'idle' means.
-      if (!this.#config.prompt) this.#setStatus('idle')
+      // already accepting input, which is what 'idle' means. The control channel
+      // does answer before init, though — fetch capabilities and a context baseline
+      // now so promptless sessions aren't blank until their first turn.
+      if (!this.#config.prompt) {
+        this.#setStatus('idle')
+        void this.#fetchCapabilities()
+        void this.#fetchContextUsage()
+      }
       for await (const message of this.#query) {
         this.#handleMessage(message)
       }
@@ -351,6 +359,7 @@ export class SessionRunner {
       })
       this.#setStatus('running')
       void this.#fetchCapabilities()
+      void this.#fetchContextUsage()
       return
     }
     if (msg.type === 'system' && msg.subtype === 'session_state_changed') {
@@ -369,14 +378,19 @@ export class SessionRunner {
         this.#numTurns = body.numTurns
         // Fallback for SDK versions without session_state_changed.
         if (this.#pending.size === 0) this.#setStatus('idle')
+        // Context usage moves every turn; the poll is a cheap control request.
+        void this.#fetchContextUsage()
       }
     }
   }
 
-  /** After init, ask the CLI what models/commands it supports and surface them as an
-   * event (replayed to late attachers). Optional-chained: injected fake queries in
-   * tests may not implement these, and a failure must not affect the session. */
+  /** Ask the CLI what models/commands it supports and surface them as an event
+   * (replayed to late attachers). Called eagerly for promptless sessions and again
+   * on init — the flag keeps it a single emit. Optional-chained: injected fake
+   * queries in tests may not implement these, and a failure must not affect the
+   * session. */
   async #fetchCapabilities(): Promise<void> {
+    if (this.#capabilitiesEmitted) return
     const query = this.#query
     if (typeof query?.supportedModels !== 'function' || typeof query.supportedCommands !== 'function') {
       return
@@ -386,7 +400,8 @@ export class SessionRunner {
         query.supportedModels(),
         query.supportedCommands(),
       ])
-      if (this.#closed) return
+      if (this.#closed || this.#capabilitiesEmitted) return
+      this.#capabilitiesEmitted = true
       this.#emit({
         type: 'capabilities',
         models: models.map((m) => ({
@@ -403,6 +418,33 @@ export class SessionRunner {
       })
     } catch {
       // Capabilities are best-effort decoration; the session works without them.
+    }
+  }
+
+  /** Snapshot the context window after a turn and surface it as an event. Optional-chained
+   * and best-effort for the same reasons as #fetchCapabilities. */
+  async #fetchContextUsage(): Promise<void> {
+    const query = this.#query
+    if (typeof query?.getContextUsage !== 'function') return
+    try {
+      const usage = await query.getContextUsage()
+      if (this.#closed) return
+      this.#emit({
+        type: 'context_usage',
+        usage: {
+          categories: usage.categories.map((c) => ({
+            name: c.name,
+            tokens: c.tokens,
+            color: c.color,
+          })),
+          totalTokens: usage.totalTokens,
+          maxTokens: usage.maxTokens,
+          percentage: usage.percentage,
+          model: usage.model,
+        },
+      })
+    } catch {
+      // Usage is best-effort decoration; the session works without it.
     }
   }
 

@@ -1,6 +1,7 @@
 export { createWorkerServer } from './server.ts'
 export type {
   Authenticator,
+  QueueServerOptions,
   SdkSessionLister,
   WorkerServer,
   WorkerServerOptions,

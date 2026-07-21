@@ -4,10 +4,13 @@ import { resolve as resolvePath, sep } from 'node:path'
 import { WebSocketServer, type WebSocket } from 'ws'
 import { listSessions as sdkListSessions } from '@anthropic-ai/claude-agent-sdk'
 import type { SessionRunner, SessionRunnerConfig } from '@claude-worker/core'
+import { JobQueue, type QueueAdapter } from '@claude-worker/queue'
 import {
   PROTOCOL_VERSION,
   type ClientFrame,
+  type CreateJobRequest,
   type CreateSessionRequest,
+  type JobEvent,
   type SdkSessionSummary,
   type ServerFrame,
 } from '@claude-worker/protocol'
@@ -68,11 +71,33 @@ export type WorkerServerOptions = {
   /** Injectable lister for GET /sdk-sessions (tests). Defaults to the SDK's listSessions,
    * which reads the Agent SDK's on-disk session store. */
   listSdkSessions?: SdkSessionLister
+  /** Enable the job queue (`/jobs` + `/queue` routes). Jobs run as ordinary registry
+   * sessions — attachable over the sessions WS — governed by these limits. */
+  queue?: QueueServerOptions
+}
+
+export type QueueServerOptions = {
+  /** Concurrent job sessions. Default 1. */
+  maxConcurrency?: number
+  /** Token cap per job session (input+output+cache tokens); exceeding it kills the run. */
+  sessionTokenLimit?: number
+  /** Global job-token budget per UTC day; queued jobs are held once exhausted. */
+  dailyTokenLimit?: number
+  /** Queue backend. Defaults to the bundled in-memory adapter (single process,
+   * no persistence) — redis/bullmq/pubsub adapters implement the same interface. */
+  adapter?: QueueAdapter
+  /** Webhook delivery attempts per event (default 3, exponential backoff). */
+  webhookAttempts?: number
+  webhookRetryDelayMs?: number
+  /** Local observer for job lifecycle events (in addition to per-job webhooks). */
+  onEvent?: (event: JobEvent) => void
 }
 
 export type WorkerServer = {
   server: Server
   registry: SessionRegistry
+  /** The job queue, when `queue` options were provided. */
+  queue?: JobQueue
   listen: (port: number, host?: string) => Promise<{ port: number }>
   close: () => Promise<void>
 }
@@ -122,6 +147,20 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
   const registry = new SessionRegistry()
   const wss = new WebSocketServer({ noServer: true })
   let subscriptionNoticeShown = false
+
+  const queue = options.queue
+    ? new JobQueue({
+        ...options.queue,
+        // Job sessions are ordinary registry sessions (attachable/watchable) and go
+        // through the same config hook and auth-provenance watcher as client sessions.
+        createRunner: (config) => {
+          const runner = registry.create(config)
+          watchAuthSource(runner)
+          return runner
+        },
+        buildRunnerConfig,
+      })
+    : undefined
 
   // Watch each session's init handshake for its auth provenance ('oauth' = claude.ai
   // subscription). The listener is a no-op after the first init; not worth unsubscribing.
@@ -197,8 +236,91 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
     json(res, 200, { sdkSessions: await listSdkSessions({ dir, limit, offset }) })
   }
 
+  const handleJobs = async (
+    req: IncomingMessage,
+    res: ServerResponse,
+    pathname: string,
+  ): Promise<void> => {
+    if (!queue) {
+      json(res, 404, { error: 'job queue not configured' })
+      return
+    }
+    if (pathname === basePath + '/queue') {
+      if (req.method !== 'GET') {
+        json(res, 405, { error: 'method not allowed' })
+        return
+      }
+      json(res, 200, { stats: await queue.stats() })
+      return
+    }
+    const rest = pathname.slice((basePath + '/jobs').length).replace(/^\//, '')
+    if (rest === '') {
+      if (req.method === 'GET') {
+        json(res, 200, { jobs: await queue.list() })
+        return
+      }
+      if (req.method === 'POST') {
+        const body = (await readJsonBody(req, maxBodyBytes)) as CreateJobRequest
+        if (!body.session || typeof body.session !== 'object') {
+          json(res, 400, { error: 'session is required' })
+          return
+        }
+        if (!body.session.cwd || typeof body.session.cwd !== 'string') {
+          json(res, 400, { error: 'session.cwd is required' })
+          return
+        }
+        if (!body.session.prompt || typeof body.session.prompt !== 'string') {
+          json(res, 400, { error: 'session.prompt is required' })
+          return
+        }
+        if (!cwdAllowed(body.session.cwd, options.allowedCwdRoots)) {
+          json(res, 403, { error: 'cwd is outside the allowed roots' })
+          return
+        }
+        try {
+          json(res, 201, { job: await queue.submit(body) })
+        } catch (error) {
+          json(res, 400, { error: error instanceof Error ? error.message : 'invalid job' })
+        }
+        return
+      }
+      json(res, 405, { error: 'method not allowed' })
+      return
+    }
+    const id = decodeURIComponent(rest)
+    if (id.includes('/')) {
+      json(res, 404, { error: 'not found' })
+      return
+    }
+    if (req.method === 'GET') {
+      const job = await queue.get(id)
+      if (job) json(res, 200, { job })
+      else json(res, 404, { error: 'job not found' })
+      return
+    }
+    if (req.method === 'DELETE') {
+      const job = await queue.cancel(id)
+      if (job) json(res, 200, { job })
+      else json(res, 404, { error: 'job not found' })
+      return
+    }
+    json(res, 405, { error: 'method not allowed' })
+  }
+
   const handleRequest = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const pathname = new URL(req.url ?? '/', 'http://internal').pathname
+    if (
+      pathname === basePath + '/jobs' ||
+      pathname.startsWith(basePath + '/jobs/') ||
+      pathname === basePath + '/queue'
+    ) {
+      if (!(await authenticate(req))) {
+        json(res, 401, { error: 'unauthorized' })
+        return
+      }
+      await handleJobs(req, res, pathname)
+      return
+    }
     if (pathname === basePath + '/sdk-sessions') {
       if (!(await authenticate(req))) {
         json(res, 401, { error: 'unauthorized' })
@@ -363,6 +485,7 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
   return {
     server,
     registry,
+    queue,
     listen: (port, host) =>
       new Promise((resolve, reject) => {
         server.once('error', reject)
@@ -373,6 +496,7 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
       }),
     close: () =>
       new Promise((resolve) => {
+        queue?.close()
         registry.closeAll()
         wss.close()
         server.close(() => resolve())

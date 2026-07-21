@@ -1,8 +1,10 @@
 # claude-worker
 
 Web-controlled Agent SDK session runner: embed, watch, and control a close-to-real Claude Code
-session from a host app. PRD: `docs/prd-claude-worker.md`. Read it before changing scope — job
-queues, serverless, multi-tenant SaaS, and claude.ai auth are explicit non-goals for V1.
+session from a host app. PRD: `docs/prd-claude-worker.md`. Read it before changing scope —
+serverless, multi-tenant SaaS, and claude.ai auth are explicit non-goals. The job queue (the
+PRD's "later" layer) landed 2026-07-21 as `packages/queue`; redis/bullmq adapters remain future
+work behind its `QueueAdapter` interface.
 
 ## Layout
 
@@ -10,7 +12,12 @@ queues, serverless, multi-tenant SaaS, and claude.ai auth are explicit non-goals
   Breaking changes bump `PROTOCOL_VERSION`. Everything else depends on this; it depends on nothing.
 - `packages/core` — `SessionRunner` over the Agent SDK's `query()`: input queue, pending
   approvals (`canUseTool`), SDKMessage→event normalization, seq-numbered event log. No transport.
-- `packages/server` — HTTP + WS gateway (`node:http` + `ws`), session registry, auth hook.
+- `packages/queue` — job queue over the runner: `QueueAdapter` contract (in-memory bundled;
+  claimNext must stay atomic for future shared backends) + `JobQueue` (concurrency, per-session +
+  daily token budgets, ordered webhook delivery). Jobs are one-shot: first turn_result completes
+  them and closes the session. No transport.
+- `packages/server` — HTTP + WS gateway (`node:http` + `ws`), session registry, auth hook;
+  `queue` option mounts `/jobs` + `/queue` routes (job sessions are ordinary registry sessions).
 - `packages/client` — REST + WS client on platform `fetch`/`WebSocket`. Zero runtime deps.
 - `packages/react` — the **headless** React layer: `useClaudeSession` + `src/transcript.ts`, a
   pure reducer (framework-free, unit-tested); keep rendering logic out of it. No styling.
@@ -25,7 +32,7 @@ queues, serverless, multi-tenant SaaS, and claude.ai auth are explicit non-goals
 - `apps/web` — session-control dashboard (TanStack Router, hash history) consuming client+ui.
 - `apps/demo` — minimal-chrome consumer of client+ui proving portability.
 
-Dependency direction: `protocol ← core ← server`, `protocol ← client ← react ← ui ← web|demo`.
+Dependency direction: `protocol ← core ← queue ← server`, `protocol ← client ← react ← ui ← web|demo`.
 The browser side (client/react/ui/apps) must never import core/server or the Agent SDK.
 
 ## Tooling conventions (mirrors a sibling app)
@@ -43,7 +50,8 @@ The browser side (client/react/ui/apps) must never import core/server or the Age
 ## Testing
 
 - `pnpm test` — core: fake `queryFn` harness (no real CLI spawn); server: real HTTP+WS integration
-  against the fake harness; react: transcript reducer.
+  against the fake harness (incl. job routes + webhook receiver); queue: JobQueue against a fake
+  runner; react: transcript reducer.
 - Real-SDK smoke (spawns actual Claude Code, costs tokens): create a `SessionRunner` with a trivial
   one-turn prompt — see git history / scratchpad `smoke.mjs` pattern. Don't add it to `pnpm test`.
 
@@ -78,7 +86,8 @@ README "Auth & Anthropic's terms") — keep that section's status honest as thin
 - Unmodeled SDK messages pass through as `sdk_event` — extend the protocol first-class instead of
   parsing payloads client-side.
 - `total_cost_usd`/`num_turns` on SDK result messages are **session-cumulative** — roll up with
-  last-seen, never sum.
+  last-seen, never sum. `usage` on the same messages is **per-turn** (smoke-verified) — token
+  accounting sums it; the queue counts input+output+cache_creation+cache_read.
 - On `resume`, the SDK re-streams only *user* messages; the runner backfills full history from
   `getSessionMessages` as `replay: true` events, and the transcript reducer dedupes the doubled
   user messages by uuid. `historyFn`/`listSdkSessions` are injectable on runner/server for tests.
@@ -92,3 +101,11 @@ README "Auth & Anthropic's terms") — keep that section's status honest as thin
   under pnpm it lives at `packages/ui/node_modules/streamdown`, not the workspace root.
 - `createWorkerServer` refuses to start without `authenticate` unless `allowUnauthenticated: true`
   (loopback dev only). Keep it that way.
+- Usage telemetry quirks (confirmed via real-SDK smoke, SDK 0.2.141): `supportedModels()` leads
+  with a `value: 'default'` sentinel row (ModelSelect translates it to `set_model` undefined);
+  `getContextUsage().categories[].color` holds CLI theme token names ('inactive', 'promptBorder'),
+  not CSS colors; rate_limit events can omit `utilization` — render unknown, never 0%.
+- A promptless session emits no `system_init` until its first message, but the CLI **does**
+  answer control requests (supportedModels/getContextUsage/...) immediately — the runner fetches
+  capabilities + a context baseline eagerly, and `useClaudeSession` seeds permissionMode/model/
+  status from the `attached` frame's SessionInfo so the UI isn't blank pre-init.

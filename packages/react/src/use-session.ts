@@ -1,7 +1,20 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import type { ClaudeWorkerClient, SessionHandle } from '@claude-worker/client'
-import type { PermissionMode, SessionEvent } from '@claude-worker/protocol'
-import { applyEvent, initialTranscriptState, type TranscriptState } from './transcript.ts'
+import type { AttachedFrame, PermissionMode, SessionEvent } from '@claude-worker/protocol'
+import {
+  applyEvent,
+  initialTranscriptState,
+  seedFromSessionInfo,
+  type TranscriptState,
+} from './transcript.ts'
+
+/** Session events drive the reducer; the attach snapshot seeds fields (permission
+ * mode, model) that a promptless session's event stream doesn't carry yet. */
+function reduce(state: TranscriptState, action: SessionEvent | AttachedFrame): TranscriptState {
+  return action.type === 'attached'
+    ? seedFromSessionInfo(state, action.session)
+    : applyEvent(state, action)
+}
 
 export type UseClaudeSessionResult = {
   state: TranscriptState
@@ -20,7 +33,7 @@ export function useClaudeSession(
   client: ClaudeWorkerClient,
   sessionId: string | undefined,
 ): UseClaudeSessionResult {
-  const [state, dispatch] = useReducer(applyEvent, initialTranscriptState)
+  const [state, dispatch] = useReducer(reduce, initialTranscriptState)
   const [connected, setConnected] = useState(false)
   const handleRef = useRef<SessionHandle | null>(null)
 
@@ -29,9 +42,11 @@ export function useClaudeSession(
     const handle = client.attach(sessionId)
     handleRef.current = handle
     const offEvent = handle.on('event', (event: SessionEvent) => dispatch(event))
+    const offAttached = handle.on('attached', (frame: AttachedFrame) => dispatch(frame))
     const offConn = handle.on('connectionChange', setConnected)
     return () => {
       offEvent()
+      offAttached()
       offConn()
       handle.detach()
       handleRef.current = null

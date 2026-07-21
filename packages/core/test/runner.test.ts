@@ -11,6 +11,7 @@ import { SessionRunner, type SessionRunnerConfig } from '../src/index.ts'
 type HarnessCapabilities = {
   models?: Array<{ value: string; displayName: string; description: string }>
   commands?: Array<{ name: string; description: string; argumentHint: string }>
+  contextUsage?: Record<string, unknown>
 }
 
 /** Controllable stand-in for the SDK: emit SDKMessages, capture options + streamed input.
@@ -63,6 +64,9 @@ function fakeHarness(capabilities?: HarnessCapabilities) {
           supportedModels: vi.fn(async () => capabilities.models ?? []),
           supportedCommands: vi.fn(async () => capabilities.commands ?? []),
         }
+      : {}),
+    ...(capabilities?.contextUsage
+      ? { getContextUsage: vi.fn(async () => capabilities.contextUsage) }
       : {}),
   } as unknown as Query
 
@@ -277,8 +281,99 @@ describe('SessionRunner', () => {
     expect(events.at(-1)).toMatchObject({ type: 'model_changed', model: 'claude-opus-4-8' })
   })
 
-  it('emits capabilities after init when the query reports models/commands', async () => {
+  it('setPermissionMode switches the mode and emits permission_mode_changed', async () => {
+    const { harness, runner, events } = makeRunner()
+    void runner.start()
+    harness.emit(initMessage)
+    await tick()
+
+    await runner.setPermissionMode('acceptEdits')
+    expect(harness.setPermissionMode).toHaveBeenCalledWith('acceptEdits')
+    expect(runner.info().permissionMode).toBe('acceptEdits')
+    expect(events.at(-1)).toMatchObject({ type: 'permission_mode_changed', mode: 'acceptEdits' })
+  })
+
+  it('polls context usage after each turn and emits context_usage', async () => {
     const { harness, runner, events } = makeRunner({}, {
+      contextUsage: {
+        categories: [
+          { name: 'System prompt', tokens: 3000, color: '#888', isDeferred: false },
+          { name: 'Messages', tokens: 39_000, color: '#0aa' },
+        ],
+        totalTokens: 42_000,
+        maxTokens: 200_000,
+        rawMaxTokens: 200_000,
+        percentage: 21,
+        gridRows: [],
+        model: 'claude-test-1',
+        memoryFiles: [],
+        mcpTools: [],
+        agents: [],
+      },
+    })
+    void runner.start()
+    harness.emit(initMessage)
+    harness.emit(resultMessage)
+    await tick()
+    await tick()
+
+    const usage = events.find((e) => e.type === 'context_usage')
+    // SDK-only fields (gridRows, rawMaxTokens, ...) must not leak onto the wire.
+    expect(usage).toMatchObject({
+      usage: {
+        categories: [
+          { name: 'System prompt', tokens: 3000, color: '#888' },
+          { name: 'Messages', tokens: 39_000, color: '#0aa' },
+        ],
+        totalTokens: 42_000,
+        maxTokens: 200_000,
+        percentage: 21,
+        model: 'claude-test-1',
+      },
+    })
+    expect((usage as { usage: Record<string, unknown> }).usage.gridRows).toBeUndefined()
+    expect(
+      (usage as { usage: { categories: Array<Record<string, unknown>> } }).usage.categories[0]!
+        .isDeferred,
+    ).toBeUndefined()
+  })
+
+  it('promotes rate_limit_event messages to first-class rate_limit events', async () => {
+    const { harness, runner, events } = makeRunner()
+    void runner.start()
+    harness.emit(initMessage)
+    harness.emit({
+      type: 'rate_limit_event',
+      rate_limit_info: {
+        status: 'allowed',
+        rateLimitType: 'five_hour',
+        utilization: 30,
+        resetsAt: 1_800_000_000,
+        isUsingOverage: false,
+        overageStatus: 'allowed',
+      },
+      uuid: 'uuid-rl1',
+      session_id: 'sdk-session-1',
+    } as unknown as SDKMessage)
+    await tick()
+
+    const rateLimit = events.find((e) => e.type === 'rate_limit')
+    expect(rateLimit).toMatchObject({
+      info: {
+        status: 'allowed',
+        rateLimitType: 'five_hour',
+        utilization: 30,
+        resetsAt: 1_800_000_000,
+        isUsingOverage: false,
+      },
+    })
+    // SDK-only fields stay off the wire.
+    expect((rateLimit as { info: Record<string, unknown> }).info.overageStatus).toBeUndefined()
+    expect(events.some((e) => e.type === 'sdk_event')).toBe(false)
+  })
+
+  it('emits capabilities after init when the query reports models/commands', async () => {
+    const { harness, runner, events } = makeRunner({ prompt: 'hi' }, {
       models: [{ value: 'claude-opus-4-8', displayName: 'Opus 4.8', description: 'Most capable' }],
       commands: [{ name: 'compact', description: 'Compact the conversation', argumentHint: '' }],
     })
@@ -291,6 +386,25 @@ describe('SessionRunner', () => {
       models: [{ value: 'claude-opus-4-8', displayName: 'Opus 4.8' }],
       commands: [{ name: 'compact' }],
     })
+  })
+
+  it('fetches capabilities eagerly for promptless sessions, emitting only once', async () => {
+    // The CLI answers control requests before the init handshake — a promptless
+    // session must not sit blank (no models/commands) until its first message.
+    const { harness, runner, events } = makeRunner({}, {
+      models: [{ value: 'default', displayName: 'Default (recommended)', description: 'Opus' }],
+      commands: [{ name: 'compact', description: '', argumentHint: '' }],
+    })
+    void runner.start()
+    await tick()
+
+    expect(events.some((e) => e.type === 'capabilities')).toBe(true)
+    expect(events.some((e) => e.type === 'system_init')).toBe(false)
+
+    // init later must not duplicate the capabilities event
+    harness.emit(initMessage)
+    await tick()
+    expect(events.filter((e) => e.type === 'capabilities')).toHaveLength(1)
   })
 
   it('replays events from a given seq on subscribe', async () => {

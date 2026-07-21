@@ -63,6 +63,14 @@ export type ApiMessage = {
   content: string | ContentBlock[]
   model?: string
   stop_reason?: string | null
+  /** Per-API-call token usage when the message carries it (assistant messages do).
+   * Enables mid-run token accounting; result-message usage stays authoritative. */
+  usage?: {
+    input_tokens?: number
+    output_tokens?: number
+    cache_creation_input_tokens?: number
+    cache_read_input_tokens?: number
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -116,6 +124,49 @@ export type SlashCommandInfo = {
 }
 
 // ---------------------------------------------------------------------------
+// Usage telemetry (context window + subscription rate limits)
+// ---------------------------------------------------------------------------
+
+/** One category row from the CLI's context-usage breakdown (system prompt, tools, ...). */
+export type ContextUsageCategory = {
+  name: string
+  tokens: number
+  /** Color the CLI assigns the category. Often a CLI theme token name ('inactive',
+   * 'promptBorder', ...), not a CSS color — validate before styling with it. */
+  color: string
+}
+
+/** Context-window usage snapshot (SDK getContextUsage mirror), polled after each turn. */
+export type ContextUsage = {
+  categories: ContextUsageCategory[]
+  totalTokens: number
+  maxTokens: number
+  /** Used share of the window, 0–100. */
+  percentage: number
+  /** Model the window sizing applies to. */
+  model?: string
+}
+
+/**
+ * One rate-limit window snapshot (SDK SDKRateLimitInfo mirror). Emitted only for
+ * claude.ai subscription sessions — API-key sessions may never produce one, so
+ * clients must render nothing (not 0%) until data arrives.
+ */
+export type RateLimitInfo = {
+  /** 'allowed' | 'allowed_warning' | 'rejected' — kept as string, the SDK union may grow. */
+  status: string
+  /** Which window: 'five_hour' (session), 'seven_day' (weekly), 'seven_day_opus',
+   * 'seven_day_sonnet', 'overage', ... — kept as string, the SDK union may grow. */
+  rateLimitType?: string
+  /** Used share of the window, 0–100. The CLI omits it on some updates — treat
+   * absent as unknown, not 0. */
+  utilization?: number
+  /** Epoch **seconds** when the window resets (render countdowns client-side). */
+  resetsAt?: number
+  isUsingOverage?: boolean
+}
+
+// ---------------------------------------------------------------------------
 // Session events (server -> client)
 // ---------------------------------------------------------------------------
 
@@ -143,6 +194,12 @@ export type SessionEventBody =
   | { type: 'capabilities'; models: ModelOption[]; commands: SlashCommandInfo[] }
   /** The session's model changed via `set_model`. `model` undefined = back to default. */
   | { type: 'model_changed'; model?: string }
+  /** The session's permission mode changed via `set_permission_mode`. */
+  | { type: 'permission_mode_changed'; mode: PermissionMode }
+  /** Context-window usage snapshot; the runner polls it after each turn. */
+  | { type: 'context_usage'; usage: ContextUsage }
+  /** Subscription rate-limit update for one window (see {@link RateLimitInfo}). */
+  | { type: 'rate_limit'; info: RateLimitInfo }
   | {
       type: 'assistant_message'
       message: ApiMessage
@@ -338,3 +395,105 @@ export type CreateSessionResponse = { session: SessionInfo }
 export type GetSessionResponse = { session: SessionInfo }
 export type ListSdkSessionsResponse = { sdkSessions: SdkSessionSummary[] }
 export type ErrorResponse = { error: string }
+
+// ---------------------------------------------------------------------------
+// Job queue (one-shot scheduled runs over the session runner)
+// ---------------------------------------------------------------------------
+
+/**
+ * - `queued` — accepted, waiting for a concurrency slot (or the daily token budget)
+ * - `running` — a session is executing the prompt
+ * - `succeeded` / `failed` — terminal; `result` (and `error` on failure) are set
+ * - `canceled` — terminal; canceled by a client before or during the run
+ */
+export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled'
+
+/** Where job progress/completion deliveries are POSTed (JSON body = {@link JobEvent}). */
+export type WebhookConfig = {
+  url: string
+  /** Extra headers sent with every delivery (auth tokens etc.). */
+  headers?: Record<string, string>
+  /** Delivery granularity: 'messages' also POSTs job_progress per assistant message /
+   * permission request; 'completion' only job_started + job_completed. Default 'messages'. */
+  progress?: 'messages' | 'completion'
+}
+
+/**
+ * Schedule a one-shot run: the session executes `prompt` unattended and the job
+ * completes with that run's result. `session.prompt` is the task and is required;
+ * `resume`/`forkSession` are not supported for queued jobs.
+ */
+export type CreateJobRequest = {
+  session: CreateSessionRequest & { prompt: string }
+  webhook?: WebhookConfig
+  /** Per-job token cap; the effective cap is min(this, the server's sessionTokenLimit). */
+  maxTokens?: number
+  /** Host bookkeeping echoed back on JobInfo. */
+  meta?: Record<string, unknown>
+}
+
+/** Cumulative resource usage of a job's run. `tokens` counts input + output +
+ * cache-creation + cache-read tokens across all turns. */
+export type JobUsage = {
+  tokens: number
+  totalCostUsd: number
+  numTurns: number
+}
+
+/** Terminal outcome of the job's run (mirrors the final turn_result). */
+export type JobResult = {
+  subtype: string
+  isError: boolean
+  /** Final text of the run (success only). */
+  result?: string
+  errors?: string[]
+  durationMs: number
+}
+
+export type JobInfo = {
+  id: string
+  status: JobStatus
+  cwd: string
+  prompt: string
+  /** Server session id once started — attach via the sessions WS to watch the run live. */
+  sessionId?: string
+  sdkSessionId?: string
+  createdAt: number
+  startedAt?: number
+  finishedAt?: number
+  usage: JobUsage
+  result?: JobResult
+  /** Failure or cancellation reason. */
+  error?: string
+  meta?: Record<string, unknown>
+}
+
+/** Latest mid-run activity, carried on job_progress deliveries. */
+export type JobProgress = {
+  kind: 'assistant_text' | 'tool_use' | 'permission_requested' | 'permission_resolved'
+  /** Short human-readable preview (message excerpt, tool name, permission title). */
+  preview?: string
+}
+
+/** Webhook delivery payload (also the queue's local event shape). */
+export type JobEvent =
+  | { type: 'job_started'; job: JobInfo; ts: number }
+  | { type: 'job_progress'; job: JobInfo; progress: JobProgress; ts: number }
+  | { type: 'job_completed'; job: JobInfo; ts: number }
+
+export type QueueStats = {
+  maxConcurrency: number
+  running: number
+  queued: number
+  sessionTokenLimit?: number
+  dailyTokenLimit?: number
+  /** Tokens consumed by queue jobs in the current UTC day. */
+  dailyTokensUsed: number
+  /** True when the daily budget is exhausted and queued jobs are being held. */
+  paused: boolean
+}
+
+export type CreateJobResponse = { job: JobInfo }
+export type GetJobResponse = { job: JobInfo }
+export type ListJobsResponse = { jobs: JobInfo[] }
+export type QueueStatsResponse = { stats: QueueStats }

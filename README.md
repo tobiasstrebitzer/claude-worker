@@ -16,7 +16,8 @@ for the message stream, and embeddable panel components with approve/deny contro
 | --- | --- |
 | `@claude-worker/protocol` | The wire protocol: session events, commands, REST shapes. Dependency-free, browser-safe. **This is the product boundary** — versioned from day one. |
 | `@claude-worker/core` | The session runner: wraps `query()`, owns the streaming input, promotes `canUseTool` calls into pending approvals, normalizes SDK messages into protocol events, keeps a seq-numbered event log for attach/replay. Pure library, no transport. |
-| `@claude-worker/server` | The gateway: HTTP + WebSocket, session registry (create/list/attach/interrupt/kill), pluggable auth hook. Runs anywhere Node ≥22 runs. |
+| `@claude-worker/server` | The gateway: HTTP + WebSocket, session registry (create/list/attach/interrupt/kill), pluggable auth hook, optional job-queue routes. Runs anywhere Node ≥22 runs. |
+| `@claude-worker/queue` | The job queue: remote services schedule one-shot runs; jobs execute as ordinary sessions with bounded concurrency and token budgets, delivering progress + completion via webhooks. Pluggable `QueueAdapter` (in-memory bundled; redis/bullmq/pubsub can implement the same contract). |
 | `@claude-worker/client` | Typed protocol client for browsers and Node: REST + WebSocket attach with auto-reconnect and replay-from-last-seq. Zero runtime deps. |
 | `@claude-worker/react` | The headless React layer: `useClaudeSession` hook + pure transcript reducer. No styling opinion. |
 | `@claude-worker/ui` | The styled agent-control component library: session panel (status bar, streaming transcript, tool-call cards, permission prompts, composer), session list, and the underlying primitives. Tailwind v4 + Base UI + cva; light/dark via tokens. See `packages/ui/README.md` for consumer wiring. |
@@ -73,6 +74,40 @@ const session = await client.createSession({
 Or use the headless layer (`useClaudeSession` from `@claude-worker/react`) with your own
 rendering, consume the stream directly (`client.attach(sessionId).on('event', …)`), or go one
 level lower and use `SessionRunner` from `@claude-worker/core` in-process with no server at all.
+
+## Job queue
+
+Enable the queue in server settings to let remote services schedule unattended runs:
+
+```ts
+const worker = createWorkerServer({
+  authenticate,
+  queue: {
+    maxConcurrency: 2,          // concurrent job sessions
+    sessionTokenLimit: 200_000, // tokens per job (input+output+cache); exceeding kills the run
+    dailyTokenLimit: 2_000_000, // global budget per UTC day; queued jobs held once exhausted
+    // adapter: myRedisAdapter, // defaults to the bundled in-memory adapter
+  },
+})
+```
+
+Schedule and control jobs with the client SDK (or plain REST — `POST/GET/DELETE /v1/jobs`,
+`GET /v1/queue`):
+
+```ts
+const job = await client.createJob({
+  session: { cwd: '/srv/checkout', prompt: '/verify-content 42' },
+  webhook: { url: 'https://my-app.test/hooks/claude', headers: { authorization: '…' } },
+})
+// job_started → job_progress (per assistant message / permission request) → job_completed
+// arrive at the webhook; poll client.getJob(job.id) or attach(job.sessionId) to watch live.
+```
+
+A job is one unattended run: the session executes the prompt, the first run result completes the
+job (`result`, cumulative `usage`, cost), and the session is closed. Job sessions are ordinary
+registry sessions, so the web dashboard can watch them stream in real time. The in-memory adapter
+is single-process and non-persistent — jobs and daily counters reset on restart; implement
+`QueueAdapter` against a shared store for anything beyond one trusted host.
 
 ## Permissions are the sharp edge
 
@@ -144,6 +179,6 @@ TS source via the `@claude-worker/source` export condition (`node --conditions=@
 
 ## Status
 
-V1 / proof-of-concept. See `docs/prd-claude-worker.md` for the full PRD, non-goals (job queues are
-a later layer on top of the runner, not V1), and open questions (naming, transport evolution,
+V1 / proof-of-concept, plus the first post-V1 layer (the job queue) landing. See
+`docs/prd-claude-worker.md` for the full PRD and open questions (naming, transport evolution,
 unattended permission policy).

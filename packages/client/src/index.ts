@@ -1,8 +1,11 @@
 import type {
   AttachedFrame,
   ClientFrame,
+  CreateJobRequest,
   CreateSessionRequest,
+  JobInfo,
   PermissionMode,
+  QueueStats,
   SdkSessionSummary,
   ServerFrame,
   SessionEvent,
@@ -217,6 +220,36 @@ export class ClaudeWorkerClient {
     const qs = search.size > 0 ? `?${search.toString()}` : ''
     const body = await this.#call('GET', `/sdk-sessions${qs}`)
     return (body as { sdkSessions: SdkSessionSummary[] }).sdkSessions
+  }
+
+  // -- Job queue (requires the server to be configured with `queue`) ----------
+
+  /** Schedule a one-shot run. The returned job's `sessionId` (once running) can be
+   * fed to `attach()` to watch the run live. */
+  async createJob(request: CreateJobRequest): Promise<JobInfo> {
+    const body = await this.#call('POST', '/jobs', request)
+    return (body as { job: JobInfo }).job
+  }
+
+  async listJobs(): Promise<JobInfo[]> {
+    const body = await this.#call('GET', '/jobs')
+    return (body as { jobs: JobInfo[] }).jobs
+  }
+
+  async getJob(id: string): Promise<JobInfo> {
+    const body = await this.#call('GET', `/jobs/${encodeURIComponent(id)}`)
+    return (body as { job: JobInfo }).job
+  }
+
+  /** Cancel a queued or running job. */
+  async cancelJob(id: string): Promise<JobInfo> {
+    const body = await this.#call('DELETE', `/jobs/${encodeURIComponent(id)}`)
+    return (body as { job: JobInfo }).job
+  }
+
+  async queueStats(): Promise<QueueStats> {
+    const body = await this.#call('GET', '/queue')
+    return (body as { stats: QueueStats }).stats
   }
 
   attach(sessionId: string, options?: AttachOptions): SessionHandle {

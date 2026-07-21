@@ -25,6 +25,7 @@ export { Toaster, toast } from './components/ui/Sonner.tsx'
 export { CopyButton, type CopyButtonProps } from './components/ui/CopyButton.tsx'
 export { Spinner } from './components/ui/Spinner.tsx'
 export { CodeBlock, type CodeBlockProps } from './components/ui/CodeBlock.tsx'
+export { ProgressRing, type ProgressRingProps } from './components/ui/ProgressRing.tsx'
 // Prompt input (vendored just-marketing/prompt-area, themed to these tokens)
 export {
   PromptArea,
@@ -62,6 +63,12 @@ export { ToolCallCard, type ToolCallCardProps, type ToolCallItem } from './compo
 export { PermissionPrompt, type PermissionPromptProps } from './components/agent/PermissionPrompt.tsx'
 export { Composer, type ComposerProps } from './components/agent/Composer.tsx'
 export { ModelSelect, type ModelSelectProps } from './components/agent/ModelSelect.tsx'
+export {
+  PERMISSION_MODES,
+  PermissionModeSelect,
+  type PermissionModeMeta,
+  type PermissionModeSelectProps,
+} from './components/agent/PermissionModeSelect.tsx'
 export { StatusBar, type StatusBarProps } from './components/agent/StatusBar.tsx'
 export {
   SessionList,
@@ -73,4 +80,11 @@ export { STATUS_META } from './components/agent/status.ts'
 
 // Utilities
 export { cn } from './lib/utils.ts'
-export { formatCost, formatDuration, formatRelativeTime, toolInputPreview } from './lib/format.ts'
+export {
+  formatCost,
+  formatCountdown,
+  formatDuration,
+  formatRelativeTime,
+  formatTokens,
+  toolInputPreview,
+} from './lib/format.ts'

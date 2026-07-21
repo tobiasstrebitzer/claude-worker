@@ -4,6 +4,7 @@ import { useClaudeSession } from '@claude-worker/react'
 import { cn } from '../../lib/utils.ts'
 import { Composer } from './Composer.tsx'
 import { ModelSelect } from './ModelSelect.tsx'
+import { PermissionModeSelect } from './PermissionModeSelect.tsx'
 import { PermissionPrompt } from './PermissionPrompt.tsx'
 import { StatusBar } from './StatusBar.tsx'
 import { Transcript } from './Transcript.tsx'
@@ -22,10 +23,8 @@ export interface SessionPanelProps {
  * sessions.
  */
 export function SessionPanel({ client, sessionId, header, className }: SessionPanelProps) {
-  const { state, connected, send, approve, deny, interrupt, setModel } = useClaudeSession(
-    client,
-    sessionId,
-  )
+  const { state, connected, send, approve, deny, interrupt, setModel, setPermissionMode } =
+    useClaudeSession(client, sessionId)
   const busy = state.status === 'running' || state.status === 'awaiting_approval'
   const ended = state.status === 'failed' || state.status === 'closed'
 
@@ -78,14 +77,23 @@ export function SessionPanel({ client, sessionId, header, className }: SessionPa
         disabled={ended || !sessionId}
         commands={commands}
         toolbar={
-          state.models?.length ? (
-            <ModelSelect
-              models={state.models}
-              model={state.model}
-              onModelChange={setModel}
-              disabled={ended}
-            />
-          ) : null
+          <>
+            {state.models?.length ? (
+              <ModelSelect
+                models={state.models}
+                model={state.model}
+                onModelChange={setModel}
+                disabled={ended}
+              />
+            ) : null}
+            {state.permissionMode ? (
+              <PermissionModeSelect
+                mode={state.permissionMode}
+                onModeChange={setPermissionMode}
+                disabled={ended}
+              />
+            ) : null}
+          </>
         }
       />
     </div>

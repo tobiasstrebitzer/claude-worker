@@ -13,6 +13,25 @@ export function formatDuration(ms: number): string {
   return `${m}m ${Math.round(s % 60)}s`
 }
 
+/** Compact token count, Claude Code-style: 850 → "850", 359_000 → "359.0k", 1_200_000 → "1.2M". */
+export function formatTokens(tokens: number): string {
+  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`
+  if (tokens >= 1000) return `${(tokens / 1000).toFixed(1)}k`
+  return String(Math.round(tokens))
+}
+
+/** Countdown to an epoch-ms deadline: "2h 18m", "12m", "<1m"; "now" once passed. */
+export function formatCountdown(untilEpochMs: number, now = Date.now()): string {
+  const remaining = untilEpochMs - now
+  if (remaining <= 0) return 'now'
+  const minutes = Math.ceil(remaining / 60_000)
+  if (minutes < 1) return '<1m'
+  if (minutes < 60) return `${minutes}m`
+  const days = Math.floor(minutes / (60 * 24))
+  if (days >= 1) return `${days}d ${Math.floor((minutes % (60 * 24)) / 60)}h`
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`
+}
+
 export function formatRelativeTime(epochMs: number | undefined, now = Date.now()): string {
   if (!epochMs) return '—'
   const diff = Math.max(0, now - epochMs)

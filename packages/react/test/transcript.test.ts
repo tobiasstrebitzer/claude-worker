@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import type { SessionEvent, SessionEventBody } from '@claude-worker/protocol'
-import { applyEvent, initialTranscriptState, type TranscriptState } from '../src/transcript.ts'
+import type { SessionEvent, SessionEventBody, SessionInfo } from '@claude-worker/protocol'
+import {
+  applyEvent,
+  initialTranscriptState,
+  seedFromSessionInfo,
+  type TranscriptState,
+} from '../src/transcript.ts'
 
 let seq = 0
 const ev = (body: SessionEventBody): SessionEvent => ({ ...body, seq: ++seq, ts: 0 })
@@ -240,5 +245,104 @@ describe('transcript reducer', () => {
     // reset-to-default keeps showing the last known model
     const after = applyEvent(state, ev({ type: 'model_changed', model: undefined }))
     expect(after.model).toBe('claude-opus-4-8')
+  })
+
+  it('seeds permissionMode from system_init and follows permission_mode_changed', () => {
+    seq = 0
+    const state = run(initialTranscriptState, [
+      {
+        type: 'system_init',
+        sdkSessionId: 'sdk-1',
+        model: 'claude-test-1',
+        cwd: '/tmp/p',
+        apiKeySource: 'user',
+        tools: [],
+        skills: [],
+        slashCommands: [],
+        permissionMode: 'default',
+        claudeCodeVersion: '2.0.0',
+        mcpServers: [],
+      },
+    ])
+    expect(state.permissionMode).toBe('default')
+    const switched = applyEvent(state, ev({ type: 'permission_mode_changed', mode: 'acceptEdits' }))
+    expect(switched.permissionMode).toBe('acceptEdits')
+  })
+
+  it('tracks context usage and per-window rate limits', () => {
+    seq = 0
+    const usage = {
+      categories: [{ name: 'System prompt', tokens: 3000, color: '#888' }],
+      totalTokens: 42_000,
+      maxTokens: 200_000,
+      percentage: 21,
+      model: 'claude-test-1',
+    }
+    const state = run(initialTranscriptState, [
+      { type: 'context_usage', usage },
+      {
+        type: 'rate_limit',
+        info: { status: 'allowed', rateLimitType: 'five_hour', utilization: 30, resetsAt: 1_800_000_000 },
+      },
+      {
+        type: 'rate_limit',
+        info: { status: 'allowed', rateLimitType: 'seven_day', utilization: 23, resetsAt: 1_800_500_000 },
+      },
+      // a second five_hour update replaces only its own window
+      {
+        type: 'rate_limit',
+        info: { status: 'allowed_warning', rateLimitType: 'five_hour', utilization: 85, resetsAt: 1_800_000_000 },
+      },
+      // no window key → ignored rather than stored under a bogus key
+      { type: 'rate_limit', info: { status: 'allowed' } },
+    ])
+    expect(state.contextUsage).toEqual(usage)
+    expect(state.rateLimits?.five_hour).toMatchObject({ utilization: 85, status: 'allowed_warning' })
+    expect(state.rateLimits?.seven_day).toMatchObject({ utilization: 23 })
+    expect(Object.keys(state.rateLimits ?? {})).toHaveLength(2)
+  })
+
+  it('seeds from the attach snapshot without overriding event-derived state', () => {
+    seq = 0
+    const info: SessionInfo = {
+      id: 'srv-1',
+      status: 'idle',
+      cwd: '/tmp/p',
+      model: 'sonnet',
+      permissionMode: 'acceptEdits',
+      createdAt: 0,
+      lastSeq: 0,
+      pendingPermissionCount: 0,
+    }
+    // promptless session: no events yet — snapshot fills everything
+    const seeded = seedFromSessionInfo(initialTranscriptState, info)
+    expect(seeded).toMatchObject({
+      status: 'idle',
+      model: 'sonnet',
+      permissionMode: 'acceptEdits',
+      cwd: '/tmp/p',
+    })
+
+    // after events have arrived, the event stream stays authoritative
+    const live = run(seeded, [
+      {
+        type: 'system_init',
+        sdkSessionId: 'sdk-1',
+        model: 'claude-sonnet-4-6',
+        cwd: '/tmp/p',
+        apiKeySource: 'user',
+        tools: [],
+        skills: [],
+        slashCommands: [],
+        permissionMode: 'default',
+        claudeCodeVersion: '2.0.0',
+        mcpServers: [],
+      },
+      { type: 'status_changed', status: 'running' },
+    ])
+    const reseeded = seedFromSessionInfo(live, info)
+    expect(reseeded.status).toBe('running')
+    expect(reseeded.model).toBe('claude-sonnet-4-6')
+    expect(reseeded.permissionMode).toBe('default')
   })
 })

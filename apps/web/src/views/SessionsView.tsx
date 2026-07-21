@@ -8,6 +8,7 @@ import {
   CardHeader,
   CardTitle,
   Input,
+  PERMISSION_MODES,
   Select,
   SelectContent,
   SelectItem,
@@ -25,14 +26,6 @@ import { client } from '@/lib/client.ts'
 import { useSessions } from '@/lib/useSessions.ts'
 
 const CWD_KEY = 'claude-worker.last-cwd'
-
-const PERMISSION_MODES: Array<{ value: PermissionMode; label: string }> = [
-  { value: 'default', label: 'default — ask for approval' },
-  { value: 'acceptEdits', label: 'acceptEdits — auto-approve file edits' },
-  { value: 'plan', label: 'plan — read-only planning' },
-  { value: 'auto', label: 'auto — model decides when to ask' },
-  { value: 'bypassPermissions', label: 'bypassPermissions — no prompts (danger)' },
-]
 
 /** Aliases the CLI resolves to current model ids; free-form ids are accepted too. */
 const MODEL_SUGGESTIONS = ['sonnet', 'opus', 'haiku', 'fable']
@@ -116,7 +109,10 @@ function CreateSessionCard({ onCreated }: { onCreated: (id: string) => void }) {
           <label className='flex min-w-0 flex-col gap-1'>
             <span className='text-label font-medium text-fg-3'>Permission mode</span>
             <Select
-              items={PERMISSION_MODES.map((m) => ({ value: m.value, label: m.label }))}
+              items={PERMISSION_MODES.map((m) => ({
+                value: m.value,
+                label: `${m.label} — ${m.description}`,
+              }))}
               value={mode}
               onValueChange={(value) => setMode(value as PermissionMode)}>
               <SelectTrigger className='min-w-64'>
@@ -125,7 +121,7 @@ function CreateSessionCard({ onCreated }: { onCreated: (id: string) => void }) {
               <SelectContent>
                 {PERMISSION_MODES.map((m) => (
                   <SelectItem key={m.value} value={m.value}>
-                    <SelectItemText>{m.label}</SelectItemText>
+                    <SelectItemText>{`${m.label} — ${m.description}`}</SelectItemText>
                   </SelectItem>
                 ))}
               </SelectContent>

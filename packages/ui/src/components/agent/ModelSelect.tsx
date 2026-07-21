@@ -15,22 +15,29 @@ export interface ModelSelectProps {
   /** The session's current model id (TranscriptState.model), possibly decorated
    * (e.g. "claude-fable-5[1m]") — matched leniently against the options. */
   model?: string
-  onModelChange: (model: string) => void
+  /** `undefined` = back to the CLI's default model. */
+  onModelChange: (model?: string) => void
   disabled?: boolean
   className?: string
 }
+
+/** The CLI's supportedModels list leads with a "Default (recommended)" row whose value
+ * is a sentinel, not a model id — selecting it means "clear the override". */
+const isDefaultOption = (value: string) => value === 'default'
 
 /** Find the option matching a (possibly decorated/aliased) session model id. */
 function matchModel(models: ModelOption[], model?: string): ModelOption | undefined {
   if (!model) return undefined
   const normalized = model.replace(/\[.*\]$/, '')
+  const concrete = models.filter((m) => !isDefaultOption(m.value))
   return (
-    models.find((m) => m.value === normalized) ??
-    models.find((m) => normalized.includes(m.value) || m.value.includes(normalized))
+    concrete.find((m) => m.value === normalized) ??
+    concrete.find((m) => normalized.includes(m.value) || m.value.includes(normalized))
   )
 }
 
-/** Compact model switcher for the composer toolbar; fed by the `capabilities` event. */
+/** Compact model switcher for the composer toolbar; fed by the `capabilities` event.
+ * Rows render CLI-style: bold display name with the model's description beneath. */
 export function ModelSelect({
   models,
   model,
@@ -43,7 +50,8 @@ export function ModelSelect({
     <Select
       value={selected?.value ?? null}
       onValueChange={(value) => {
-        if (typeof value === 'string' && value !== selected?.value) onModelChange(value)
+        if (typeof value !== 'string' || value === selected?.value) return
+        onModelChange(isDefaultOption(value) ? undefined : value)
       }}
       disabled={disabled}>
       <SelectTrigger
@@ -53,10 +61,12 @@ export function ModelSelect({
           <SelectValue placeholder={model ?? 'model'} />
         </span>
       </SelectTrigger>
-      <SelectContent className='min-w-64'>
+      <SelectContent className='min-w-72'>
         {models.map((m) => (
           <SelectItem key={m.value} value={m.value}>
-            <SelectItemText>{m.displayName}</SelectItemText>
+            <SelectItemText>
+              <span className='font-medium'>{m.displayName}</span>
+            </SelectItemText>
             {m.description ? <span className='text-label text-fg-4'>{m.description}</span> : null}
           </SelectItem>
         ))}
