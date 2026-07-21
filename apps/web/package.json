@@ -1,6 +1,6 @@
 {
   "name": "@claude-worker/web",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "description": "Full session-control web app for claude-worker: session list, create/resume flow, live panel, settings. Dashboard consumer of @claude-worker/ui. Run the server with `pnpm server`, then `pnpm web`.",
