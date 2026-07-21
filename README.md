@@ -24,8 +24,7 @@ for the message stream, and embeddable panel components with approve/deny contro
 
 **Documentation: [tobiasstrebitzer.github.io/claude-worker](https://tobiasstrebitzer.github.io/claude-worker/)** —
 quickstart, embedding guide, permissions, job queue, and the full reference. Design docs live in
-[`docs/`](docs/): [architecture](docs/architecture.md), [PRD](docs/prd-claude-worker.md),
-[roadmap](docs/roadmap.md).
+[`docs/`](docs/): [architecture](docs/architecture.md) and [roadmap](docs/roadmap.md).
 
 ## Packages
 
@@ -208,8 +207,7 @@ TS source via the `@claude-worker/source` export condition (`node --conditions=@
 
 ## Status
 
-0.1.0 — early but real: runner, protocol, server, client, headless react layer, styled UI, web
+0.1.x — early but real: runner, protocol, server, client, headless react layer, styled UI, web
 dashboard, and the job queue are all in and tested. Expect the protocol to evolve
-(`PROTOCOL_VERSION` guards breaking changes). See the [PRD](docs/prd-claude-worker.md) for scope
-and the [roadmap](docs/roadmap.md) for what's shipped, what's next, and the open questions
-(naming, compliance posture).
+(`PROTOCOL_VERSION` guards breaking changes). See the [roadmap](docs/roadmap.md) for what's
+shipped, what's next, and the open questions (naming, compliance posture).

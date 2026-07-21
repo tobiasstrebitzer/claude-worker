@@ -4,7 +4,7 @@ Web-controlled Agent SDK session runner: embed, watch, and control a close-to-re
 session from a host app. Key docs — read before changing scope or structure:
 
 - `docs/architecture.md` — package map, dependency rule, session/job lifecycles, tooling detail.
-- `docs/prd-claude-worker.md` — rationale; serverless / multi-tenant SaaS / claude.ai auth are non-goals.
+- Non-goals (don't relitigate): serverless hosting, multi-tenant SaaS, claude.ai auth.
 - `docs/roadmap.md` — shipped / next / open questions (naming, compliance posture).
 
 ## Layout

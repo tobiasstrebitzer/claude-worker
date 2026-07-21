@@ -1,8 +1,8 @@
 # Architecture
 
-How claude-worker is put together: seven packages, two apps, one dependency rule. For the
-product rationale and scope decisions behind this shape, see the [PRD](./prd-claude-worker.md);
-for what's deliberately not built yet, see the [roadmap](./roadmap.md).
+How claude-worker is put together: seven packages, three apps, one dependency rule. Scope
+guards behind this shape: no serverless hosting, no multi-tenant SaaS, no claude.ai auth. For
+what's deliberately not built yet, see the [roadmap](./roadmap.md).
 
 ## The dependency rule
 

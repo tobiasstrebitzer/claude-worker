@@ -1,11 +1,12 @@
 # Roadmap & open questions
 
-Consolidated from the PRD's open questions and the per-session planning notes (see git history
-for the original `next-session-*.md` docs). Status as of 2026-07-21.
+What's shipped, what's next, and what's still undecided. Status as of 2026-07-21.
 
 ## Shipped
 
-- **V1 runner + protocol + server + client + panel** (2026-07-20) — the PRD's acceptance scope.
+- **V1 runner + protocol + server + client + panel** (2026-07-20) — the original acceptance
+  scope: create/attach/interrupt a live session, approve/deny from the panel, resume after
+  reload, prove embeddability with a second consumer.
 - **Styled UI layer + web dashboard** (2026-07-20) — `packages/ui`, `apps/web`, headless
   `@claude-worker/react`, resume backfill, SessionInfo rollups.
 - **Model switching, slash commands, prompt-area composer** (2026-07-21).
@@ -26,7 +27,7 @@ for the original `next-session-*.md` docs). Status as of 2026-07-21.
 2. **Promote remaining `sdk_event` passthroughs** UIs care about: tool progress, task/subagent
    events, todo lists.
 3. **Custom `SessionStore` / multi-host sessions** — V1 is single-host by design (SDK on-disk
-   transcripts); the adapter interface is sketched in the PRD but unimplemented.
+   transcripts); a store adapter for cross-host resume is designed but unimplemented.
 
 ## Open questions
 
