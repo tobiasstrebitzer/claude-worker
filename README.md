@@ -1,4 +1,16 @@
+<p align="center">
+  <img src="docs/assets/banner.png" alt="claude-worker — Claude Code sessions your app can embed, watch, and control" width="100%" />
+</p>
+
 # claude-worker
+
+<p>
+  <a href="https://github.com/tobiasstrebitzer/claude-worker/actions/workflows/ci.yml"><img src="https://github.com/tobiasstrebitzer/claude-worker/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://www.npmjs.com/package/@claude-worker/core"><img src="https://img.shields.io/npm/v/%40claude-worker%2Fcore?label=npm" alt="npm version" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-black.svg" alt="MIT license" /></a>
+  <a href="https://tobiasstrebitzer.github.io/claude-worker/"><img src="https://img.shields.io/badge/docs-github%20pages-black.svg" alt="Documentation" /></a>
+  <img src="https://img.shields.io/badge/node-%E2%89%A522-black.svg" alt="Node >= 22" />
+</p>
 
 Run a **close-to-real Claude Code session** programmatically via the
 [Anthropic Agent SDK](https://code.claude.com/docs/en/agent-sdk), and expose it to a host
@@ -10,19 +22,27 @@ A session created here behaves like Claude Code launched in the same directory: 
 adds the missing hosting layer: a session server your web app can talk to, a typed wire protocol
 for the message stream, and embeddable panel components with approve/deny controls.
 
+**Documentation: [tobiasstrebitzer.github.io/claude-worker](https://tobiasstrebitzer.github.io/claude-worker/)** —
+quickstart, embedding guide, permissions, job queue, and the full reference. Design docs live in
+[`docs/`](docs/): [architecture](docs/architecture.md), [PRD](docs/prd-claude-worker.md),
+[roadmap](docs/roadmap.md).
+
 ## Packages
+
+Each package has its own README with install and usage details.
 
 | Package | What it is |
 | --- | --- |
-| `@claude-worker/protocol` | The wire protocol: session events, commands, REST shapes. Dependency-free, browser-safe. **This is the product boundary** — versioned from day one. |
-| `@claude-worker/core` | The session runner: wraps `query()`, owns the streaming input, promotes `canUseTool` calls into pending approvals, normalizes SDK messages into protocol events, keeps a seq-numbered event log for attach/replay. Pure library, no transport. |
-| `@claude-worker/server` | The gateway: HTTP + WebSocket, session registry (create/list/attach/interrupt/kill), pluggable auth hook, optional job-queue routes. Runs anywhere Node ≥22 runs. |
-| `@claude-worker/queue` | The job queue: remote services schedule one-shot runs; jobs execute as ordinary sessions with bounded concurrency and token budgets, delivering progress + completion via webhooks. Pluggable `QueueAdapter` (in-memory bundled; redis/bullmq/pubsub can implement the same contract). |
-| `@claude-worker/client` | Typed protocol client for browsers and Node: REST + WebSocket attach with auto-reconnect and replay-from-last-seq. Zero runtime deps. |
-| `@claude-worker/react` | The headless React layer: `useClaudeSession` hook + pure transcript reducer. No styling opinion. |
-| `@claude-worker/ui` | The styled agent-control component library: session panel (status bar, streaming transcript, tool-call cards, permission prompts, composer), session list, and the underlying primitives. Tailwind v4 + Base UI + cva; light/dark via tokens. See `packages/ui/README.md` for consumer wiring. |
+| [`@claude-worker/protocol`](packages/protocol) | The wire protocol: session events, commands, REST shapes. Dependency-free, browser-safe. **This is the product boundary** — versioned from day one. |
+| [`@claude-worker/core`](packages/core) | The session runner: wraps `query()`, owns the streaming input, promotes `canUseTool` calls into pending approvals, normalizes SDK messages into protocol events, keeps a seq-numbered event log for attach/replay. Pure library, no transport. |
+| [`@claude-worker/server`](packages/server) | The gateway: HTTP + WebSocket, session registry (create/list/attach/interrupt/kill), pluggable auth hook, optional job-queue routes. Runs anywhere Node ≥22 runs. |
+| [`@claude-worker/queue`](packages/queue) | The job queue: remote services schedule one-shot runs; jobs execute as ordinary sessions with bounded concurrency and token budgets, delivering progress + completion via webhooks. Pluggable `QueueAdapter` (in-memory bundled; redis/bullmq/pubsub can implement the same contract). |
+| [`@claude-worker/client`](packages/client) | Typed protocol client for browsers and Node: REST + WebSocket attach with auto-reconnect and replay-from-last-seq. Zero runtime deps. |
+| [`@claude-worker/react`](packages/react) | The headless React layer: `useClaudeSession` hook + pure transcript reducer. No styling opinion. |
+| [`@claude-worker/ui`](packages/ui) | The styled agent-control component library: session panel (status bar, streaming transcript, tool-call cards, permission prompts, composer), session list, and the underlying primitives. Tailwind v4 + Base UI + cva; light/dark via tokens. See `packages/ui/README.md` for consumer wiring. |
 | `apps/web` | Full session-control web app (dashboard): session list, create/resume flow, live panel, settings. |
 | `apps/demo` | Minimal-chrome Vite + React consumer proving `@claude-worker/ui` is portable. |
+| `apps/docs` | This documentation site (Astro), deployed to GitHub Pages on push to `main`. |
 
 ## Quickstart
 
@@ -188,6 +208,8 @@ TS source via the `@claude-worker/source` export condition (`node --conditions=@
 
 ## Status
 
-V1 / proof-of-concept, plus the first post-V1 layer (the job queue) landing. See
-`docs/prd-claude-worker.md` for the full PRD and open questions (naming, transport evolution,
-unattended permission policy).
+0.1.0 — early but real: runner, protocol, server, client, headless react layer, styled UI, web
+dashboard, and the job queue are all in and tested. Expect the protocol to evolve
+(`PROTOCOL_VERSION` guards breaking changes). See the [PRD](docs/prd-claude-worker.md) for scope
+and the [roadmap](docs/roadmap.md) for what's shipped, what's next, and the open questions
+(naming, compliance posture).

@@ -1,0 +1,35 @@
+---
+import type { MarkdownHeading } from 'astro'
+
+interface Props {
+  headings: MarkdownHeading[]
+}
+
+const { headings } = Astro.props
+const visible = headings.filter((h) => h.depth === 2 || h.depth === 3)
+---
+
+{
+  visible.length > 0 && (
+    <nav class="text-[13px]" aria-label="On this page">
+      <div class="mb-2 text-[11px] font-semibold uppercase tracking-[var(--tracking-caps)] text-fg-4">
+        On this page
+      </div>
+      <ul class="flex flex-col gap-1 border-l border-border">
+        {visible.map((h) => (
+          <li>
+            <a
+              href={`#${h.slug}`}
+              class:list={[
+                '-ml-px block border-l border-transparent py-0.5 text-fg-3 transition-colors hover:border-fg-3 hover:text-fg-1',
+                h.depth === 2 ? 'pl-3' : 'pl-6',
+              ]}
+            >
+              {h.text}
+            </a>
+          </li>
+        ))}
+      </ul>
+    </nav>
+  )
+}

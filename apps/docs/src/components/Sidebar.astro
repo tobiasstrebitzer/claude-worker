@@ -1,0 +1,40 @@
+---
+import type { NavGroup } from '../lib/nav.ts'
+
+interface Props {
+  nav: NavGroup[]
+  currentSlug: string
+}
+
+const { nav, currentSlug } = Astro.props
+---
+
+<nav class="flex flex-col gap-6 text-sm" aria-label="Docs navigation">
+  {
+    nav.map((group) => (
+      <div>
+        <div class="mb-2 px-2 text-[11px] font-semibold uppercase tracking-[var(--tracking-caps)] text-fg-4">
+          {group.label}
+        </div>
+        <ul class="flex flex-col gap-px">
+          {group.items.map((item) => (
+            <li>
+              <a
+                href={item.href}
+                aria-current={item.slug === currentSlug ? 'page' : undefined}
+                class:list={[
+                  'block rounded-md px-2 py-1.5 transition-colors',
+                  item.slug === currentSlug
+                    ? 'bg-accent-tint font-medium text-fg-1'
+                    : 'text-fg-3 hover:bg-surface-hover hover:text-fg-1',
+                ]}
+              >
+                {item.title}
+              </a>
+            </li>
+          ))}
+        </ul>
+      </div>
+    ))
+  }
+</nav>

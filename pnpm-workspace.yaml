@@ -10,3 +10,5 @@ linkWorkspacePackages: true
 allowBuilds:
   esbuild: true
   '@swc/core': true
+  # sharp: Astro's default image service (apps/docs). Prebuilt binaries fetched on install.
+  sharp: true

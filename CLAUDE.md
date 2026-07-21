@@ -1,74 +1,63 @@
 # claude-worker
 
 Web-controlled Agent SDK session runner: embed, watch, and control a close-to-real Claude Code
-session from a host app. PRD: `docs/prd-claude-worker.md`. Read it before changing scope —
-serverless, multi-tenant SaaS, and claude.ai auth are explicit non-goals. The job queue (the
-PRD's "later" layer) landed 2026-07-21 as `packages/queue`; redis/bullmq adapters remain future
-work behind its `QueueAdapter` interface.
+session from a host app. Key docs — read before changing scope or structure:
+
+- `docs/architecture.md` — package map, dependency rule, session/job lifecycles, tooling detail.
+- `docs/prd-claude-worker.md` — rationale; serverless / multi-tenant SaaS / claude.ai auth are non-goals.
+- `docs/roadmap.md` — shipped / next / open questions (naming, compliance posture).
 
 ## Layout
 
-- `packages/protocol` — wire protocol types (events/commands/REST). Dependency-free, browser-safe.
-  Breaking changes bump `PROTOCOL_VERSION`. Everything else depends on this; it depends on nothing.
-- `packages/core` — `SessionRunner` over the Agent SDK's `query()`: input queue, pending
-  approvals (`canUseTool`), SDKMessage→event normalization, seq-numbered event log. No transport.
-- `packages/queue` — job queue over the runner: `QueueAdapter` contract (in-memory bundled;
-  claimNext must stay atomic for future shared backends and skip future `nextRunAt`) + `JobQueue`
-  (concurrency, per-session + daily token budgets, ordered webhook delivery, retries with
-  backoff (`attempts`), wall-clock watchdog (`maxJobDurationMs` + force-close grace), terminal-job
-  retention pruning). Jobs are one-shot: first turn_result completes them and closes the session.
-  No transport.
+- `packages/protocol` — wire protocol types (events/commands/REST). Dependency-free,
+  browser-safe; everything depends on it, it depends on nothing. Breaking → bump `PROTOCOL_VERSION`.
+- `packages/core` — `SessionRunner` over the SDK's `query()`: input queue, pending approvals
+  (`canUseTool`), SDKMessage→event normalization, seq-numbered event log. No transport.
+- `packages/queue` — `JobQueue` + `QueueAdapter` (in-memory bundled; `claimNext` must stay
+  atomic and skip future `nextRunAt`). Concurrency, token budgets, webhooks, retries, watchdog,
+  retention. Jobs are one-shot: first turn_result completes them and closes the session.
 - `packages/server` — HTTP + WS gateway (`node:http` + `ws`), session registry, auth hook;
-  `queue` option mounts `/jobs` + `/queue` routes plus a `/queue/ws` stream of JobEvents + stats
-  (job sessions are ordinary registry sessions).
+  `queue` option mounts `/jobs` + `/queue` routes and a `/queue/ws` JobEvents+stats stream.
 - `packages/client` — REST + WS client on platform `fetch`/`WebSocket`. Zero runtime deps.
-- `packages/react` — the **headless** React layer: `useClaudeSession` + `src/transcript.ts`, a
-  pure reducer (framework-free, unit-tested); keep rendering logic out of it. No styling.
-- `packages/ui` — the **styled** agent-control library (Tailwind v4 + `@base-ui/react` + cva):
-  primitives in `src/components/ui`, agent components (SessionPanel/Transcript/ToolCallCard/
-  PermissionPrompt/Composer/SessionList) in `src/components/agent`. The Composer's input is
-  `src/components/prompt-area` — vendored from just-marketing/prompt-area (MIT, via its shadcn
-  registry) so its popover/chips ride this theme's token bridge; re-vendor + re-apply the
-  token-classname edits to update it. Ships source styles
-  (`@claude-worker/ui/theme.css` + `@source`-scanned classnames — consumer wiring in its README).
-  Design tokens copied from a sibling app; light/dark swaps on `<html data-theme>`.
-- `apps/web` — session-control dashboard (TanStack Router, hash history) consuming client+ui.
-- `apps/demo` — minimal-chrome consumer of client+ui proving portability.
+- `packages/react` — headless: `useClaudeSession` + pure transcript reducer (`src/transcript.ts`,
+  framework-free, unit-tested; keep rendering logic out).
+- `packages/ui` — styled layer (Tailwind v4 + `@base-ui/react` + cva): primitives in
+  `src/components/ui`, agent components in `src/components/agent`. Composer input is vendored
+  prompt-area (`src/components/prompt-area`, MIT) — re-vendor + re-apply token-classname edits
+  to update. Ships source styles (`theme.css` + `@source`-scanned classnames; wiring in its README).
+- `apps/web` — dashboard (TanStack Router, hash history). `apps/demo` — minimal-chrome consumer.
+- `apps/docs` — Astro docs site, deployed to GitHub Pages by `.github/workflows/docs.yml`.
 
 Dependency direction: `protocol ← core ← queue ← server`, `protocol ← client ← react ← ui ← web|demo`.
 The browser side (client/react/ui/apps) must never import core/server or the Agent SDK.
 
-## Tooling conventions (mirrors a sibling app)
+## Tooling
 
-- pnpm workspace, `workspace:*` deps symlinked. TS 7 native preview: typecheck is `tsgo`, not `tsc`.
-- **Source-link:** every package exposes a `@claude-worker/source` export condition pointing at
-  `src/index.ts`. Dev/never-build: Node entrypoints run with
-  `node --conditions=@claude-worker/source --import @swc-node/register/esm-register`; Vite/vitest
-  set `resolve.conditions`. vitest configs additionally alias `@claude-worker/*` to source because
-  vite-node externalizes workspace deps to their unbuilt `build/` entries.
-- `build/` via tsdown only on `prepack`/CI. Never commit or rely on `build/` in dev.
-- Lint: root `oxlint.json`. Orchestration: turbo (`pnpm typecheck|test|build|lint` at root).
-- Imports within a package use explicit `.ts` extensions (`allowImportingTsExtensions`).
+pnpm workspace + turbo (`pnpm typecheck|test|build|lint`); typecheck is `tsgo` (TS 7 preview),
+lint oxlint, `build/` via tsdown only on `prepack`/CI — dev never builds: the
+`@claude-worker/source` export condition resolves packages to `src/index.ts` (Node runs with
+`--conditions=@claude-worker/source` + swc-node; Vite/vitest set `resolve.conditions`, vitest
+also aliases). In-package imports use explicit `.ts` extensions.
 
 ## Testing
 
-- `pnpm test` — core: fake `queryFn` harness (no real CLI spawn); server: real HTTP+WS integration
-  against the fake harness (incl. job routes + webhook receiver); queue: JobQueue against a fake
-  runner; react: transcript reducer.
-- Real-SDK smoke (spawns actual Claude Code, costs tokens): create a `SessionRunner` with a trivial
-  one-turn prompt — see git history / scratchpad `smoke.mjs` pattern. Don't add it to `pnpm test`.
+`pnpm test` — core: fake `queryFn` harness (no CLI spawn); server: real HTTP+WS integration incl.
+job routes + webhook receiver; queue: fake runner; react: reducer. Real-SDK smoke (spawns Claude
+Code, costs tokens): one-turn `SessionRunner` prompt — never in `pnpm test`. Permission-path or
+CLI-control-request changes need a smoke; the fake harness can't validate those payloads.
 
 ## Wrapup Config
 
 - check: `pnpm lint` + `pnpm typecheck`
 - test: `pnpm test`
-- push: no (no remote yet — repo home is an open PRD question)
+- push: yes (github.com/tobiasstrebitzer/claude-worker, branch `master`; repo private pending
+  review — re-enable the docs.yml push trigger once Pages is on)
 - version_bump: yes (aligned across all 7 packages; 0.1.0 first published 2026-07-21)
 - publish: yes — npm `@claude-worker` org via keybridge (`/npm-publish`); run the gatekeeper
-  audit first. MIT licensed (LICENSE copied per package; ui intentionally ships `src/`,
-  allowlisted in `.claude/gatekeeper.json`).
-- docs: root CLAUDE.md + README.md + docs/ (PRD, session-prep notes)
-- frontend_smoke: no (demo app; manual via `pnpm server` + `pnpm demo`)
+  audit first. MIT (LICENSE per package; ui intentionally ships `src/`, allowlisted in
+  `.claude/gatekeeper.json`).
+- docs: root CLAUDE.md + README.md + docs/ + apps/docs (keep site content in sync with README)
+- frontend_smoke: no (manual via `pnpm server` + `pnpm web`)
 - co_authored_by: no (global)
 
 ## Auth red lines (non-negotiable)
@@ -78,45 +67,34 @@ the operator's environment. Never add — and reject any PR that adds — claude
 login UI, subscription-token extraction/storage/forwarding, Claude Code client-identity spoofing,
 or multi-account pooling / rate-limit circumvention. Policy enforcement lives in configuration
 (`requireApiKey`, the one-time 'oauth' notice, `apiKeySource` on SessionInfo/system_init), never
-in tampering with the credential chain. Compliance/legal posture is still under review (see
-README "Auth & Anthropic's terms") — keep that section's status honest as things settle.
+in tampering with the credential chain. Compliance/legal review is in progress — keep the README
+"Auth & Anthropic's terms" section's status honest as things settle.
 
 ## Gotchas
 
 - `cwd` is per-query in the SDK; the runner re-pins it every call. `SessionInfo.id` (server id) ≠
-  `sdkSessionId` (Agent SDK session id used for `resume`).
-- The SDK version floats (`^0.2.x`) and its unions grow (e.g. `PermissionMode` gained `'auto'`);
-  protocol mirrors must be kept assignable BOTH ways (SDK→protocol for events, protocol→SDK for
-  options).
-- Unmodeled SDK messages pass through as `sdk_event` — extend the protocol first-class instead of
-  parsing payloads client-side.
-- `total_cost_usd`/`num_turns` on SDK result messages are **session-cumulative** — roll up with
-  last-seen, never sum. `usage` on the same messages is **per-turn** (smoke-verified) — token
-  accounting sums it; the queue counts input+output+cache_creation+cache_read.
-- On `resume`, the SDK re-streams only *user* messages; the runner backfills full history from
-  `getSessionMessages` as `replay: true` events, and the transcript reducer dedupes the doubled
-  user messages by uuid. `historyFn`/`listSdkSessions` are injectable on runner/server for tests.
-- The SDK does **not** echo streamed-input user messages back at all — the runner emits the
-  `user_message` event itself in `sendMessage()` (the one place input enters).
-- Allowing a permission **must** echo the tool input: the SDK's `PermissionResult` requires
-  `updatedInput` to be a record on allow (undefined → ZodError → the tool errors). The fake
-  harness can't catch schema bugs like this — permission changes need a real-SDK smoke.
-- `AskUserQuestion` rides the same canUseTool path; answers go back as an allow with
-  `updatedInput.answers` (question text → chosen option label(s), comma-joined) — smoke-verified.
-  `questionBehavior` on CreateSessionRequest policy-resolves it for unattended runs ('auto' picks
-  each question's first option, 'deny' tells the model to decide itself); under 'ask', job
-  webhooks carry the full request on `job_progress` and remote controllers answer via
-  `POST /sessions/:id/permissions/:requestId`.
-- `packages/ui` renders markdown via streamdown, which styles itself with Tailwind classes split
-  across `dist/` **chunk files** — consumers must `@source` the whole streamdown `dist` dir, and
-  under pnpm it lives at `packages/ui/node_modules/streamdown`, not the workspace root.
+  `sdkSessionId` (SDK session id used for `resume`).
+- The SDK version floats (`^0.2.x`) and its unions grow; protocol mirrors must stay assignable
+  BOTH ways (SDK→protocol for events, protocol→SDK for options). Unmodeled SDK messages pass
+  through as `sdk_event` — extend the protocol first-class, don't parse payloads client-side.
+- `total_cost_usd`/`num_turns` on result messages are session-cumulative — roll up last-seen,
+  never sum. `usage` is per-turn — token accounting sums input+output+cache_creation+cache_read.
+- On `resume` the SDK re-streams only user messages; the runner backfills full history as
+  `replay: true` events and the reducer dedupes doubled user messages by uuid. The SDK never
+  echoes streamed-input user messages — the runner emits `user_message` itself in `sendMessage()`.
+- Allowing a permission MUST echo the tool input as `updatedInput` (undefined → ZodError → tool
+  errors). The fake harness can't catch this class of bug — permission changes need a smoke.
+- `AskUserQuestion` rides canUseTool; answers = allow with `updatedInput.answers` (question →
+  label(s), comma-joined). `questionBehavior` policy-resolves it unattended ('auto' first option,
+  'deny' model decides); under 'ask', job webhooks carry the request for remote answering.
+- streamdown (ui's markdown renderer) needs its whole `dist` dir `@source`-scanned; under pnpm it
+  lives at `packages/ui/node_modules/streamdown`, not the workspace root.
 - `createWorkerServer` refuses to start without `authenticate` unless `allowUnauthenticated: true`
   (loopback dev only). Keep it that way.
-- Usage telemetry quirks (confirmed via real-SDK smoke, SDK 0.2.141): `supportedModels()` leads
-  with a `value: 'default'` sentinel row (ModelSelect translates it to `set_model` undefined);
-  `getContextUsage().categories[].color` holds CLI theme token names ('inactive', 'promptBorder'),
-  not CSS colors; rate_limit events can omit `utilization` — render unknown, never 0%.
-- A promptless session emits no `system_init` until its first message, but the CLI **does**
-  answer control requests (supportedModels/getContextUsage/...) immediately — the runner fetches
-  capabilities + a context baseline eagerly, and `useClaudeSession` seeds permissionMode/model/
-  status from the `attached` frame's SessionInfo so the UI isn't blank pre-init.
+- CLI telemetry quirks (smoke-verified, SDK 0.2.141): `supportedModels()` leads with a
+  `value: 'default'` sentinel (→ `set_model` undefined); `getContextUsage().categories[].color`
+  holds CLI theme token names, not CSS; rate_limit events can omit `utilization` — render
+  unknown, never 0%.
+- Promptless sessions emit no `system_init` until the first message, but the CLI answers control
+  requests immediately — the runner fetches capabilities/context eagerly; `useClaudeSession`
+  seeds mode/model/status from the `attached` frame's SessionInfo.

@@ -1,0 +1,77 @@
+---
+import type { MarkdownHeading } from 'astro'
+import type { CollectionEntry } from 'astro:content'
+import Base from './Base.astro'
+import Sidebar from '../components/Sidebar.astro'
+import TableOfContents from '../components/TableOfContents.astro'
+import { buildNav, flatNav } from '../lib/nav.ts'
+
+interface Props {
+  entry: CollectionEntry<'docs'>
+  headings: MarkdownHeading[]
+}
+
+const { entry, headings } = Astro.props
+const nav = await buildNav()
+const flat = await flatNav()
+const index = flat.findIndex((item) => item.slug === entry.id)
+const prev = index > 0 ? flat[index - 1] : undefined
+const next = index >= 0 && index < flat.length - 1 ? flat[index + 1] : undefined
+const group = nav.find((g) => g.items.some((i) => i.slug === entry.id))
+---
+
+<Base title={`${entry.data.title} · claude-worker`} description={entry.data.description}>
+  <div class="mx-auto flex max-w-7xl px-4 sm:px-6">
+    <aside
+      class="sticky top-14 hidden h-[calc(100dvh-3.5rem)] w-60 shrink-0 overflow-y-auto border-r border-border py-8 pr-6 md:block"
+    >
+      <Sidebar nav={nav} currentSlug={entry.id} />
+    </aside>
+
+    <main class="min-w-0 flex-1 py-10 md:px-10">
+      <article class="mx-auto max-w-3xl">
+        <p class="mb-2 text-[13px] font-medium text-fg-4">{group?.label}</p>
+        <h1 class="text-3xl font-bold tracking-tight text-fg-1">{entry.data.title}</h1>
+        <p class="mt-2 text-[15px] text-fg-3">{entry.data.description}</p>
+        <div class="prose mt-8">
+          <slot />
+        </div>
+
+        <nav class="mt-12 flex gap-3 border-t border-border pt-6 text-sm" aria-label="Pagination">
+          {
+            prev && (
+              <a
+                href={prev.href}
+                class="group flex-1 rounded-lg border border-border px-4 py-3 transition-colors hover:border-border-strong"
+              >
+                <span class="text-[12px] text-fg-4">Previous</span>
+                <span class="mt-0.5 block font-medium text-fg-2 group-hover:text-fg-1">
+                  {prev.title}
+                </span>
+              </a>
+            )
+          }
+          {
+            next && (
+              <a
+                href={next.href}
+                class="group flex-1 rounded-lg border border-border px-4 py-3 text-right transition-colors hover:border-border-strong"
+              >
+                <span class="text-[12px] text-fg-4">Next</span>
+                <span class="mt-0.5 block font-medium text-fg-2 group-hover:text-fg-1">
+                  {next.title}
+                </span>
+              </a>
+            )
+          }
+        </nav>
+      </article>
+    </main>
+
+    <aside
+      class="sticky top-14 hidden h-[calc(100dvh-3.5rem)] w-56 shrink-0 overflow-y-auto py-10 xl:block"
+    >
+      <TableOfContents headings={headings} />
+    </aside>
+  </div>
+</Base>

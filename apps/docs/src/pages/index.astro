@@ -1,0 +1,135 @@
+---
+import Base from '../layouts/Base.astro'
+
+const base = import.meta.env.BASE_URL.replace(/\/$/, '')
+const repo = 'https://github.com/tobiasstrebitzer/claude-worker'
+
+const features = [
+  {
+    title: 'Close-to-real sessions',
+    body: 'Sessions behave like Claude Code launched in the same directory: same skills, same CLAUDE.md, same MCP config surface, same permission system.',
+  },
+  {
+    title: 'Typed wire protocol',
+    body: 'One ordered stream of seq-numbered events plus a small command set. Versioned from day one — the protocol is the product boundary.',
+  },
+  {
+    title: 'Human-in-the-loop permissions',
+    body: 'Tool calls surface as approve/deny cards; the tool blocks until a client decides, with deny-on-timeout. Safe to point at a real checkout.',
+  },
+  {
+    title: 'Embeddable panel components',
+    body: 'A styled SessionPanel with streaming transcript, tool-call cards, and composer — or go headless with the hook and reducer.',
+  },
+  {
+    title: 'Attach, replay, resume',
+    body: 'Clients reconnect and replay from their last seen event; closed sessions resume from the SDK’s on-disk store with full history backfill.',
+  },
+  {
+    title: 'Unattended job queue',
+    body: 'Schedule one-shot runs with bounded concurrency, token budgets, retries, a wall-clock watchdog, and ordered webhook delivery.',
+  },
+]
+
+const packages = [
+  ['@claude-worker/protocol', 'wire protocol types — events, commands, REST shapes'],
+  ['@claude-worker/core', 'the session runner over the Agent SDK'],
+  ['@claude-worker/queue', 'one-shot jobs, budgets, webhooks'],
+  ['@claude-worker/server', 'HTTP + WebSocket gateway'],
+  ['@claude-worker/client', 'typed client for browsers and Node'],
+  ['@claude-worker/react', 'headless hook + transcript reducer'],
+  ['@claude-worker/ui', 'styled agent-control components'],
+]
+---
+
+<Base
+  title="claude-worker · embed, watch, and control Claude Code sessions"
+  description="Run a close-to-real Claude Code session programmatically via the Anthropic Agent SDK, and embed it in your app: session server, typed wire protocol, and panel components."
+>
+  <main>
+    <section class="mx-auto max-w-4xl px-4 pb-20 pt-24 text-center sm:px-6">
+      <p
+        class="mx-auto mb-6 w-fit rounded-full border border-border bg-surface px-3 py-1 text-[12px] font-medium text-fg-3"
+      >
+        v0.1 · MIT · powered by the official Anthropic Agent SDK
+      </p>
+      <h1 class="text-balance text-4xl font-bold tracking-tight text-fg-1 sm:text-5xl">
+        Claude Code sessions your app can embed, watch, and control
+      </h1>
+      <p class="mx-auto mt-5 max-w-2xl text-pretty text-lg leading-relaxed text-fg-3">
+        claude-worker runs a close-to-real Claude Code session via the Agent SDK and exposes it to
+        your host app — a session server, a typed wire protocol, and embeddable panel components
+        with approve/deny controls.
+      </p>
+      <div class="mt-8 flex items-center justify-center gap-3">
+        <a
+          href={`${base}/docs/getting-started/introduction/`}
+          class="rounded-lg bg-accent px-5 py-2.5 text-sm font-semibold text-accent-fg transition-colors hover:bg-accent-hover"
+          >Get started</a
+        >
+        <a
+          href={repo}
+          class="rounded-lg border border-border bg-surface px-5 py-2.5 text-sm font-semibold text-fg-1 transition-colors hover:border-border-strong"
+          >GitHub</a
+        >
+      </div>
+      <div
+        class="mx-auto mt-10 w-fit rounded-lg border border-border bg-code-bg px-5 py-3 font-mono text-[13px] text-fg-2"
+      >
+        npm install @claude-worker/server @claude-worker/client @claude-worker/ui
+      </div>
+    </section>
+
+    <section class="border-t border-border bg-surface">
+      <div class="mx-auto grid max-w-6xl gap-px overflow-hidden px-4 py-16 sm:px-6 md:grid-cols-2 lg:grid-cols-3">
+        {
+          features.map((f) => (
+            <div class="rounded-xl p-6">
+              <h2 class="text-[15px] font-semibold text-fg-1">{f.title}</h2>
+              <p class="mt-2 text-sm leading-relaxed text-fg-3">{f.body}</p>
+            </div>
+          ))
+        }
+      </div>
+    </section>
+
+    <section class="border-t border-border">
+      <div class="mx-auto max-w-6xl px-4 py-16 sm:px-6">
+        <h2 class="text-xl font-bold tracking-tight text-fg-1">Seven focused packages</h2>
+        <p class="mt-2 max-w-2xl text-sm text-fg-3">
+          Use the full stack or just the layers you need — from in-process
+          <code class="rounded bg-code-bg px-1.5 py-0.5 font-mono text-[12px]">SessionRunner</code>
+          to drop-in
+          <code class="rounded bg-code-bg px-1.5 py-0.5 font-mono text-[12px]">SessionPanel</code>.
+        </p>
+        <ul class="mt-6 grid gap-3 sm:grid-cols-2">
+          {
+            packages.map(([name, blurb]) => (
+              <li>
+                <a
+                  href={`https://www.npmjs.com/package/${name}`}
+                  class="group flex items-baseline justify-between gap-4 rounded-lg border border-border px-4 py-3 transition-colors hover:border-border-strong"
+                >
+                  <span class="font-mono text-[13px] font-medium text-fg-1">{name}</span>
+                  <span class="hidden text-right text-[12px] text-fg-4 sm:block">{blurb}</span>
+                </a>
+              </li>
+            ))
+          }
+        </ul>
+      </div>
+    </section>
+
+    <footer class="border-t border-border">
+      <div
+        class="mx-auto flex max-w-6xl flex-col items-center justify-between gap-3 px-4 py-8 text-[13px] text-fg-4 sm:flex-row sm:px-6"
+      >
+        <span>MIT © Tobias Strebitzer</span>
+        <span>
+          Not affiliated with Anthropic — credentials stay with the operator’s official SDK/CLI
+          environment.
+        </span>
+      </div>
+    </footer>
+  </main>
+</Base>
