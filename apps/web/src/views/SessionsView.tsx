@@ -34,10 +34,14 @@ const PERMISSION_MODES: Array<{ value: PermissionMode; label: string }> = [
   { value: 'bypassPermissions', label: 'bypassPermissions — no prompts (danger)' },
 ]
 
+/** Aliases the CLI resolves to current model ids; free-form ids are accepted too. */
+const MODEL_SUGGESTIONS = ['sonnet', 'opus', 'haiku', 'fable']
+
 function CreateSessionCard({ onCreated }: { onCreated: (id: string) => void }) {
   const [cwd, setCwd] = useState(() => localStorage.getItem(CWD_KEY) ?? '')
   const [prompt, setPrompt] = useState('')
   const [mode, setMode] = useState<PermissionMode>('default')
+  const [model, setModel] = useState('')
   const [creating, setCreating] = useState(false)
 
   const [sdkSessions, setSdkSessions] = useState<SdkSessionSummary[] | undefined>()
@@ -56,6 +60,7 @@ function CreateSessionCard({ onCreated }: { onCreated: (id: string) => void }) {
         cwd: dir,
         prompt: resume ? undefined : prompt.trim() || undefined,
         permissionMode: mode,
+        model: model.trim() || undefined,
         resume: resume?.sessionId,
         settingSources: ['user', 'project'],
       })
@@ -125,6 +130,22 @@ function CreateSessionCard({ onCreated }: { onCreated: (id: string) => void }) {
                 ))}
               </SelectContent>
             </Select>
+          </label>
+          <label className='flex min-w-0 flex-col gap-1'>
+            <span className='text-label font-medium text-fg-3'>Model (optional)</span>
+            <Input
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              placeholder='default'
+              spellCheck={false}
+              list='model-suggestions'
+              className='min-w-36 font-mono'
+            />
+            <datalist id='model-suggestions'>
+              {MODEL_SUGGESTIONS.map((m) => (
+                <option key={m} value={m} />
+              ))}
+            </datalist>
           </label>
           <Button onClick={() => void create()} disabled={creating}>
             {creating ? <Spinner className='size-3.5 text-current' /> : <Plus className='size-4' />}

@@ -16,7 +16,7 @@ export function CodeBlock({ code, label, copyable = true, className }: CodeBlock
   return (
     <div
       data-slot='code-block'
-      className={cn('overflow-hidden rounded-md border border-border bg-code', className)}>
+      className={cn('overflow-hidden rounded-md border border-border bg-code-bg', className)}>
       {label !== undefined || copyable ? (
         <div className='flex h-8 items-center justify-between border-b border-border px-2.5'>
           <span className='font-mono text-label text-fg-3'>{label}</span>

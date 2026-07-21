@@ -349,6 +349,9 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
       case 'set_permission_mode':
         await runner.setPermissionMode(frame.mode)
         return
+      case 'set_model':
+        await runner.setModel(frame.model)
+        return
       case 'close':
         runner.close('client')
         return

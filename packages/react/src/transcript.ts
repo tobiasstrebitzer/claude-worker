@@ -1,8 +1,10 @@
 import type {
   ContentBlock,
+  ModelOption,
   PermissionRequest,
   SessionEvent,
   SessionStatus,
+  SlashCommandInfo,
   ToolResultBlock,
 } from '@claude-worker/protocol'
 
@@ -46,6 +48,10 @@ export type TranscriptState = {
   model?: string
   cwd?: string
   sdkSessionId?: string
+  /** Models the session can switch to (from the `capabilities` event). */
+  models?: ModelOption[]
+  /** Slash commands the CLI accepts (from the `capabilities` event). */
+  commands?: SlashCommandInfo[]
   items: TranscriptItem[]
   pendingApprovals: PermissionRequest[]
   totalCostUsd: number
@@ -76,6 +82,9 @@ function contentToBlocks(content: string | ContentBlock[]): ContentBlock[] {
   return typeof content === 'string' ? [{ type: 'text', text: content }] : content
 }
 
+/** CLI-side command output arrives as user text wrapped in local-command tags. */
+const LOCAL_COMMAND_OUTPUT = /^<local-command-(stdout|stderr)>([\s\S]*?)<\/local-command-\1>$/
+
 function upsert(items: TranscriptItem[], item: TranscriptItem): TranscriptItem[] {
   const index = items.findIndex((existing) => existing.id === item.id && existing.kind === item.kind)
   if (index === -1) return [...items, item]
@@ -100,6 +109,13 @@ export function applyEvent(state: TranscriptState, event: SessionEvent): Transcr
     case 'status_changed':
       return { ...base, status: event.status, statusDetail: event.detail }
 
+    case 'capabilities':
+      return { ...base, models: event.models, commands: event.commands }
+
+    case 'model_changed':
+      // undefined = reset to the server default; keep showing the last known model.
+      return event.model === undefined ? base : { ...base, model: event.model }
+
     case 'user_message': {
       let items = base.items
       for (const block of contentToBlocks(event.message.content)) {
@@ -117,11 +133,22 @@ export function applyEvent(state: TranscriptState, event: SessionEvent): Transcr
               : item,
           )
         } else if (block.type === 'text' && !event.synthetic) {
-          items = upsert(items, {
-            kind: 'user',
-            id: event.uuid ?? `user-${event.seq}`,
-            text: (block as { text: string }).text,
-          })
+          const text = (block as { text: string }).text
+          const localOutput = LOCAL_COMMAND_OUTPUT.exec(text.trim())
+          if (localOutput) {
+            items = upsert(items, {
+              kind: 'notice',
+              id: event.uuid ?? `user-${event.seq}`,
+              level: localOutput[1] === 'stderr' ? 'error' : 'info',
+              text: localOutput[2].trim(),
+            })
+          } else {
+            items = upsert(items, {
+              kind: 'user',
+              id: event.uuid ?? `user-${event.seq}`,
+              text,
+            })
+          }
         }
       }
       return { ...base, items }

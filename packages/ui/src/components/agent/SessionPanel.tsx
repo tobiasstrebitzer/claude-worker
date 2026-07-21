@@ -1,8 +1,9 @@
-import type { ReactNode } from 'react'
+import { useMemo, type ReactNode } from 'react'
 import type { ClaudeWorkerClient } from '@claude-worker/client'
 import { useClaudeSession } from '@claude-worker/react'
 import { cn } from '../../lib/utils.ts'
 import { Composer } from './Composer.tsx'
+import { ModelSelect } from './ModelSelect.tsx'
 import { PermissionPrompt } from './PermissionPrompt.tsx'
 import { StatusBar } from './StatusBar.tsx'
 import { Transcript } from './Transcript.tsx'
@@ -21,9 +22,33 @@ export interface SessionPanelProps {
  * sessions.
  */
 export function SessionPanel({ client, sessionId, header, className }: SessionPanelProps) {
-  const { state, connected, send, approve, deny, interrupt } = useClaudeSession(client, sessionId)
+  const { state, connected, send, approve, deny, interrupt, setModel } = useClaudeSession(
+    client,
+    sessionId,
+  )
   const busy = state.status === 'running' || state.status === 'awaiting_approval'
   const ended = state.status === 'failed' || state.status === 'closed'
+
+  // "/model" is handled panel-side (see handleSend) — surface it in the autocomplete
+  // even though the CLI's command list doesn't include it.
+  const commands = useMemo(() => {
+    if (!state.commands) return undefined
+    if (state.commands.some((c) => c.name === 'model')) return state.commands
+    return [
+      { name: 'model', description: 'Switch the model for this session', argumentHint: '<model>' },
+      ...state.commands,
+    ]
+  }, [state.commands])
+
+  // "/model <id>" switches the model directly instead of going to the CLI.
+  const handleSend = (text: string) => {
+    const modelCommand = /^\/model\s+(\S+)$/.exec(text)
+    if (modelCommand) {
+      setModel(modelCommand[1])
+      return
+    }
+    send(text)
+  }
 
   return (
     <div
@@ -46,7 +71,23 @@ export function SessionPanel({ client, sessionId, header, className }: SessionPa
           </div>
         </div>
       ) : null}
-      <Composer onSend={send} onInterrupt={interrupt} busy={busy} disabled={ended || !sessionId} />
+      <Composer
+        onSend={handleSend}
+        onInterrupt={interrupt}
+        busy={busy}
+        disabled={ended || !sessionId}
+        commands={commands}
+        toolbar={
+          state.models?.length ? (
+            <ModelSelect
+              models={state.models}
+              model={state.model}
+              onModelChange={setModel}
+              disabled={ended}
+            />
+          ) : null
+        }
+      />
     </div>
   )
 }

@@ -204,4 +204,41 @@ describe('transcript reducer', () => {
     expect(state.items.filter((i) => i.kind === 'user')).toHaveLength(1)
     expect(state.items.map((i) => i.kind)).toEqual(['user', 'assistant_text'])
   })
+
+  it('renders local-command output as a notice, not a user bubble', () => {
+    seq = 0
+    const state = run(initialTranscriptState, [
+      {
+        type: 'user_message',
+        message: {
+          role: 'user',
+          content: '<local-command-stdout>Set model to sonnet</local-command-stdout>',
+        },
+        parentToolUseId: null,
+        uuid: 'lc-1',
+      },
+    ])
+    expect(state.items).toEqual([
+      { kind: 'notice', id: 'lc-1', level: 'info', text: 'Set model to sonnet' },
+    ])
+  })
+
+  it('tracks capabilities and model changes', () => {
+    seq = 0
+    const state = run(initialTranscriptState, [
+      {
+        type: 'capabilities',
+        models: [{ value: 'claude-opus-4-8', displayName: 'Opus 4.8' }],
+        commands: [{ name: 'compact', description: 'Compact the conversation' }],
+      },
+      { type: 'model_changed', model: 'claude-opus-4-8' },
+    ])
+    expect(state.models).toEqual([{ value: 'claude-opus-4-8', displayName: 'Opus 4.8' }])
+    expect(state.commands?.map((c) => c.name)).toEqual(['compact'])
+    expect(state.model).toBe('claude-opus-4-8')
+
+    // reset-to-default keeps showing the last known model
+    const after = applyEvent(state, ev({ type: 'model_changed', model: undefined }))
+    expect(after.model).toBe('claude-opus-4-8')
+  })
 })

@@ -10,6 +10,7 @@ function fakeHarness() {
   let done = false
   const captured: { options?: Options; inputs: SDKUserMessage[] } = { inputs: [] }
   const interrupt = vi.fn(async () => {})
+  const setModel = vi.fn(async () => {})
 
   const emit = (msg: SDKMessage) => {
     if (waiter) {
@@ -41,6 +42,7 @@ function fakeHarness() {
       })
     },
     interrupt,
+    setModel,
     close: end,
   } as unknown as Query
 
@@ -53,7 +55,7 @@ function fakeHarness() {
     })()
     return query
   }
-  return { emit, end, captured, interrupt, queryFn }
+  return { emit, end, captured, interrupt, setModel, queryFn }
 }
 
 const initMessage = {
@@ -158,6 +160,13 @@ describe('createWorkerServer', () => {
     await vi.waitFor(() => {
       expect(harness.captured.inputs.map((m) => m.message.content)).toContain('follow-up')
     })
+
+    // command: set_model reaches the query and round-trips a model_changed event
+    ws.send(JSON.stringify({ type: 'set_model', model: 'claude-opus-4-8' }))
+    await collector.waitFor(
+      (f) => f.type === 'event' && f.event.type === 'model_changed' && f.event.model === 'claude-opus-4-8',
+    )
+    expect(harness.setModel).toHaveBeenCalledWith('claude-opus-4-8')
 
     // permission round-trip
     const resultPromise = harness.captured.options!.canUseTool!(

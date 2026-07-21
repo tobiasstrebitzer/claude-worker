@@ -51,13 +51,17 @@ export class SessionHandle {
   #closed = false
   #retries = 0
   #outbox: string[] = []
+  #connectTimer: ReturnType<typeof setTimeout> | undefined
 
   constructor(client: ClaudeWorkerClient, sessionId: string, options: AttachOptions = {}) {
     this.#client = client
     this.sessionId = sessionId
     this.#options = { reconnect: true, ...options }
     this.#lastSeq = options.afterSeq ?? 0
-    this.#connect()
+    // Deferred a tick so an attach that is detached in the same tick (React
+    // StrictMode's throwaway dev mount) never opens a socket — closing a
+    // WebSocket mid-upgrade breaks proxies (vite logs EPIPE) for nothing.
+    this.#connectTimer = setTimeout(() => this.#connect(), 0)
   }
 
   get lastSeq(): number {
@@ -97,6 +101,11 @@ export class SessionHandle {
     this.#sendFrame({ type: 'set_permission_mode', mode })
   }
 
+  /** Switch the model for subsequent responses; omit `model` for the default. */
+  setModel(model?: string): void {
+    this.#sendFrame({ type: 'set_model', model })
+  }
+
   /** Ask the server to terminate the session (the handle disconnects too). */
   closeSession(): void {
     this.#sendFrame({ type: 'close' })
@@ -106,6 +115,7 @@ export class SessionHandle {
   /** Disconnect this handle without touching the session. */
   detach(): void {
     this.#closed = true
+    clearTimeout(this.#connectTimer)
     this.#ws?.close()
     this.#ws = undefined
   }
@@ -154,7 +164,7 @@ export class SessionHandle {
       this.#emit('connectionChange', false)
       if (this.#closed || !this.#options.reconnect) return
       const delay = Math.min(500 * 2 ** this.#retries++, 10_000)
-      setTimeout(() => this.#connect(), delay)
+      this.#connectTimer = setTimeout(() => this.#connect(), delay)
     }
     ws.onerror = () => {
       // onclose follows; reconnect handled there

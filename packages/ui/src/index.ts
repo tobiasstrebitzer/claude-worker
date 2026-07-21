@@ -25,6 +25,25 @@ export { Toaster, toast } from './components/ui/Sonner.tsx'
 export { CopyButton, type CopyButtonProps } from './components/ui/CopyButton.tsx'
 export { Spinner } from './components/ui/Spinner.tsx'
 export { CodeBlock, type CodeBlockProps } from './components/ui/CodeBlock.tsx'
+// Prompt input (vendored just-marketing/prompt-area, themed to these tokens)
+export {
+  PromptArea,
+  usePromptAreaState,
+  commandTrigger,
+  mentionTrigger,
+  hashtagTrigger,
+  segmentsToPlainText,
+  plainTextToSegments,
+  isSegmentsEmpty,
+  getChipsByTrigger,
+  type PromptAreaHandle,
+  type PromptAreaProps,
+  type Segment,
+  type ChipSegment,
+  type TextSegment,
+  type TriggerConfig,
+  type TriggerSuggestion,
+} from './components/prompt-area/index.ts'
 
 // Agent-control components
 export { SessionPanel, type SessionPanelProps } from './components/agent/SessionPanel.tsx'
@@ -42,6 +61,7 @@ export { Loader } from './components/agent/Loader.tsx'
 export { ToolCallCard, type ToolCallCardProps, type ToolCallItem } from './components/agent/ToolCallCard.tsx'
 export { PermissionPrompt, type PermissionPromptProps } from './components/agent/PermissionPrompt.tsx'
 export { Composer, type ComposerProps } from './components/agent/Composer.tsx'
+export { ModelSelect, type ModelSelectProps } from './components/agent/ModelSelect.tsx'
 export { StatusBar, type StatusBarProps } from './components/agent/StatusBar.tsx'
 export {
   SessionList,

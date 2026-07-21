@@ -93,6 +93,29 @@ export type PermissionRequest = {
 export type PermissionDecisionSource = 'client' | 'timeout' | 'policy'
 
 // ---------------------------------------------------------------------------
+// Session capabilities (models / slash commands the CLI reports)
+// ---------------------------------------------------------------------------
+
+/** A model the session can switch to (SDK ModelInfo mirror; fields it may grow stay unknown). */
+export type ModelOption = {
+  /** Model id for createSession.model / set_model. */
+  value: string
+  displayName: string
+  description?: string
+}
+
+/** A slash command the CLI accepts as user-message text (SDK SlashCommand mirror). */
+export type SlashCommandInfo = {
+  /** Command name without the leading slash. */
+  name: string
+  description?: string
+  /** Hint for arguments, e.g. "<file>". */
+  argumentHint?: string
+  /** Alternate names resolving to this command. */
+  aliases?: string[]
+}
+
+// ---------------------------------------------------------------------------
 // Session events (server -> client)
 // ---------------------------------------------------------------------------
 
@@ -115,6 +138,11 @@ export type SessionEventBody =
       mcpServers: Array<{ name: string; status: string }>
     }
   | { type: 'status_changed'; status: SessionStatus; detail?: string }
+  /** Models and slash commands available to this session; fetched from the CLI after
+   * init. Late attachers get it via replay like any other event. */
+  | { type: 'capabilities'; models: ModelOption[]; commands: SlashCommandInfo[] }
+  /** The session's model changed via `set_model`. `model` undefined = back to default. */
+  | { type: 'model_changed'; model?: string }
   | {
       type: 'assistant_message'
       message: ApiMessage
@@ -200,6 +228,8 @@ export type SessionCommand =
     }
   | { type: 'interrupt' }
   | { type: 'set_permission_mode'; mode: PermissionMode }
+  /** Switch the model for subsequent responses; omit `model` for the default. */
+  | { type: 'set_model'; model?: string }
   | { type: 'close' }
 
 // ---------------------------------------------------------------------------

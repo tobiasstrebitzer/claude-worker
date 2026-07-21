@@ -11,6 +11,7 @@ export type UseClaudeSessionResult = {
   deny: (requestId: string, message?: string) => void
   interrupt: () => void
   setPermissionMode: (mode: PermissionMode) => void
+  setModel: (model?: string) => void
   closeSession: () => void
 }
 
@@ -46,6 +47,7 @@ export function useClaudeSession(
       deny: (requestId, message) => handleRef.current?.deny(requestId, message),
       interrupt: () => handleRef.current?.interrupt(),
       setPermissionMode: (mode) => handleRef.current?.setPermissionMode(mode),
+      setModel: (model) => handleRef.current?.setModel(model),
       closeSession: () => handleRef.current?.closeSession(),
     }),
     [state, connected],

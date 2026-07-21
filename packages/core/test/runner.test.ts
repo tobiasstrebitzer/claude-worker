@@ -8,14 +8,21 @@ import type {
 import type { SessionEvent } from '@claude-worker/protocol'
 import { SessionRunner, type SessionRunnerConfig } from '../src/index.ts'
 
-/** Controllable stand-in for the SDK: emit SDKMessages, capture options + streamed input. */
-function fakeHarness() {
+type HarnessCapabilities = {
+  models?: Array<{ value: string; displayName: string; description: string }>
+  commands?: Array<{ name: string; description: string; argumentHint: string }>
+}
+
+/** Controllable stand-in for the SDK: emit SDKMessages, capture options + streamed input.
+ * Pass `capabilities` to also implement supportedModels/supportedCommands. */
+function fakeHarness(capabilities?: HarnessCapabilities) {
   const messages: SDKMessage[] = []
   let waiter: ((r: IteratorResult<SDKMessage>) => void) | null = null
   let done = false
   const captured: { options?: Options; inputs: SDKUserMessage[] } = { inputs: [] }
   const interrupt = vi.fn(async () => {})
   const setPermissionMode = vi.fn(async () => {})
+  const setModel = vi.fn(async () => {})
 
   const emit = (msg: SDKMessage) => {
     if (waiter) {
@@ -49,7 +56,14 @@ function fakeHarness() {
     },
     interrupt,
     setPermissionMode,
+    setModel,
     close: end,
+    ...(capabilities
+      ? {
+          supportedModels: vi.fn(async () => capabilities.models ?? []),
+          supportedCommands: vi.fn(async () => capabilities.commands ?? []),
+        }
+      : {}),
   } as unknown as Query
 
   const queryFn = (params: { prompt: string | AsyncIterable<SDKUserMessage>; options?: Options }) => {
@@ -62,7 +76,7 @@ function fakeHarness() {
     return query
   }
 
-  return { emit, end, captured, interrupt, setPermissionMode, queryFn }
+  return { emit, end, captured, interrupt, setPermissionMode, setModel, queryFn }
 }
 
 const initMessage = {
@@ -113,8 +127,11 @@ const resultMessage = {
   session_id: 'sdk-session-1',
 } as unknown as SDKMessage
 
-function makeRunner(overrides: Partial<SessionRunnerConfig> = {}) {
-  const harness = fakeHarness()
+function makeRunner(
+  overrides: Partial<SessionRunnerConfig> = {},
+  capabilities?: HarnessCapabilities,
+) {
+  const harness = fakeHarness(capabilities)
   const runner = new SessionRunner({
     cwd: '/tmp/project',
     queryFn: harness.queryFn,
@@ -138,6 +155,7 @@ describe('SessionRunner', () => {
 
     const types = events.map((e) => e.type)
     expect(types).toEqual([
+      'status_changed', // idle — no initial prompt, accepting input
       'system_init',
       'status_changed', // running
       'assistant_message',
@@ -247,6 +265,34 @@ describe('SessionRunner', () => {
     expect(runner.resolvePermission('unknown', { behavior: 'allow' })).toBe(false)
   })
 
+  it('setModel switches the model and emits model_changed', async () => {
+    const { harness, runner, events } = makeRunner()
+    void runner.start()
+    harness.emit(initMessage)
+    await tick()
+
+    await runner.setModel('claude-opus-4-8')
+    expect(harness.setModel).toHaveBeenCalledWith('claude-opus-4-8')
+    expect(runner.info().model).toBe('claude-opus-4-8')
+    expect(events.at(-1)).toMatchObject({ type: 'model_changed', model: 'claude-opus-4-8' })
+  })
+
+  it('emits capabilities after init when the query reports models/commands', async () => {
+    const { harness, runner, events } = makeRunner({}, {
+      models: [{ value: 'claude-opus-4-8', displayName: 'Opus 4.8', description: 'Most capable' }],
+      commands: [{ name: 'compact', description: 'Compact the conversation', argumentHint: '' }],
+    })
+    void runner.start()
+    harness.emit(initMessage)
+    await tick()
+
+    const capabilities = events.find((e) => e.type === 'capabilities')
+    expect(capabilities).toMatchObject({
+      models: [{ value: 'claude-opus-4-8', displayName: 'Opus 4.8' }],
+      commands: [{ name: 'compact' }],
+    })
+  })
+
   it('replays events from a given seq on subscribe', async () => {
     const { harness, runner } = makeRunner()
     void runner.start()
@@ -255,8 +301,8 @@ describe('SessionRunner', () => {
     await tick()
 
     const replayed: SessionEvent[] = []
-    runner.subscribe((e) => replayed.push(e), 2)
-    expect(replayed.map((e) => e.seq)).toEqual([3])
+    runner.subscribe((e) => replayed.push(e), 3)
+    expect(replayed.map((e) => e.seq)).toEqual([4])
 
     harness.emit(resultMessage)
     await tick()

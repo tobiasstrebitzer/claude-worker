@@ -33,7 +33,7 @@ export function PermissionPrompt({ request, onApprove, onDeny, className }: Perm
             {showInput ? 'Hide' : 'Show'} {request.toolName} input
           </button>
           {showInput ? (
-            <pre className='mt-1.5 max-h-48 overflow-auto rounded-md bg-code px-2.5 py-1.5 font-mono text-label whitespace-pre-wrap text-fg-2'>
+            <pre className='mt-1.5 max-h-48 overflow-auto rounded-md bg-code-bg px-2.5 py-1.5 font-mono text-label whitespace-pre-wrap text-fg-2'>
               {JSON.stringify(request.input, null, 2)}
             </pre>
           ) : null}

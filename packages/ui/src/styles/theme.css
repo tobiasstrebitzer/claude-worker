@@ -188,7 +188,10 @@
   --color-ring: var(--ring);
 
   --color-surface-hover: var(--bg-surface-hover);
-  --color-code: var(--bg-code);
+  /* Named code-bg (not code) so it can't shadow the --text-code font-size token:
+     with a --color-code defined, `text-code` would resolve to the color namespace
+     and paint text in the code *background* color — invisible in both themes. */
+  --color-code-bg: var(--bg-code);
   --color-border-light: var(--border-light);
   --color-border-strong: var(--border-strong);
   --color-fg-1: var(--fg-1);
@@ -317,4 +320,94 @@
       )
       border-box;
   box-shadow: var(--frame-shadow);
+}
+
+/* ── prompt-area (vendored from just-marketing/prompt-area, MIT) ──────────────
+   Hand-authored styles its contentEditable chips/markers depend on; colors ride
+   the stock-name bridge vars above (--secondary/--foreground). */
+.prompt-area-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+  vertical-align: baseline;
+  margin: 0 1px;
+  background-color: var(--secondary);
+  color: var(--foreground);
+  transition:
+    background-color 0.2s ease,
+    transform 0.15s cubic-bezier(0.4, 0, 0.2, 1),
+    box-shadow 0.2s ease;
+  position: relative;
+  overflow: hidden;
+}
+.prompt-area-chip:hover {
+  background-color: color-mix(in srgb, var(--secondary) 80%, var(--foreground) 20%);
+  box-shadow: 0 1px 4px color-mix(in srgb, var(--foreground) 10%, transparent);
+}
+.prompt-area-chip:active {
+  transform: scale(0.93);
+  background-color: color-mix(in srgb, var(--secondary) 70%, var(--foreground) 30%);
+  box-shadow: 0 0 0 transparent;
+  transition:
+    background-color 0.05s ease,
+    transform 0.08s cubic-bezier(0.4, 0, 0.2, 1),
+    box-shadow 0.05s ease;
+}
+@keyframes prompt-area-chip-ripple {
+  0% {
+    transform: scale(0);
+    opacity: 0.4;
+  }
+  100% {
+    transform: scale(2.5);
+    opacity: 0;
+  }
+}
+.prompt-area-chip-ripple {
+  position: absolute;
+  border-radius: 50%;
+  width: 100%;
+  aspect-ratio: 1;
+  background: color-mix(in srgb, var(--foreground) 15%, transparent);
+  pointer-events: none;
+  animation: prompt-area-chip-ripple 0.45s ease-out forwards;
+}
+.prompt-area-md-marker {
+  font-size: 0;
+  display: inline;
+}
+.prompt-area-list-bullet {
+  font-size: 0;
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+  transform: translateY(-1.5px);
+  margin-right: 4px;
+}
+.prompt-area-list-bullet::before {
+  content: '';
+  width: var(--prompt-area-bullet-size, 6px);
+  height: var(--prompt-area-bullet-size, 6px);
+  border-radius: 50%;
+  background: currentColor;
+}
+.prompt-area-list-indent {
+  display: inline-block;
+  white-space: pre;
+}
+.prompt-area-chip--inline {
+  padding: 0;
+  border-radius: 0;
+  margin: 0;
+  font-weight: 700;
+}
+@media (prefers-reduced-motion: reduce) {
+  .prompt-area-editor {
+    transition: none !important;
+  }
 }

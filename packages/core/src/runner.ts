@@ -193,6 +193,13 @@ export class SessionRunner {
     this.#permissionMode = mode
   }
 
+  /** Switch the model for subsequent responses; undefined = back to the default. */
+  async setModel(model?: string): Promise<void> {
+    await this.#query?.setModel(model)
+    this.#model = model
+    this.#emit({ type: 'model_changed', model })
+  }
+
   /** Emit a session_error and terminate. For host-enforced policy (e.g. requireApiKey). */
   fail(message: string): void {
     if (this.#closed) return
@@ -232,6 +239,10 @@ export class SessionRunner {
       await this.#backfillHistory()
       if (this.#closed) return
       this.#query = queryFn({ prompt: this.#input, options: this.#buildOptions() })
+      // Without an initial prompt the CLI stays silent (no init handshake) until the
+      // first message arrives, so 'starting' would never resolve — the session is
+      // already accepting input, which is what 'idle' means.
+      if (!this.#config.prompt) this.#setStatus('idle')
       for await (const message of this.#query) {
         this.#handleMessage(message)
       }
@@ -339,6 +350,7 @@ export class SessionRunner {
         mcpServers: msg.mcp_servers,
       })
       this.#setStatus('running')
+      void this.#fetchCapabilities()
       return
     }
     if (msg.type === 'system' && msg.subtype === 'session_state_changed') {
@@ -358,6 +370,39 @@ export class SessionRunner {
         // Fallback for SDK versions without session_state_changed.
         if (this.#pending.size === 0) this.#setStatus('idle')
       }
+    }
+  }
+
+  /** After init, ask the CLI what models/commands it supports and surface them as an
+   * event (replayed to late attachers). Optional-chained: injected fake queries in
+   * tests may not implement these, and a failure must not affect the session. */
+  async #fetchCapabilities(): Promise<void> {
+    const query = this.#query
+    if (typeof query?.supportedModels !== 'function' || typeof query.supportedCommands !== 'function') {
+      return
+    }
+    try {
+      const [models, commands] = await Promise.all([
+        query.supportedModels(),
+        query.supportedCommands(),
+      ])
+      if (this.#closed) return
+      this.#emit({
+        type: 'capabilities',
+        models: models.map((m) => ({
+          value: m.value,
+          displayName: m.displayName,
+          description: m.description,
+        })),
+        commands: commands.map((c) => ({
+          name: c.name,
+          description: c.description,
+          argumentHint: c.argumentHint,
+          aliases: c.aliases,
+        })),
+      })
+    } catch {
+      // Capabilities are best-effort decoration; the session works without them.
     }
   }
 

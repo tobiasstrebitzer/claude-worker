@@ -16,7 +16,10 @@ queues, serverless, multi-tenant SaaS, and claude.ai auth are explicit non-goals
   pure reducer (framework-free, unit-tested); keep rendering logic out of it. No styling.
 - `packages/ui` — the **styled** agent-control library (Tailwind v4 + `@base-ui/react` + cva):
   primitives in `src/components/ui`, agent components (SessionPanel/Transcript/ToolCallCard/
-  PermissionPrompt/Composer/SessionList) in `src/components/agent`. Ships source styles
+  PermissionPrompt/Composer/SessionList) in `src/components/agent`. The Composer's input is
+  `src/components/prompt-area` — vendored from just-marketing/prompt-area (MIT, via its shadcn
+  registry) so its popover/chips ride this theme's token bridge; re-vendor + re-apply the
+  token-classname edits to update it. Ships source styles
   (`@claude-worker/ui/theme.css` + `@source`-scanned classnames — consumer wiring in its README).
   Design tokens copied from a sibling app; light/dark swaps on `<html data-theme>`.
 - `apps/web` — session-control dashboard (TanStack Router, hash history) consuming client+ui.
