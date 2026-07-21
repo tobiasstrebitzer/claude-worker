@@ -1,10 +1,8 @@
 name: Deploy docs
 
 on:
-  # Deploy-on-push is parked until GitHub Pages is enabled for this repo
-  # (Settings → Pages → Source: GitHub Actions). Then uncomment:
-  # push:
-  #   branches: [master]
+  push:
+    branches: [master]
   workflow_dispatch:
 
 permissions:
