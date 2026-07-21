@@ -6,6 +6,7 @@ import { Composer } from './Composer.tsx'
 import { ModelSelect } from './ModelSelect.tsx'
 import { PermissionModeSelect } from './PermissionModeSelect.tsx'
 import { PermissionPrompt } from './PermissionPrompt.tsx'
+import { QuestionPrompt, parseUserQuestions } from './QuestionPrompt.tsx'
 import { StatusBar } from './StatusBar.tsx'
 import { Transcript } from './Transcript.tsx'
 
@@ -59,14 +60,24 @@ export function SessionPanel({ client, sessionId, header, className }: SessionPa
       {state.pendingApprovals.length > 0 ? (
         <div className='px-3 pb-2'>
           <div className='mx-auto flex w-full max-w-3xl flex-col gap-2'>
-            {state.pendingApprovals.map((request) => (
-              <PermissionPrompt
-                key={request.id}
-                request={request}
-                onApprove={approve}
-                onDeny={deny}
-              />
-            ))}
+            {state.pendingApprovals.map((request) =>
+              request.toolName === 'AskUserQuestion' &&
+              parseUserQuestions(request.input).length > 0 ? (
+                <QuestionPrompt
+                  key={request.id}
+                  request={request}
+                  onAnswer={approve}
+                  onDismiss={deny}
+                />
+              ) : (
+                <PermissionPrompt
+                  key={request.id}
+                  request={request}
+                  onApprove={approve}
+                  onDeny={deny}
+                />
+              ),
+            )}
           </div>
         </div>
       ) : null}

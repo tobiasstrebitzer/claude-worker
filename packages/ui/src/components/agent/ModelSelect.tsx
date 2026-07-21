@@ -13,10 +13,14 @@ export interface ModelSelectProps {
   /** Models the session can switch to (TranscriptState.models). */
   models: ModelOption[]
   /** The session's current model id (TranscriptState.model), possibly decorated
-   * (e.g. "claude-fable-5[1m]") — matched leniently against the options. */
+   * (e.g. "claude-fable-5[1m]") — matched leniently against the options.
+   * `undefined` selects the list's default row, if it has one. */
   model?: string
   /** `undefined` = back to the CLI's default model. */
   onModelChange: (model?: string) => void
+  /** 'toolbar' (default) is the composer's compact borderless trigger;
+   * 'form' is a standard field-sized Select for create/settings forms. */
+  variant?: 'toolbar' | 'form'
   disabled?: boolean
   className?: string
 }
@@ -42,12 +46,15 @@ export function ModelSelect({
   models,
   model,
   onModelChange,
+  variant = 'toolbar',
   disabled,
   className,
 }: ModelSelectProps) {
-  const selected = matchModel(models, model)
+  const selected =
+    matchModel(models, model) ?? (model ? undefined : models.find((m) => isDefaultOption(m.value)))
   return (
     <Select
+      items={models.map((m) => ({ value: m.value, label: m.displayName }))}
       value={selected?.value ?? null}
       onValueChange={(value) => {
         if (typeof value !== 'string' || value === selected?.value) return
@@ -56,8 +63,12 @@ export function ModelSelect({
       disabled={disabled}>
       <SelectTrigger
         aria-label='Model'
-        className={cn('h-6 max-w-56 border-transparent bg-transparent text-fg-3 hover:bg-surface-hover', className)}>
-        <span className='truncate font-mono text-label'>
+        className={cn(
+          variant === 'toolbar' &&
+            'h-6 max-w-56 border-transparent bg-transparent text-fg-3 hover:bg-surface-hover',
+          className,
+        )}>
+        <span className={cn('truncate', variant === 'toolbar' && 'font-mono text-label')}>
           <SelectValue placeholder={model ?? 'model'} />
         </span>
       </SelectTrigger>

@@ -61,6 +61,13 @@ export { Reasoning, type ReasoningProps } from './components/agent/Reasoning.tsx
 export { Loader } from './components/agent/Loader.tsx'
 export { ToolCallCard, type ToolCallCardProps, type ToolCallItem } from './components/agent/ToolCallCard.tsx'
 export { PermissionPrompt, type PermissionPromptProps } from './components/agent/PermissionPrompt.tsx'
+export {
+  QuestionPrompt,
+  QUESTION_BEHAVIORS,
+  parseUserQuestions,
+  type QuestionPromptProps,
+  type QuestionBehaviorMeta,
+} from './components/agent/QuestionPrompt.tsx'
 export { Composer, type ComposerProps } from './components/agent/Composer.tsx'
 export { ModelSelect, type ModelSelectProps } from './components/agent/ModelSelect.tsx'
 export {

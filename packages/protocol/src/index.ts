@@ -101,6 +101,39 @@ export type PermissionRequest = {
 export type PermissionDecisionSource = 'client' | 'timeout' | 'policy'
 
 // ---------------------------------------------------------------------------
+// User questions (the AskUserQuestion tool)
+// ---------------------------------------------------------------------------
+
+/** One choice of an AskUserQuestion question (SDK tool-input mirror). */
+export type UserQuestionOption = {
+  label: string
+  description?: string
+  /** Optional preview content (markdown unless the session configures html)
+   * rendered when the option is focused. */
+  preview?: string
+}
+
+/** One question from the AskUserQuestion tool's input. By the tool's convention the
+ * first option is the model's recommended choice. */
+export type UserQuestion = {
+  question: string
+  /** Short chip/tag label (max ~12 chars), e.g. "Auth method". */
+  header: string
+  options: UserQuestionOption[]
+  multiSelect?: boolean
+}
+
+/** How a session treats the AskUserQuestion tool:
+ * - 'ask' (default) — a pending permission like any other: interactive UIs render the
+ *   question form; job webhooks carry the full request so a remote controller can
+ *   answer over REST (POST /sessions/:id/permissions/:requestId).
+ * - 'auto' — resolved immediately with each question's first (recommended) option.
+ * - 'deny' — the tool is refused with guidance to decide autonomously (unattended runs).
+ * Answers ride a permission allow as `updatedInput.answers`: question text → chosen
+ * option label(s), multi-select labels comma-joined — the shape the CLI's own UI uses. */
+export type QuestionBehavior = 'ask' | 'auto' | 'deny'
+
+// ---------------------------------------------------------------------------
 // Session capabilities (models / slash commands the CLI reports)
 // ---------------------------------------------------------------------------
 
@@ -342,6 +375,8 @@ export type CreateSessionRequest = {
   includePartialMessages?: boolean
   /** Per-session override of the server's permission-request timeout (ms). */
   approvalTimeoutMs?: number
+  /** AskUserQuestion handling (see {@link QuestionBehavior}). Default 'ask'. */
+  questionBehavior?: QuestionBehavior
   /** Free-form metadata echoed back on SessionInfo (host app bookkeeping). */
   meta?: Record<string, unknown>
 }
@@ -393,6 +428,15 @@ export type SdkSessionSummary = {
 export type ListSessionsResponse = { sessions: SessionInfo[] }
 export type CreateSessionResponse = { session: SessionInfo }
 export type GetSessionResponse = { session: SessionInfo }
+
+/** Body of `POST {basePath}/sessions/:id/permissions/:requestId` — the REST counterpart
+ * of the WS `permission_decision` command, for remote controllers without a socket
+ * (e.g. answering a job's AskUserQuestion from a webhook consumer). 404 = the request
+ * is unknown, already resolved, or expired. */
+export type ResolvePermissionRequest =
+  | { behavior: 'allow'; updatedInput?: Record<string, unknown> }
+  | { behavior: 'deny'; message?: string; interrupt?: boolean }
+export type ResolvePermissionResponse = { resolved: true }
 export type ListSdkSessionsResponse = { sdkSessions: SdkSessionSummary[] }
 export type ErrorResponse = { error: string }
 
@@ -487,6 +531,9 @@ export type JobProgress = {
   kind: 'assistant_text' | 'tool_use' | 'permission_requested' | 'permission_resolved'
   /** Short human-readable preview (message excerpt, tool name, permission title). */
   preview?: string
+  /** 'permission_requested' only: the full request (including AskUserQuestion input) so
+   * webhook consumers can answer via POST /sessions/:sessionId/permissions/:requestId. */
+  request?: PermissionRequest
 }
 
 /** Webhook delivery payload (also the queue's local event shape). `job_submitted` goes

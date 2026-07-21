@@ -3,9 +3,12 @@
   "version": "0.1.0",
   "type": "module",
   "description": "The claude-worker session runner: wraps the Agent SDK's query() with a push-based input queue, promotes canUseTool calls into pending approvals, normalizes SDKMessages into wire-protocol events, and keeps a seq-numbered event log for attach/replay. Pure library, no transport.",
+  "license": "MIT",
   "main": "./build/index.mjs",
   "types": "./build/index.d.mts",
-  "files": ["build"],
+  "files": [
+    "build"
+  ],
   "exports": {
     ".": {
       "@claude-worker/source": "./src/index.ts",

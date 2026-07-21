@@ -12,6 +12,7 @@ import {
   type CreateSessionRequest,
   type JobEvent,
   type QueueServerFrame,
+  type ResolvePermissionRequest,
   type SdkSessionSummary,
   type ServerFrame,
 } from '@claude-worker/protocol'
@@ -229,8 +230,10 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
     return principal !== null && principal !== undefined && principal !== false
   }
 
-  // Route pattern: {basePath}/sessions[/:id[/ws]]
-  const parseRoute = (url: string): { id?: string; ws?: boolean } | null => {
+  // Route pattern: {basePath}/sessions[/:id[/ws | /permissions/:requestId]]
+  const parseRoute = (
+    url: string,
+  ): { id?: string; ws?: boolean; permissionId?: string } | null => {
     const pathname = new URL(url, 'http://internal').pathname
     if (!pathname.startsWith(basePath + '/sessions')) return null
     const rest = pathname.slice((basePath + '/sessions').length)
@@ -239,6 +242,9 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
     if (parts.length === 1) return { id: decodeURIComponent(parts[0]!) }
     if (parts.length === 2 && parts[1] === 'ws') {
       return { id: decodeURIComponent(parts[0]!), ws: true }
+    }
+    if (parts.length === 3 && parts[1] === 'permissions') {
+      return { id: decodeURIComponent(parts[0]!), permissionId: decodeURIComponent(parts[2]!) }
     }
     return null
   }
@@ -400,6 +406,25 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
     const runner = registry.get(route.id)
     if (!runner) {
       json(res, 404, { error: 'session not found' })
+      return
+    }
+    if (route.permissionId) {
+      // REST counterpart of the WS permission_decision command, for controllers
+      // without a socket (e.g. answering a job's AskUserQuestion from a webhook).
+      if (req.method !== 'POST') {
+        json(res, 405, { error: 'method not allowed' })
+        return
+      }
+      const body = (await readJsonBody(req, maxBodyBytes)) as ResolvePermissionRequest
+      if (body?.behavior !== 'allow' && body?.behavior !== 'deny') {
+        json(res, 400, { error: "behavior must be 'allow' or 'deny'" })
+        return
+      }
+      if (!runner.resolvePermission(route.permissionId, body)) {
+        json(res, 404, { error: 'permission request not found (already resolved or expired)' })
+        return
+      }
+      json(res, 200, { resolved: true })
       return
     }
     if (req.method === 'GET') {

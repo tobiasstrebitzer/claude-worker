@@ -464,6 +464,11 @@ export class SessionRunner {
       agentId: options.agentID,
       expiresAt: Date.now() + timeoutMs,
     }
+    const questionBehavior = this.#config.questionBehavior ?? 'ask'
+    if (toolName === 'AskUserQuestion' && questionBehavior !== 'ask') {
+      delete request.expiresAt
+      return Promise.resolve(this.#resolveQuestionByPolicy(request, questionBehavior))
+    }
     return new Promise<PermissionResult>((resolve) => {
       const timer = setTimeout(() => {
         const pending = this.#pending.get(id)
@@ -491,6 +496,37 @@ export class SessionRunner {
       this.#emit({ type: 'permission_requested', request })
       this.#setStatus('awaiting_approval')
     })
+  }
+
+  /** 'auto'/'deny' sessions settle AskUserQuestion synchronously instead of pending:
+   * 'auto' picks each question's first (recommended) option, 'deny' sends the model
+   * back to decide for itself. Request/resolved events still fire so transcripts and
+   * job webhooks show what was chosen. */
+  #resolveQuestionByPolicy(request: PermissionRequest, mode: 'auto' | 'deny'): PermissionResult {
+    this.#emit({ type: 'permission_requested', request })
+    if (mode === 'deny') {
+      const message =
+        'Interactive questions are disabled for this session — choose the most reasonable option yourself and continue.'
+      this.#emit({
+        type: 'permission_resolved',
+        requestId: request.id,
+        behavior: 'deny',
+        resolvedBy: 'policy',
+        message,
+      })
+      return { behavior: 'deny', message, toolUseID: request.toolUseId }
+    }
+    this.#emit({
+      type: 'permission_resolved',
+      requestId: request.id,
+      behavior: 'allow',
+      resolvedBy: 'policy',
+    })
+    return {
+      behavior: 'allow',
+      updatedInput: { ...request.input, answers: recommendedAnswers(request.input) },
+      toolUseID: request.toolUseId,
+    }
   }
 
   #settleApproval(
@@ -550,4 +586,19 @@ export class SessionRunner {
       }
     }
   }
+}
+
+/** Answer each AskUserQuestion question with its first option's label — the tool's
+ * convention puts the recommended choice first. Keyed by question text, the shape the
+ * CLI expects back in `updatedInput.answers`. */
+function recommendedAnswers(input: Record<string, unknown>): Record<string, string> {
+  const answers: Record<string, string> = {}
+  const questions = Array.isArray(input.questions) ? input.questions : []
+  for (const entry of questions) {
+    const q = entry as { question?: unknown; options?: unknown }
+    if (typeof q.question !== 'string' || !Array.isArray(q.options)) continue
+    const first = q.options[0] as { label?: unknown } | undefined
+    if (typeof first?.label === 'string') answers[q.question] = first.label
+  }
+  return answers
 }

@@ -8,13 +8,7 @@ import {
   CardHeader,
   CardTitle,
   Input,
-  PERMISSION_MODES,
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectItemText,
-  SelectTrigger,
-  SelectValue,
+  PermissionModeSelect,
   SessionList,
   Spinner,
   Textarea,
@@ -22,19 +16,18 @@ import {
   toast,
 } from '@claude-worker/ui'
 import { History, Plus, RefreshCw } from 'lucide-react'
+import { ModelPicker } from '@/components/ModelPicker.tsx'
 import { client } from '@/lib/client.ts'
+import { getDefaultModel, getDefaultPermissionMode } from '@/lib/settings.ts'
 import { useSessions } from '@/lib/useSessions.ts'
 
 const CWD_KEY = 'claude-worker.last-cwd'
 
-/** Aliases the CLI resolves to current model ids; free-form ids are accepted too. */
-const MODEL_SUGGESTIONS = ['sonnet', 'opus', 'haiku', 'fable']
-
 function CreateSessionCard({ onCreated }: { onCreated: (id: string) => void }) {
   const [cwd, setCwd] = useState(() => localStorage.getItem(CWD_KEY) ?? '')
   const [prompt, setPrompt] = useState('')
-  const [mode, setMode] = useState<PermissionMode>('default')
-  const [model, setModel] = useState('')
+  const [mode, setMode] = useState<PermissionMode>(() => getDefaultPermissionMode('session'))
+  const [model, setModel] = useState(() => getDefaultModel('session'))
   const [creating, setCreating] = useState(false)
 
   const [sdkSessions, setSdkSessions] = useState<SdkSessionSummary[] | undefined>()
@@ -108,40 +101,11 @@ function CreateSessionCard({ onCreated }: { onCreated: (id: string) => void }) {
         <div className='flex items-end justify-between gap-3'>
           <label className='flex min-w-0 flex-col gap-1'>
             <span className='text-label font-medium text-fg-3'>Permission mode</span>
-            <Select
-              items={PERMISSION_MODES.map((m) => ({
-                value: m.value,
-                label: `${m.label} — ${m.description}`,
-              }))}
-              value={mode}
-              onValueChange={(value) => setMode(value as PermissionMode)}>
-              <SelectTrigger className='min-w-64'>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {PERMISSION_MODES.map((m) => (
-                  <SelectItem key={m.value} value={m.value}>
-                    <SelectItemText>{`${m.label} — ${m.description}`}</SelectItemText>
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <PermissionModeSelect variant='form' mode={mode} onModeChange={setMode} className='min-w-44' />
           </label>
           <label className='flex min-w-0 flex-col gap-1'>
-            <span className='text-label font-medium text-fg-3'>Model (optional)</span>
-            <Input
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              placeholder='default'
-              spellCheck={false}
-              list='model-suggestions'
-              className='min-w-36 font-mono'
-            />
-            <datalist id='model-suggestions'>
-              {MODEL_SUGGESTIONS.map((m) => (
-                <option key={m} value={m} />
-              ))}
-            </datalist>
+            <span className='text-label font-medium text-fg-3'>Model</span>
+            <ModelPicker value={model} onChange={setModel} className='min-w-44' />
           </label>
           <Button onClick={() => void create()} disabled={creating}>
             {creating ? <Spinner className='size-3.5 text-current' /> : <Plus className='size-4' />}

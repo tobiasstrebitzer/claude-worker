@@ -63,8 +63,10 @@ The browser side (client/react/ui/apps) must never import core/server or the Age
 - check: `pnpm lint` + `pnpm typecheck`
 - test: `pnpm test`
 - push: no (no remote yet — repo home is an open PRD question)
-- version_bump: no (until first publish; naming/trademark unresolved)
-- publish: no
+- version_bump: yes (aligned across all 7 packages; 0.1.0 first published 2026-07-21)
+- publish: yes — npm `@claude-worker` org via keybridge (`/npm-publish`); run the gatekeeper
+  audit first. MIT licensed (LICENSE copied per package; ui intentionally ships `src/`,
+  allowlisted in `.claude/gatekeeper.json`).
 - docs: root CLAUDE.md + README.md + docs/ (PRD, session-prep notes)
 - frontend_smoke: no (demo app; manual via `pnpm server` + `pnpm demo`)
 - co_authored_by: no (global)
@@ -99,6 +101,12 @@ README "Auth & Anthropic's terms") — keep that section's status honest as thin
 - Allowing a permission **must** echo the tool input: the SDK's `PermissionResult` requires
   `updatedInput` to be a record on allow (undefined → ZodError → the tool errors). The fake
   harness can't catch schema bugs like this — permission changes need a real-SDK smoke.
+- `AskUserQuestion` rides the same canUseTool path; answers go back as an allow with
+  `updatedInput.answers` (question text → chosen option label(s), comma-joined) — smoke-verified.
+  `questionBehavior` on CreateSessionRequest policy-resolves it for unattended runs ('auto' picks
+  each question's first option, 'deny' tells the model to decide itself); under 'ask', job
+  webhooks carry the full request on `job_progress` and remote controllers answer via
+  `POST /sessions/:id/permissions/:requestId`.
 - `packages/ui` renders markdown via streamdown, which styles itself with Tailwind classes split
   across `dist/` **chunk files** — consumers must `@source` the whole streamdown `dist` dir, and
   under pnpm it lives at `packages/ui/node_modules/streamdown`, not the workspace root.

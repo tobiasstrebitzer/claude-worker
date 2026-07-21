@@ -269,6 +269,114 @@ describe('SessionRunner', () => {
     expect(runner.resolvePermission('unknown', { behavior: 'allow' })).toBe(false)
   })
 
+  const questionInput = {
+    questions: [
+      {
+        question: 'Which library should we use?',
+        header: 'Library',
+        multiSelect: false,
+        options: [
+          { label: 'Zod (Recommended)', description: 'battle-tested' },
+          { label: 'Valibot', description: 'smaller bundle' },
+        ],
+      },
+      {
+        question: 'Which features do you want?',
+        header: 'Features',
+        multiSelect: true,
+        options: [
+          { label: 'Parsing', description: '' },
+          { label: 'Codegen', description: '' },
+        ],
+      },
+    ],
+  }
+
+  it("questionBehavior 'auto' answers AskUserQuestion with each question's first option", async () => {
+    const { harness, runner, events } = makeRunner({ questionBehavior: 'auto' })
+    void runner.start()
+    harness.emit(initMessage)
+    await tick()
+
+    const result = await harness.captured.options!.canUseTool!('AskUserQuestion', questionInput, {
+      signal: new AbortController().signal,
+      toolUseID: 'q-1',
+    })
+    expect(result).toEqual({
+      behavior: 'allow',
+      updatedInput: {
+        ...questionInput,
+        answers: {
+          'Which library should we use?': 'Zod (Recommended)',
+          'Which features do you want?': 'Parsing',
+        },
+      },
+      toolUseID: 'q-1',
+    })
+    expect(runner.pendingApprovals).toHaveLength(0)
+    expect(runner.status).not.toBe('awaiting_approval')
+    expect(events.find((e) => e.type === 'permission_requested')).toMatchObject({
+      request: { toolName: 'AskUserQuestion' },
+    })
+    expect(events.find((e) => e.type === 'permission_resolved')).toMatchObject({
+      behavior: 'allow',
+      resolvedBy: 'policy',
+    })
+  })
+
+  it("questionBehavior 'deny' refuses AskUserQuestion but still promotes other tools", async () => {
+    const { harness, runner, events } = makeRunner({ questionBehavior: 'deny' })
+    void runner.start()
+    harness.emit(initMessage)
+    await tick()
+
+    const result = await harness.captured.options!.canUseTool!('AskUserQuestion', questionInput, {
+      signal: new AbortController().signal,
+      toolUseID: 'q-2',
+    })
+    expect(result).toMatchObject({ behavior: 'deny', toolUseID: 'q-2' })
+    expect((result as { message: string }).message).toMatch(/questions are disabled/)
+    expect(events.find((e) => e.type === 'permission_resolved')).toMatchObject({
+      behavior: 'deny',
+      resolvedBy: 'policy',
+    })
+
+    // Ordinary tools still go through the pending-approval flow.
+    void harness.captured.options!.canUseTool!(
+      'Bash',
+      { command: 'ls' },
+      { signal: new AbortController().signal, toolUseID: 'tool-3' },
+    )
+    await tick()
+    expect(runner.pendingApprovals).toHaveLength(1)
+  })
+
+  it("questionBehavior 'ask' (default) leaves AskUserQuestion pending for the client", async () => {
+    const { harness, runner } = makeRunner()
+    void runner.start()
+    harness.emit(initMessage)
+    await tick()
+
+    const resultPromise = harness.captured.options!.canUseTool!(
+      'AskUserQuestion',
+      questionInput,
+      { signal: new AbortController().signal, toolUseID: 'q-3' },
+    )
+    await tick()
+    expect(runner.pendingApprovals).toHaveLength(1)
+
+    const answers = { 'Which library should we use?': 'Valibot' }
+    runner.resolvePermission(runner.pendingApprovals[0]!.id, {
+      behavior: 'allow',
+      updatedInput: { ...questionInput, answers },
+    })
+    await expect(resultPromise).resolves.toEqual({
+      behavior: 'allow',
+      updatedInput: { ...questionInput, answers },
+      toolUseID: 'q-3',
+    })
+  })
+
   it('setModel switches the model and emits model_changed', async () => {
     const { harness, runner, events } = makeRunner()
     void runner.start()

@@ -213,6 +213,73 @@ describe('createWorkerServer', () => {
     expect(gone.status).toBe(404)
   })
 
+  it('resolves a pending permission over REST (remote-controller channel)', async () => {
+    const harness = fakeHarness()
+    const { base } = await startServer(harness)
+
+    const createRes = await fetch(`${base}/sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ cwd: '/tmp/project', prompt: 'hello' }),
+    })
+    const { session } = (await createRes.json()) as { session: SessionInfo }
+    harness.emit(initMessage)
+
+    const input = {
+      questions: [
+        {
+          question: 'Proceed?',
+          header: 'Plan',
+          multiSelect: false,
+          options: [
+            { label: 'Yes', description: '' },
+            { label: 'No', description: '' },
+          ],
+        },
+      ],
+    }
+    const resultPromise = harness.captured.options!.canUseTool!('AskUserQuestion', input, {
+      signal: new AbortController().signal,
+      toolUseID: 'q-1',
+    })
+    await vi.waitFor(async () => {
+      const res = await fetch(`${base}/sessions/${session.id}`)
+      const body = (await res.json()) as { session: SessionInfo }
+      expect(body.session.pendingPermissionCount).toBe(1)
+    })
+
+    const bogus = await fetch(`${base}/sessions/${session.id}/permissions/nope`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ behavior: 'allow' }),
+    })
+    expect(bogus.status).toBe(404)
+
+    // A real controller reads the id from the WS/webhook permission_requested payload.
+    const requestId = running!.registry.get(session.id)!.pendingApprovals[0]!.id
+    const answers = { 'Proceed?': 'Yes' }
+    const resolveRes = await fetch(`${base}/sessions/${session.id}/permissions/${requestId}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ behavior: 'allow', updatedInput: { ...input, answers } }),
+    })
+    expect(resolveRes.status).toBe(200)
+    expect(await resolveRes.json()).toEqual({ resolved: true })
+    await expect(resultPromise).resolves.toEqual({
+      behavior: 'allow',
+      updatedInput: { ...input, answers },
+      toolUseID: 'q-1',
+    })
+
+    // Resolving again 404s (already settled).
+    const again = await fetch(`${base}/sessions/${session.id}/permissions/${requestId}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ behavior: 'deny' }),
+    })
+    expect(again.status).toBe(404)
+  })
+
   it('fails closed on subscription credentials when requireApiKey is set', async () => {
     const harness = fakeHarness()
     running = createWorkerServer({

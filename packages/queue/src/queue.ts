@@ -324,9 +324,12 @@ export class JobQueue {
         return
       }
       case 'permission_requested':
+        // The full request rides along so webhook consumers can answer it over REST
+        // (questions, approvals) instead of only seeing a preview string.
         this.#progress(job, {
           kind: 'permission_requested',
           preview: event.request.title ?? event.request.toolName,
+          request: event.request,
         })
         return
       case 'permission_resolved':

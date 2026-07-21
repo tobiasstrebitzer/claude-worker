@@ -34,20 +34,25 @@ export interface PermissionModeSelectProps {
   /** The session's current mode (TranscriptState.permissionMode). */
   mode?: PermissionMode
   onModeChange: (mode: PermissionMode) => void
+  /** 'toolbar' (default) is the composer's compact borderless trigger;
+   * 'form' is a standard field-sized Select for create/settings forms. */
+  variant?: 'toolbar' | 'form'
   disabled?: boolean
   className?: string
 }
 
-/** Compact permission-mode switcher for the composer toolbar, next to ModelSelect. */
+/** Permission-mode switcher: compact in the composer toolbar, field-sized in forms. */
 export function PermissionModeSelect({
   mode,
   onModeChange,
+  variant = 'toolbar',
   disabled,
   className,
 }: PermissionModeSelectProps) {
   const dangerous = mode === 'bypassPermissions'
   return (
     <Select
+      items={PERMISSION_MODES.map((m) => ({ value: m.value, label: m.label }))}
       value={mode ?? null}
       onValueChange={(value) => {
         if (typeof value === 'string' && value !== mode) onModeChange(value as PermissionMode)
@@ -56,11 +61,12 @@ export function PermissionModeSelect({
       <SelectTrigger
         aria-label='Permission mode'
         className={cn(
-          'h-6 max-w-44 border-transparent bg-transparent hover:bg-surface-hover',
-          dangerous ? 'text-danger' : 'text-fg-3',
+          variant === 'toolbar' &&
+            'h-6 max-w-44 border-transparent bg-transparent hover:bg-surface-hover',
+          dangerous ? 'text-danger' : variant === 'toolbar' ? 'text-fg-3' : undefined,
           className,
         )}>
-        <span className='truncate font-mono text-label'>
+        <span className={cn('truncate', variant === 'toolbar' && 'font-mono text-label')}>
           <SelectValue placeholder='permissions' />
         </span>
       </SelectTrigger>

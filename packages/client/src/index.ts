@@ -8,6 +8,7 @@ import type {
   PermissionMode,
   QueueServerFrame,
   QueueStats,
+  ResolvePermissionRequest,
   SdkSessionSummary,
   ServerFrame,
   SessionEvent,
@@ -303,6 +304,22 @@ export class ClaudeWorkerClient {
   async deleteSession(id: string): Promise<SessionInfo> {
     const body = await this.#call('DELETE', `/sessions/${encodeURIComponent(id)}`)
     return (body as { session: SessionInfo }).session
+  }
+
+  /** Resolve a pending permission over REST — the remote-controller counterpart of the
+   * WS `permission_decision` command (e.g. answering a job's AskUserQuestion from a
+   * webhook consumer; the request rides on job_progress deliveries). Throws if the
+   * request is unknown, already resolved, or expired. */
+  async resolvePermission(
+    sessionId: string,
+    requestId: string,
+    decision: ResolvePermissionRequest,
+  ): Promise<void> {
+    await this.#call(
+      'POST',
+      `/sessions/${encodeURIComponent(sessionId)}/permissions/${encodeURIComponent(requestId)}`,
+      decision,
+    )
   }
 
   /** List the Agent SDK's on-disk sessions (for resume across server restarts).

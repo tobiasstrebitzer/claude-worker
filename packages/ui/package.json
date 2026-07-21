@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "type": "module",
   "description": "Styled agent-control component library for claude-worker: session panel, transcript with streaming, tool-call cards, permission prompts, session list, composer. Tailwind v4 + Base UI + cva. Pairs with the headless @claude-worker/react layer.",
+  "license": "MIT",
   "main": "./build/index.mjs",
   "types": "./build/index.d.mts",
   "files": [

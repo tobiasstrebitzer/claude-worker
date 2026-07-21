@@ -1,6 +1,12 @@
 import { useState } from 'react'
 import { useNavigate } from '@tanstack/react-router'
-import type { JobInfo, JobStatus, PermissionMode, QueueStats } from '@claude-worker/protocol'
+import type {
+  JobInfo,
+  JobStatus,
+  PermissionMode,
+  QuestionBehavior,
+  QueueStats,
+} from '@claude-worker/protocol'
 import {
   Badge,
   Button,
@@ -9,7 +15,8 @@ import {
   CardHeader,
   CardTitle,
   Input,
-  PERMISSION_MODES,
+  PermissionModeSelect,
+  QUESTION_BEHAVIORS,
   ProgressRing,
   Select,
   SelectContent,
@@ -26,8 +33,11 @@ import {
   type BadgeProps,
 } from '@claude-worker/ui'
 import { CalendarClock, Eye, ListChecks, Plus, RefreshCw, X } from 'lucide-react'
+import { ModelPicker } from '@/components/ModelPicker.tsx'
 import { client } from '@/lib/client.ts'
+import { getDefaultModel, getDefaultPermissionMode } from '@/lib/settings.ts'
 import { useJobs } from '@/lib/useJobs.ts'
+import { useSessions } from '@/lib/useSessions.ts'
 
 const CWD_KEY = 'claude-worker.last-cwd'
 
@@ -82,7 +92,9 @@ function QueueStatsStrip({ stats }: { stats: QueueStats }) {
 function ScheduleJobCard({ onScheduled }: { onScheduled: () => void }) {
   const [cwd, setCwd] = useState(() => localStorage.getItem(CWD_KEY) ?? '')
   const [prompt, setPrompt] = useState('')
-  const [mode, setMode] = useState<PermissionMode>('acceptEdits')
+  const [mode, setMode] = useState<PermissionMode>(() => getDefaultPermissionMode('job'))
+  const [questions, setQuestions] = useState<QuestionBehavior>('auto')
+  const [model, setModel] = useState(() => getDefaultModel('job'))
   const [maxTokens, setMaxTokens] = useState('')
   const [attempts, setAttempts] = useState('')
   const [webhookUrl, setWebhookUrl] = useState('')
@@ -111,6 +123,8 @@ function ScheduleJobCard({ onScheduled }: { onScheduled: () => void }) {
           cwd: cwd.trim(),
           prompt: prompt.trim(),
           permissionMode: mode,
+          questionBehavior: questions,
+          model: model.trim() || undefined,
           settingSources: ['user', 'project'],
         },
         maxTokens: tokens,
@@ -155,21 +169,29 @@ function ScheduleJobCard({ onScheduled }: { onScheduled: () => void }) {
         <div className='flex flex-wrap items-end gap-3'>
           <label className='flex min-w-0 flex-col gap-1'>
             <span className='text-label font-medium text-fg-3'>Permission mode</span>
+            <PermissionModeSelect variant='form' mode={mode} onModeChange={setMode} className='min-w-44' />
+          </label>
+          <label className='flex min-w-0 flex-col gap-1'>
+            <span className='text-label font-medium text-fg-3'>Questions</span>
             <Select
-              items={PERMISSION_MODES.map((m) => ({ value: m.value, label: m.label }))}
-              value={mode}
-              onValueChange={(value) => setMode(value as PermissionMode)}>
-              <SelectTrigger className='min-w-44'>
+              items={QUESTION_BEHAVIORS.map((b) => ({ value: b.value, label: b.label }))}
+              value={questions}
+              onValueChange={(value) => setQuestions(value as QuestionBehavior)}>
+              <SelectTrigger className='min-w-36'>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {PERMISSION_MODES.map((m) => (
-                  <SelectItem key={m.value} value={m.value}>
-                    <SelectItemText>{`${m.label} — ${m.description}`}</SelectItemText>
+                {QUESTION_BEHAVIORS.map((b) => (
+                  <SelectItem key={b.value} value={b.value}>
+                    <SelectItemText>{`${b.label} — ${b.description}`}</SelectItemText>
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
+          </label>
+          <label className='flex min-w-0 flex-col gap-1'>
+            <span className='text-label font-medium text-fg-3'>Model</span>
+            <ModelPicker value={model} onChange={setModel} className='min-w-40' />
           </label>
           <label className='flex min-w-0 flex-col gap-1'>
             <span className='text-label font-medium text-fg-3'>Max tokens (optional)</span>
@@ -209,14 +231,25 @@ function ScheduleJobCard({ onScheduled }: { onScheduled: () => void }) {
         <p className='text-label text-fg-4'>
           Unattended runs still surface permission prompts — watch the job&apos;s session to
           approve, or pick a mode that doesn&apos;t ask. Unanswered prompts deny after the
-          server&apos;s timeout.
+          server&apos;s timeout. With Questions set to Ask, webhook deliveries carry the full
+          question so a controller can answer via{' '}
+          <code className='font-mono'>POST /sessions/:id/permissions/:requestId</code>.
         </p>
       </CardContent>
     </Card>
   )
 }
 
-function JobRow({ job, onChanged }: { job: JobInfo; onChanged: () => void }) {
+function JobRow({
+  job,
+  watchable,
+  onChanged,
+}: {
+  job: JobInfo
+  /** The job's session is still in the registry (attachable for live view / replay). */
+  watchable: boolean
+  onChanged: () => void
+}) {
   const navigate = useNavigate()
   const meta = JOB_STATUS_META[job.status]
   const cancellable = job.status === 'queued' || job.status === 'running'
@@ -256,7 +289,7 @@ function JobRow({ job, onChanged }: { job: JobInfo; onChanged: () => void }) {
           {job.error ? <span className='truncate text-danger'>{job.error}</span> : null}
         </div>
       </div>
-      {job.sessionId ? (
+      {job.sessionId && watchable ? (
         <Button
           variant='ghost'
           size='xs'
@@ -279,6 +312,10 @@ function JobRow({ job, onChanged }: { job: JobInfo; onChanged: () => void }) {
 
 export function JobsView() {
   const { jobs, stats, enabled, live, error, refresh } = useJobs()
+  // Watch is only offered while the job's session is still in the registry —
+  // completed jobs' sessions can be deleted from the Sessions view.
+  const { sessions } = useSessions()
+  const liveSessionIds = new Set(sessions.map((s) => s.id))
   const sorted = [...jobs].sort((a, b) => b.createdAt - a.createdAt)
 
   return (
@@ -332,7 +369,12 @@ export function JobsView() {
             ) : (
               <ul className='flex flex-col gap-1 rounded-md border border-border bg-surface p-1'>
                 {sorted.map((job) => (
-                  <JobRow key={job.id} job={job} onChanged={() => void refresh()} />
+                  <JobRow
+                    key={job.id}
+                    job={job}
+                    watchable={job.sessionId !== undefined && liveSessionIds.has(job.sessionId)}
+                    onChanged={() => void refresh()}
+                  />
                 ))}
               </ul>
             )}
