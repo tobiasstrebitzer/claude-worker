@@ -2,6 +2,7 @@
   "name": "claude-worker",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "packageManager": "pnpm@11.8.0",
   "description": "Run a close-to-real Claude Code session programmatically via the Agent SDK and expose it to a host app as something it can embed, watch, and control. Runner + wire protocol + gateway + embeddable panel. See docs/prd-claude-worker.md.",

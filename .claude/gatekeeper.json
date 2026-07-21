@@ -1,0 +1,9 @@
+{
+  "allow": [
+    {
+      "path": "packages/ui/src/**",
+      "pack": true,
+      "reason": "ui ships TS/CSS sources by design: consumers @source-scan them for Tailwind classnames (see packages/ui/README.md)"
+    }
+  ]
+}

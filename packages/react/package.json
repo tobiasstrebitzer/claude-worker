@@ -3,9 +3,12 @@
   "version": "0.1.0",
   "type": "module",
   "description": "Headless React layer for claude-worker: useClaudeSession hook + pure transcript reducer. No styling opinion — @claude-worker/ui is the styled layer on top.",
+  "license": "MIT",
   "main": "./build/index.mjs",
   "types": "./build/index.d.mts",
-  "files": ["build"],
+  "files": [
+    "build"
+  ],
   "exports": {
     ".": {
       "@claude-worker/source": "./src/index.ts",
