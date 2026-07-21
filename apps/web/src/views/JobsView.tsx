@@ -1,0 +1,314 @@
+import { useState } from 'react'
+import { useNavigate } from '@tanstack/react-router'
+import type { JobInfo, JobStatus, PermissionMode, QueueStats } from '@claude-worker/protocol'
+import {
+  Badge,
+  Button,
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+  Input,
+  PERMISSION_MODES,
+  ProgressRing,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectItemText,
+  SelectTrigger,
+  SelectValue,
+  Spinner,
+  Textarea,
+  formatCost,
+  formatRelativeTime,
+  formatTokens,
+  toast,
+  type BadgeProps,
+} from '@claude-worker/ui'
+import { CalendarClock, Eye, ListChecks, Plus, RefreshCw, X } from 'lucide-react'
+import { client } from '@/lib/client.ts'
+import { useJobs } from '@/lib/useJobs.ts'
+
+const CWD_KEY = 'claude-worker.last-cwd'
+
+const JOB_STATUS_META: Record<JobStatus, { label: string; variant: BadgeProps['variant']; busy?: boolean }> = {
+  queued: { label: 'Queued', variant: 'neutral' },
+  running: { label: 'Running', variant: 'info', busy: true },
+  succeeded: { label: 'Succeeded', variant: 'success' },
+  failed: { label: 'Failed', variant: 'danger' },
+  canceled: { label: 'Canceled', variant: 'warning' },
+}
+
+function QueueStatsStrip({ stats }: { stats: QueueStats }) {
+  const dailyPct =
+    stats.dailyTokenLimit !== undefined && stats.dailyTokenLimit > 0
+      ? (stats.dailyTokensUsed / stats.dailyTokenLimit) * 100
+      : undefined
+  return (
+    <div className='flex flex-wrap items-center gap-x-5 gap-y-2 rounded-md border border-border bg-surface px-3 py-2 text-body-sm text-fg-2'>
+      <span>
+        Running <span className='font-mono text-fg-1'>{stats.running}/{stats.maxConcurrency}</span>
+      </span>
+      <span>
+        Queued <span className='font-mono text-fg-1'>{stats.queued}</span>
+      </span>
+      <span className='inline-flex items-center gap-1.5'>
+        {dailyPct !== undefined ? (
+          <ProgressRing
+            value={dailyPct}
+            className={dailyPct >= 95 ? 'text-danger' : dailyPct >= 80 ? 'text-warning' : 'text-fg-3'}
+          />
+        ) : null}
+        Daily tokens{' '}
+        <span className='font-mono text-fg-1'>
+          {formatTokens(stats.dailyTokensUsed)}
+          {stats.dailyTokenLimit !== undefined ? ` / ${formatTokens(stats.dailyTokenLimit)}` : ''}
+        </span>
+      </span>
+      {stats.sessionTokenLimit !== undefined ? (
+        <span>
+          Per-job cap <span className='font-mono text-fg-1'>{formatTokens(stats.sessionTokenLimit)}</span>
+        </span>
+      ) : null}
+      {stats.paused ? (
+        <Badge variant='warning' dot>
+          Paused — daily budget exhausted
+        </Badge>
+      ) : null}
+    </div>
+  )
+}
+
+function ScheduleJobCard({ onScheduled }: { onScheduled: () => void }) {
+  const [cwd, setCwd] = useState(() => localStorage.getItem(CWD_KEY) ?? '')
+  const [prompt, setPrompt] = useState('')
+  const [mode, setMode] = useState<PermissionMode>('acceptEdits')
+  const [maxTokens, setMaxTokens] = useState('')
+  const [webhookUrl, setWebhookUrl] = useState('')
+  const [creating, setCreating] = useState(false)
+
+  const schedule = async () => {
+    if (!cwd.trim() || !prompt.trim()) {
+      toast.error('Working directory and prompt are required')
+      return
+    }
+    const tokens = maxTokens.trim() ? Number(maxTokens.trim()) : undefined
+    if (tokens !== undefined && (!Number.isFinite(tokens) || tokens <= 0)) {
+      toast.error('Max tokens must be a positive number')
+      return
+    }
+    setCreating(true)
+    try {
+      localStorage.setItem(CWD_KEY, cwd.trim())
+      await client.createJob({
+        session: {
+          cwd: cwd.trim(),
+          prompt: prompt.trim(),
+          permissionMode: mode,
+          settingSources: ['user', 'project'],
+        },
+        maxTokens: tokens,
+        webhook: webhookUrl.trim() ? { url: webhookUrl.trim() } : undefined,
+      })
+      setPrompt('')
+      toast.success('Job scheduled')
+      onScheduled()
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to schedule job')
+    } finally {
+      setCreating(false)
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Schedule a job</CardTitle>
+      </CardHeader>
+      <CardContent className='flex flex-col gap-3'>
+        <label className='flex flex-col gap-1'>
+          <span className='text-label font-medium text-fg-3'>Working directory</span>
+          <Input
+            value={cwd}
+            onChange={(e) => setCwd(e.target.value)}
+            placeholder='/path/to/project'
+            spellCheck={false}
+            className='font-mono'
+          />
+        </label>
+        <label className='flex flex-col gap-1'>
+          <span className='text-label font-medium text-fg-3'>Prompt (the task — runs unattended)</span>
+          <Textarea
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            rows={2}
+            placeholder='e.g. /verify-content 42, or a task description'
+          />
+        </label>
+        <div className='flex flex-wrap items-end gap-3'>
+          <label className='flex min-w-0 flex-col gap-1'>
+            <span className='text-label font-medium text-fg-3'>Permission mode</span>
+            <Select
+              items={PERMISSION_MODES.map((m) => ({ value: m.value, label: m.label }))}
+              value={mode}
+              onValueChange={(value) => setMode(value as PermissionMode)}>
+              <SelectTrigger className='min-w-44'>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {PERMISSION_MODES.map((m) => (
+                  <SelectItem key={m.value} value={m.value}>
+                    <SelectItemText>{`${m.label} — ${m.description}`}</SelectItemText>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </label>
+          <label className='flex min-w-0 flex-col gap-1'>
+            <span className='text-label font-medium text-fg-3'>Max tokens (optional)</span>
+            <Input
+              value={maxTokens}
+              onChange={(e) => setMaxTokens(e.target.value)}
+              placeholder='per-job cap'
+              inputMode='numeric'
+              className='min-w-28 font-mono'
+            />
+          </label>
+          <label className='flex min-w-0 flex-1 flex-col gap-1'>
+            <span className='text-label font-medium text-fg-3'>Webhook URL (optional)</span>
+            <Input
+              value={webhookUrl}
+              onChange={(e) => setWebhookUrl(e.target.value)}
+              placeholder='https://…/hook'
+              spellCheck={false}
+              className='min-w-44 font-mono'
+            />
+          </label>
+          <Button onClick={() => void schedule()} disabled={creating}>
+            {creating ? <Spinner className='size-3.5 text-current' /> : <Plus className='size-4' />}
+            Schedule
+          </Button>
+        </div>
+        <p className='text-label text-fg-4'>
+          Unattended runs still surface permission prompts — watch the job&apos;s session to
+          approve, or pick a mode that doesn&apos;t ask. Unanswered prompts deny after the
+          server&apos;s timeout.
+        </p>
+      </CardContent>
+    </Card>
+  )
+}
+
+function JobRow({ job, onChanged }: { job: JobInfo; onChanged: () => void }) {
+  const navigate = useNavigate()
+  const meta = JOB_STATUS_META[job.status]
+  const cancellable = job.status === 'queued' || job.status === 'running'
+  const cancel = async () => {
+    try {
+      await client.cancelJob(job.id)
+      onChanged()
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Cancel failed')
+    }
+  }
+  return (
+    <li className='flex items-center gap-3 rounded-md px-2 py-2 hover:bg-surface-hover'>
+      <Badge variant={meta.variant} dot={!meta.busy}>
+        {meta.busy ? <Spinner className='size-3 text-current' /> : null}
+        {meta.label}
+      </Badge>
+      <div className='min-w-0 flex-1'>
+        <div className='truncate text-body-sm text-fg-1'>{job.prompt}</div>
+        <div className='flex flex-wrap gap-x-3 font-mono text-label text-fg-4'>
+          <span className='truncate'>{job.cwd}</span>
+          <span className='shrink-0'>{formatRelativeTime(job.finishedAt ?? job.startedAt ?? job.createdAt)}</span>
+          {job.usage.tokens > 0 ? (
+            <span className='shrink-0'>{formatTokens(job.usage.tokens)} tok</span>
+          ) : null}
+          {job.usage.totalCostUsd > 0 ? (
+            <span className='shrink-0'>{formatCost(job.usage.totalCostUsd)}</span>
+          ) : null}
+          {job.error ? <span className='truncate text-danger'>{job.error}</span> : null}
+        </div>
+      </div>
+      {job.sessionId ? (
+        <Button
+          variant='ghost'
+          size='xs'
+          onClick={() =>
+            void navigate({ to: '/sessions/$sessionId', params: { sessionId: job.sessionId! } })
+          }>
+          <Eye className='size-3' />
+          Watch
+        </Button>
+      ) : null}
+      {cancellable ? (
+        <Button variant='outline' size='xs' onClick={() => void cancel()}>
+          <X className='size-3' />
+          Cancel
+        </Button>
+      ) : null}
+    </li>
+  )
+}
+
+export function JobsView() {
+  const { jobs, stats, enabled, error, refresh } = useJobs()
+  const sorted = [...jobs].sort((a, b) => b.createdAt - a.createdAt)
+
+  return (
+    <div className='flex-1 overflow-y-auto'>
+      <div className='mx-auto flex w-full max-w-3xl flex-col gap-5 px-6 py-6'>
+        <header className='flex items-end justify-between'>
+          <div>
+            <h1 className='text-display-sm font-semibold tracking-tight text-text'>Jobs</h1>
+            <p className='mt-0.5 text-body-sm text-muted-foreground'>
+              Scheduled one-shot runs with concurrency and token budgets.
+            </p>
+          </div>
+          <Button variant='ghost' size='icon-sm' aria-label='Refresh' onClick={() => void refresh()}>
+            <RefreshCw className='size-4' />
+          </Button>
+        </header>
+
+        {error ? (
+          <div className='rounded-md bg-danger-bg px-3 py-2 text-body-sm text-danger'>
+            Can&apos;t reach the worker server: {error}. Start it with{' '}
+            <code className='font-mono'>pnpm server</code>.
+          </div>
+        ) : null}
+
+        {!enabled ? (
+          <div className='flex flex-col items-center gap-2 rounded-md border border-border bg-surface px-4 py-8 text-center'>
+            <CalendarClock className='size-6 text-fg-4' />
+            <p className='text-body-sm text-fg-2'>The server has no job queue configured.</p>
+            <p className='text-label text-fg-4'>
+              Pass <code className='font-mono'>queue: {'{ maxConcurrency, … }'}</code> to{' '}
+              <code className='font-mono'>createWorkerServer</code> — the dev server enables it by
+              default.
+            </p>
+          </div>
+        ) : (
+          <>
+            {stats ? <QueueStatsStrip stats={stats} /> : null}
+
+            {sorted.length === 0 ? (
+              <div className='flex flex-col items-center gap-2 rounded-md border border-border bg-surface px-4 py-8 text-center'>
+                <ListChecks className='size-6 text-fg-4' />
+                <p className='text-body-sm text-fg-2'>No jobs yet. Schedule one below.</p>
+              </div>
+            ) : (
+              <ul className='flex flex-col gap-1 rounded-md border border-border bg-surface p-1'>
+                {sorted.map((job) => (
+                  <JobRow key={job.id} job={job} onChanged={() => void refresh()} />
+                ))}
+              </ul>
+            )}
+
+            <ScheduleJobCard onScheduled={() => void refresh()} />
+          </>
+        )}
+      </div>
+    </div>
+  )
+}

@@ -1,11 +1,12 @@
 import type { ReactNode } from 'react'
 import { Link, Outlet, useRouterState } from '@tanstack/react-router'
-import { Settings, SquareTerminal } from 'lucide-react'
+import { ListChecks, Settings, SquareTerminal } from 'lucide-react'
 import { cn } from '@claude-worker/ui'
 import { ThemeToggle } from './ThemeToggle.tsx'
 
 const NAV = [
   { id: 'sessions', label: 'Sessions', icon: SquareTerminal, path: '/sessions' },
+  { id: 'jobs', label: 'Jobs', icon: ListChecks, path: '/jobs' },
   { id: 'settings', label: 'Settings', icon: Settings, path: '/settings' },
 ] as const
 
