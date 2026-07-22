@@ -1,6 +1,6 @@
 {
   "name": "@claude-worker/ui",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "type": "module",
   "description": "Styled agent-control component library for claude-worker: session panel, transcript with streaming, tool-call cards, permission prompts, session list, composer. Tailwind v4 + Base UI + cva. Pairs with the headless @claude-worker/react layer.",
   "license": "MIT",

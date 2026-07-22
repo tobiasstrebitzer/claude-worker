@@ -1,6 +1,6 @@
 {
   "name": "@claude-worker/protocol",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "type": "module",
   "description": "The claude-worker wire protocol: typed session events, commands, and REST shapes shared by server and clients. Dependency-free, browser-safe. This protocol is the product boundary — versioned from day one.",
   "license": "MIT",
