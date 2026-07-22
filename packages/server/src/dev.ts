@@ -12,6 +12,8 @@ const envNumber = (name: string): number | undefined => {
 const { listen } = createWorkerServer({
   allowUnauthenticated: true,
   allowedCwdRoots: cwdRoots,
+  // Set CLAUDE_WORKER_DISABLE_BYPASS=1 to refuse bypassPermissions server-wide.
+  disableBypassPermissions: process.env.CLAUDE_WORKER_DISABLE_BYPASS === '1',
   queue: {
     maxConcurrency: envNumber('CLAUDE_WORKER_QUEUE_CONCURRENCY') ?? 2,
     sessionTokenLimit: envNumber('CLAUDE_WORKER_QUEUE_SESSION_TOKENS'),
@@ -21,6 +23,10 @@ const { listen } = createWorkerServer({
     maxJobDurationMs: envNumber('CLAUDE_WORKER_QUEUE_MAX_JOB_MS') ?? 30 * 60 * 1000,
     retention: { maxAgeMs: envNumber('CLAUDE_WORKER_QUEUE_RETENTION_MS') ?? 24 * 60 * 60 * 1000 },
   },
+  profiles: [
+    { name: 'default', configDir: '/Users/atomic/.claude' },
+    { name: 'test', configDir: '/Users/atomic/.claude-test' }
+  ]
 })
 
 const { port: boundPort } = await listen(port, '127.0.0.1')

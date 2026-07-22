@@ -2,6 +2,7 @@ import { useMemo, type ReactNode } from 'react'
 import type { ClaudeWorkerClient } from '@claude-worker/client'
 import { useClaudeSession } from '@claude-worker/react'
 import { cn } from '../../lib/utils.ts'
+import { toast } from '../ui/Sonner.tsx'
 import { Composer } from './Composer.tsx'
 import { ModelSelect } from './ModelSelect.tsx'
 import { PermissionModeSelect } from './PermissionModeSelect.tsx'
@@ -25,7 +26,11 @@ export interface SessionPanelProps {
  */
 export function SessionPanel({ client, sessionId, header, className }: SessionPanelProps) {
   const { state, connected, send, approve, deny, interrupt, setModel, setPermissionMode } =
-    useClaudeSession(client, sessionId)
+    useClaudeSession(client, sessionId, {
+      // Surface rejected commands (e.g. the CLI refusing a permission-mode switch)
+      // instead of dropping them — otherwise the select just "doesn't stick".
+      onProtocolError: (message) => toast.error(message),
+    })
   const busy = state.status === 'running' || state.status === 'awaiting_approval'
   const ended = state.status === 'failed' || state.status === 'closed'
 

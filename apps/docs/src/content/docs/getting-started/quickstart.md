@@ -20,7 +20,6 @@ cd claude-worker
 pnpm install
 pnpm server   # unauthenticated dev gateway on 127.0.0.1:8787 (loopback only!)
 pnpm web      # dashboard on http://localhost:5191, proxying /v1 to the gateway
-pnpm demo     # optional: minimal demo on http://localhost:5190
 ```
 
 The dev gateway runs with `allowUnauthenticated: true`, which `createWorkerServer` only permits

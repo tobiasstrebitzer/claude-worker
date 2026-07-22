@@ -22,6 +22,7 @@ export const PERMISSION_MODES: PermissionModeMeta[] = [
   { value: 'acceptEdits', label: 'acceptEdits', description: 'auto-approve file edits' },
   { value: 'plan', label: 'plan', description: 'read-only planning' },
   { value: 'auto', label: 'auto', description: 'model decides when to ask' },
+  { value: 'dontAsk', label: 'dontAsk', description: 'never ask — deny unapproved' },
   {
     value: 'bypassPermissions',
     label: 'bypassPermissions',

@@ -147,6 +147,7 @@ export class JobQueue {
       id: randomUUID(),
       status: 'queued',
       cwd: request.session.cwd,
+      profile: request.session.profile,
       prompt: request.session.prompt,
       createdAt: Date.now(),
       attempt: 1,

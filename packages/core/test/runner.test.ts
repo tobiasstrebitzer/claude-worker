@@ -208,7 +208,7 @@ describe('SessionRunner', () => {
     const resultPromise = harness.captured.options!.canUseTool!(
       'Bash',
       { command: 'ls' },
-      { signal: new AbortController().signal, toolUseID: 'tool-1', title: 'Run ls' },
+      { signal: new AbortController().signal, requestId: 'creq-1', toolUseID: 'tool-1', title: 'Run ls' },
     )
     expect(runner.status).toBe('awaiting_approval')
     const request = runner.pendingApprovals[0]!
@@ -240,7 +240,7 @@ describe('SessionRunner', () => {
     const resultPromise = harness.captured.options!.canUseTool!(
       'Write',
       { file_path: '/tmp/x.txt', content: 'hi' },
-      { signal: new AbortController().signal, toolUseID: 'tool-2' },
+      { signal: new AbortController().signal, requestId: 'creq-1', toolUseID: 'tool-2' },
     )
     await tick()
     runner.resolvePermission(runner.pendingApprovals[0]!.id, { behavior: 'allow' })
@@ -260,10 +260,10 @@ describe('SessionRunner', () => {
     const resultPromise = harness.captured.options!.canUseTool!(
       'Write',
       { file_path: '/tmp/x' },
-      { signal: new AbortController().signal, toolUseID: 'tool-2' },
+      { signal: new AbortController().signal, requestId: 'creq-1', toolUseID: 'tool-2' },
     )
     const result = await resultPromise
-    expect(result.behavior).toBe('deny')
+    expect(result?.behavior).toBe('deny')
     const resolved = events.find((e) => e.type === 'permission_resolved')
     expect(resolved).toMatchObject({ behavior: 'deny', resolvedBy: 'timeout' })
     expect(runner.resolvePermission('unknown', { behavior: 'allow' })).toBe(false)
@@ -299,7 +299,7 @@ describe('SessionRunner', () => {
     await tick()
 
     const result = await harness.captured.options!.canUseTool!('AskUserQuestion', questionInput, {
-      signal: new AbortController().signal,
+      signal: new AbortController().signal, requestId: 'creq-1',
       toolUseID: 'q-1',
     })
     expect(result).toEqual({
@@ -331,7 +331,7 @@ describe('SessionRunner', () => {
     await tick()
 
     const result = await harness.captured.options!.canUseTool!('AskUserQuestion', questionInput, {
-      signal: new AbortController().signal,
+      signal: new AbortController().signal, requestId: 'creq-1',
       toolUseID: 'q-2',
     })
     expect(result).toMatchObject({ behavior: 'deny', toolUseID: 'q-2' })
@@ -345,7 +345,7 @@ describe('SessionRunner', () => {
     void harness.captured.options!.canUseTool!(
       'Bash',
       { command: 'ls' },
-      { signal: new AbortController().signal, toolUseID: 'tool-3' },
+      { signal: new AbortController().signal, requestId: 'creq-1', toolUseID: 'tool-3' },
     )
     await tick()
     expect(runner.pendingApprovals).toHaveLength(1)
@@ -360,7 +360,7 @@ describe('SessionRunner', () => {
     const resultPromise = harness.captured.options!.canUseTool!(
       'AskUserQuestion',
       questionInput,
-      { signal: new AbortController().signal, toolUseID: 'q-3' },
+      { signal: new AbortController().signal, requestId: 'creq-1', toolUseID: 'q-3' },
     )
     await tick()
     expect(runner.pendingApprovals).toHaveLength(1)
@@ -540,11 +540,11 @@ describe('SessionRunner', () => {
     const resultPromise = harness.captured.options!.canUseTool!(
       'Bash',
       { command: 'rm -rf /' },
-      { signal: new AbortController().signal, toolUseID: 'tool-3' },
+      { signal: new AbortController().signal, requestId: 'creq-1', toolUseID: 'tool-3' },
     )
     runner.close()
     const result = await resultPromise
-    expect(result.behavior).toBe('deny')
+    expect(result?.behavior).toBe('deny')
     expect(runner.status).toBe('closed')
     expect(events.at(-1)!.type).toBe('status_changed')
     expect(events.some((e) => e.type === 'session_closed')).toBe(true)
@@ -591,6 +591,7 @@ describe('SessionRunner', () => {
         session_id: 'sdk-session-1',
         message: { role: 'user', content: 'earlier prompt' },
         parent_tool_use_id: null,
+        parent_agent_id: null,
       },
       {
         type: 'assistant' as const,
@@ -598,6 +599,7 @@ describe('SessionRunner', () => {
         session_id: 'sdk-session-1',
         message: { role: 'assistant', content: [{ type: 'text', text: 'earlier reply' }] },
         parent_tool_use_id: null,
+        parent_agent_id: null,
       },
       {
         type: 'system' as const,
@@ -605,6 +607,7 @@ describe('SessionRunner', () => {
         session_id: 'sdk-session-1',
         message: {},
         parent_tool_use_id: null,
+        parent_agent_id: null,
       },
     ]
     const historyFn = vi.fn(async () => history)

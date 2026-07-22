@@ -1,6 +1,8 @@
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { homedir } from 'node:os'
 import type { Duplex } from 'node:stream'
-import { resolve as resolvePath, sep } from 'node:path'
+import { join, resolve as resolvePath, sep } from 'node:path'
 import { WebSocketServer, type WebSocket } from 'ws'
 import { listSessions as sdkListSessions } from '@anthropic-ai/claude-agent-sdk'
 import type { SessionRunner, SessionRunnerConfig } from '@claude-worker/core'
@@ -11,6 +13,8 @@ import {
   type CreateJobRequest,
   type CreateSessionRequest,
   type JobEvent,
+  type ProfileConfigSnapshot,
+  type ProfileInfo,
   type QueueServerFrame,
   type ResolvePermissionRequest,
   type SdkSessionSummary,
@@ -39,9 +43,11 @@ const defaultSdkSessionLister: SdkSessionLister = async (options) => {
 }
 
 /**
- * Return a principal (any truthy value, attached to nothing yet) to accept the request,
- * or null/undefined to reject with 401. The host app supplies this — the worker has no
- * auth story of its own.
+ * Return a principal (any truthy value) to accept the request, or null/undefined to
+ * reject with 401. The host app supplies this — the worker has no auth story of its
+ * own. A principal object may carry `allowedProfiles: string[]` to restrict which
+ * profiles the caller can create sessions/jobs under (and see in GET /profiles) —
+ * without it the caller may use every declared profile.
  */
 export type Authenticator = (
   req: IncomingMessage,
@@ -54,6 +60,16 @@ export type WorkerServerOptions = {
   allowUnauthenticated?: boolean
   /** If set, session cwd must resolve inside one of these roots. Strongly recommended. */
   allowedCwdRoots?: string[]
+  /**
+   * Named Claude Code config directories sessions can run under (each becomes the
+   * session's CLAUDE_CONFIG_DIR — settings, memory, skills, and the credentials the
+   * SDK resolves from it). Declared here at startup; the API only reads them
+   * (GET {basePath}/profiles). With more than one declared, every session/job create
+   * must name its profile; with exactly one it is implicit. Unset: a 'default'
+   * profile is auto-created from $CLAUDE_CONFIG_DIR or ~/.claude when that directory
+   * exists. Pass [] to run without profiles (no env pinning at all).
+   */
+  profiles?: ProfileInfo[]
   /** Map/patch the incoming CreateSessionRequest into the runner config (inject queryFn,
    * env, tool policy, per-skill constraints...). Defaults to identity. */
   buildRunnerConfig?: (req: CreateSessionRequest) => SessionRunnerConfig
@@ -61,6 +77,15 @@ export type WorkerServerOptions = {
   basePath?: string
   /** Max JSON body size in bytes. Default 1 MiB. */
   maxBodyBytes?: number
+  /**
+   * Server-wide bypass policy: refuse `permissionMode: 'bypassPermissions'` on
+   * session/job creation (403), and strip the `allowDangerouslySkipPermissions`
+   * pre-authorization from requests (so clients that ask for the capability by
+   * default keep working — their later switch attempt fails with the CLI's own
+   * visible error instead). Mirrors Claude Code's
+   * `permissions.disableBypassPermissionsMode` setting, enforced at the gateway.
+   */
+  disableBypassPermissions?: boolean
   /**
    * Fail closed on subscription credentials: if a session initializes with
    * `apiKeySource: 'oauth'` (a claude.ai login rather than an API key / Bedrock / Vertex),
@@ -135,6 +160,72 @@ async function readJsonBody(
   return JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>
 }
 
+/**
+ * Curated, view-only snapshot of a profile's config dir for GET /profiles/:name.
+ * Best-effort: a missing or unparseable settings.json just omits the settings block.
+ * Env var VALUES are never read into the response — names only.
+ */
+function readProfileConfig(profile: ProfileInfo): ProfileConfigSnapshot {
+  const dir = profile.configDir
+  const listDirs = (path: string): string[] => {
+    try {
+      return readdirSync(path, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name)
+        .sort()
+    } catch {
+      return []
+    }
+  }
+  const listMd = (path: string): string[] => {
+    try {
+      return readdirSync(path)
+        .filter((file) => file.endsWith('.md'))
+        .map((file) => file.slice(0, -3))
+        .sort()
+    } catch {
+      return []
+    }
+  }
+  const snapshot: ProfileConfigSnapshot = {
+    hasUserMemory: existsSync(join(dir, 'CLAUDE.md')),
+    skills: listDirs(join(dir, 'skills')),
+    agents: listMd(join(dir, 'agents')),
+    commands: listMd(join(dir, 'commands')),
+  }
+  try {
+    const raw = JSON.parse(readFileSync(join(dir, 'settings.json'), 'utf8')) as Record<
+      string,
+      unknown
+    >
+    const permissions = (raw.permissions ?? {}) as Record<string, unknown>
+    const count = (rules: unknown): number => (Array.isArray(rules) ? rules.length : 0)
+    snapshot.settings = {
+      model: typeof raw.model === 'string' ? raw.model : undefined,
+      defaultPermissionMode:
+        typeof permissions.defaultMode === 'string' ? permissions.defaultMode : undefined,
+      permissionRules: {
+        allow: count(permissions.allow),
+        ask: count(permissions.ask),
+        deny: count(permissions.deny),
+      },
+      envKeys:
+        raw.env && typeof raw.env === 'object' ? Object.keys(raw.env).sort() : undefined,
+      hooks:
+        raw.hooks && typeof raw.hooks === 'object' ? Object.keys(raw.hooks).sort() : undefined,
+    }
+  } catch {
+    // settings.json absent or unparseable — snapshot ships without the block
+  }
+  return snapshot
+}
+
+/** Auto-created profile when none are declared: the operator's own config dir. */
+function detectDefaultProfiles(): ProfileInfo[] {
+  const dir = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude')
+  return existsSync(dir) ? [{ name: 'default', configDir: dir }] : []
+}
+
 function cwdAllowed(cwd: string, roots: string[] | undefined): boolean {
   if (!roots || roots.length === 0) return true
   const resolved = resolvePath(cwd)
@@ -152,10 +243,92 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
   }
   const basePath = options.basePath ?? '/v1'
   const maxBodyBytes = options.maxBodyBytes ?? 1024 * 1024
-  const buildRunnerConfig = options.buildRunnerConfig ?? ((req: CreateSessionRequest) => req)
+  const hostBuildRunnerConfig =
+    options.buildRunnerConfig ?? ((req: CreateSessionRequest): SessionRunnerConfig => req)
+
+  // Profiles: declared at startup, or a single 'default' auto-created from the
+  // operator's own config dir. Misdeclared dirs fail fast — the CLI would otherwise
+  // silently start from an empty config (and a different credential chain).
+  const profiles = options.profiles ?? detectDefaultProfiles()
+  const profileByName = new Map(profiles.map((p) => [p.name, p]))
+  if (profileByName.size !== profiles.length) {
+    throw new Error('createWorkerServer: duplicate profile names in `profiles`')
+  }
+  for (const p of options.profiles ?? []) {
+    if (!existsSync(p.configDir)) {
+      throw new Error(
+        `createWorkerServer: profile '${p.name}' configDir does not exist: ${p.configDir}`,
+      )
+    }
+    if (options.disableBypassPermissions && p.defaults?.permissionMode === 'bypassPermissions') {
+      throw new Error(
+        `createWorkerServer: profile '${p.name}' defaults to bypassPermissions but ` +
+          'disableBypassPermissions is set',
+      )
+    }
+  }
+
+  /** Enforce the server's bypass policy on a create request. Returns a 403 message
+   * for an explicit bypass-mode request; strips the pre-authorization capability
+   * silently (see the option's doc for why). */
+  const applyBypassPolicy = (req: CreateSessionRequest): string | null => {
+    if (!options.disableBypassPermissions) return null
+    if (req.permissionMode === 'bypassPermissions') {
+      return 'bypassPermissions is disabled on this server (disableBypassPermissions)'
+    }
+    delete req.allowDangerouslySkipPermissions
+    return null
+  }
+
+  /** Profile-aware config hook: fill the profile's defaults into unset request fields,
+   * run the host hook, then pin CLAUDE_CONFIG_DIR — the profile wins even when the
+   * host hook set its own env. Handed to the queue too, so jobs inherit profiles. */
+  const buildRunnerConfig = (req: CreateSessionRequest): SessionRunnerConfig => {
+    const profile = req.profile !== undefined ? profileByName.get(req.profile) : undefined
+    if (!profile) return hostBuildRunnerConfig(req)
+    const config = hostBuildRunnerConfig({
+      ...req,
+      model: req.model ?? profile.defaults?.model,
+      permissionMode: req.permissionMode ?? profile.defaults?.permissionMode,
+    })
+    return {
+      ...config,
+      env: { ...(config.env ?? process.env), CLAUDE_CONFIG_DIR: profile.configDir },
+    }
+  }
+
+  /** Resolve a request's profile: required when several are declared, implicit with
+   * exactly one, scoped by the principal's allowedProfiles. Returns the resolved
+   * profile (undefined when the server declares none) or a response-ready error. */
+  const resolveProfile = (
+    name: unknown,
+    allowedProfiles: string[] | undefined,
+  ): { ok: true; profile?: ProfileInfo } | { ok: false; status: number; error: string } => {
+    if (name !== undefined && typeof name !== 'string') {
+      return { ok: false, status: 400, error: 'profile must be a string' }
+    }
+    if (profiles.length === 0) {
+      return name !== undefined
+        ? { ok: false, status: 400, error: 'no profiles are configured on this server' }
+        : { ok: true }
+    }
+    const effective = name ?? (profiles.length === 1 ? profiles[0]!.name : undefined)
+    if (effective === undefined) {
+      const available = profiles.map((p) => p.name).join(', ')
+      return { ok: false, status: 400, error: `profile is required (available: ${available})` }
+    }
+    const profile = profileByName.get(effective)
+    if (!profile) return { ok: false, status: 400, error: `unknown profile: ${effective}` }
+    if (allowedProfiles && !allowedProfiles.includes(profile.name)) {
+      return { ok: false, status: 403, error: `profile not allowed: ${profile.name}` }
+    }
+    return { ok: true, profile }
+  }
+
   const registry = new SessionRegistry()
   const wss = new WebSocketServer({ noServer: true })
-  let subscriptionNoticeShown = false
+  /** Profiles (by name; '' = none) whose oauth notice has been logged. */
+  const subscriptionNoticeShown = new Set<string>()
 
   // Live queue watchers (`{basePath}/queue/ws`): every job event is fanned out, and
   // lifecycle changes push refreshed stats so dashboards stay current without polling.
@@ -211,10 +384,15 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
             "with claude.ai subscription credentials (apiKeySource 'oauth'). Set " +
             'ANTHROPIC_API_KEY (or Bedrock/Vertex auth) in the server environment.',
         )
-      } else if (!subscriptionNoticeShown) {
-        subscriptionNoticeShown = true
+      } else {
+        // Per profile, not global: distinct profiles are distinct accounts, and each
+        // operator deserves the notice once.
+        const profileName = runner.info().profile ?? ''
+        if (subscriptionNoticeShown.has(profileName)) return
+        subscriptionNoticeShown.add(profileName)
+        const scope = profileName ? `Sessions under profile '${profileName}'` : 'Sessions'
         console.warn(
-          '[claude-worker] Sessions are using claude.ai subscription credentials ' +
+          `[claude-worker] ${scope} are using claude.ai subscription credentials ` +
             "(apiKeySource 'oauth'), not an API key. That is only appropriate for personal, " +
             'single-user use of your own account. Unattended/scheduled or multi-user use ' +
             "requires an API key under Anthropic's terms — set ANTHROPIC_API_KEY in the " +
@@ -224,10 +402,19 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
     })
   }
 
-  const authenticate = async (req: IncomingMessage): Promise<boolean> => {
-    if (!options.authenticate) return true
+  type AuthContext = { ok: boolean; allowedProfiles?: string[] }
+  const authenticate = async (req: IncomingMessage): Promise<AuthContext> => {
+    if (!options.authenticate) return { ok: true }
     const principal = await options.authenticate(req)
-    return principal !== null && principal !== undefined && principal !== false
+    if (principal === null || principal === undefined || principal === false) return { ok: false }
+    const allowed = (principal as { allowedProfiles?: unknown }).allowedProfiles
+    return {
+      ok: true,
+      allowedProfiles:
+        Array.isArray(allowed) && allowed.every((p) => typeof p === 'string')
+          ? (allowed as string[])
+          : undefined,
+    }
   }
 
   // Route pattern: {basePath}/sessions[/:id[/ws | /permissions/:requestId]]
@@ -280,6 +467,7 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
     req: IncomingMessage,
     res: ServerResponse,
     pathname: string,
+    auth: AuthContext,
   ): Promise<void> => {
     if (!queue) {
       json(res, 404, { error: 'job queue not configured' })
@@ -317,6 +505,19 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
           json(res, 403, { error: 'cwd is outside the allowed roots' })
           return
         }
+        const refused = applyBypassPolicy(body.session)
+        if (refused) {
+          json(res, 403, { error: refused })
+          return
+        }
+        const resolved = resolveProfile(body.session.profile, auth.allowedProfiles)
+        if (!resolved.ok) {
+          json(res, resolved.status, { error: resolved.error })
+          return
+        }
+        // Normalize to the resolved name so an implicit single profile still lands
+        // on JobInfo.profile and reaches the runner config at claim time.
+        body.session.profile = resolved.profile?.name
         try {
           json(res, 201, { job: await queue.submit(body) })
         } catch (error) {
@@ -354,15 +555,47 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
       pathname.startsWith(basePath + '/jobs/') ||
       pathname === basePath + '/queue'
     ) {
-      if (!(await authenticate(req))) {
+      const auth = await authenticate(req)
+      if (!auth.ok) {
         json(res, 401, { error: 'unauthorized' })
         return
       }
-      await handleJobs(req, res, pathname)
+      await handleJobs(req, res, pathname, auth)
+      return
+    }
+    if (pathname === basePath + '/profiles' || pathname.startsWith(basePath + '/profiles/')) {
+      const auth = await authenticate(req)
+      if (!auth.ok) {
+        json(res, 401, { error: 'unauthorized' })
+        return
+      }
+      if (req.method !== 'GET') {
+        json(res, 405, { error: 'method not allowed' })
+        return
+      }
+      const rest = pathname.slice((basePath + '/profiles').length).replace(/^\//, '')
+      if (rest === '') {
+        const visible = auth.allowedProfiles
+          ? profiles.filter((p) => auth.allowedProfiles!.includes(p.name))
+          : profiles
+        json(res, 200, { profiles: visible })
+        return
+      }
+      const name = decodeURIComponent(rest)
+      const profile = name.includes('/') ? undefined : profileByName.get(name)
+      if (!profile) {
+        json(res, 404, { error: 'profile not found' })
+        return
+      }
+      if (auth.allowedProfiles && !auth.allowedProfiles.includes(profile.name)) {
+        json(res, 403, { error: `profile not allowed: ${profile.name}` })
+        return
+      }
+      json(res, 200, { profile, config: readProfileConfig(profile) })
       return
     }
     if (pathname === basePath + '/sdk-sessions') {
-      if (!(await authenticate(req))) {
+      if (!(await authenticate(req)).ok) {
         json(res, 401, { error: 'unauthorized' })
         return
       }
@@ -374,7 +607,8 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
       json(res, 404, { error: 'not found' })
       return
     }
-    if (!(await authenticate(req))) {
+    const auth = await authenticate(req)
+    if (!auth.ok) {
       json(res, 401, { error: 'unauthorized' })
       return
     }
@@ -394,6 +628,18 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
           json(res, 403, { error: 'cwd is outside the allowed roots' })
           return
         }
+        const refused = applyBypassPolicy(body)
+        if (refused) {
+          json(res, 403, { error: refused })
+          return
+        }
+        const resolved = resolveProfile(body.profile, auth.allowedProfiles)
+        if (!resolved.ok) {
+          json(res, resolved.status, { error: resolved.error })
+          return
+        }
+        // Resolved name (even when implicit) so SessionInfo.profile is always set.
+        body.profile = resolved.profile?.name
         const runner = registry.create(buildRunnerConfig(body))
         watchAuthSource(runner)
         json(res, 201, { session: runner.info() })
@@ -456,7 +702,7 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
           socket.destroy()
           return
         }
-        if (!(await authenticate(req))) {
+        if (!(await authenticate(req)).ok) {
           socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n')
           socket.destroy()
           return
@@ -478,7 +724,7 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
         socket.destroy()
         return
       }
-      if (!(await authenticate(req))) {
+      if (!(await authenticate(req)).ok) {
         socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n')
         socket.destroy()
         return
@@ -552,6 +798,9 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
         await runner.interrupt()
         return
       case 'set_permission_mode':
+        if (frame.mode === 'bypassPermissions' && options.disableBypassPermissions) {
+          throw new Error('bypassPermissions is disabled on this server (disableBypassPermissions)')
+        }
         await runner.setPermissionMode(frame.mode)
         return
       case 'set_model':

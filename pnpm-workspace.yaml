@@ -12,3 +12,14 @@ allowBuilds:
   '@swc/core': true
   # sharp: Astro's default image service (apps/docs). Prebuilt binaries fetched on install.
   sharp: true
+
+minimumReleaseAgeExclude:
+  - '@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.217'
+  - '@anthropic-ai/claude-agent-sdk-darwin-x64@0.3.217'
+  - '@anthropic-ai/claude-agent-sdk-linux-arm64-musl@0.3.217'
+  - '@anthropic-ai/claude-agent-sdk-linux-arm64@0.3.217'
+  - '@anthropic-ai/claude-agent-sdk-linux-x64-musl@0.3.217'
+  - '@anthropic-ai/claude-agent-sdk-linux-x64@0.3.217'
+  - '@anthropic-ai/claude-agent-sdk-win32-arm64@0.3.217'
+  - '@anthropic-ai/claude-agent-sdk-win32-x64@0.3.217'
+  - '@anthropic-ai/claude-agent-sdk@0.3.217'

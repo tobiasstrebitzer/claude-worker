@@ -17,8 +17,10 @@ import {
 } from '@claude-worker/ui'
 import { History, Plus, RefreshCw } from 'lucide-react'
 import { ModelPicker } from '@/components/ModelPicker.tsx'
+import { ProfileSelect } from '@/components/ProfileSelect.tsx'
 import { client } from '@/lib/client.ts'
 import { getDefaultModel, getDefaultPermissionMode } from '@/lib/settings.ts'
+import { useProfileChoice } from '@/lib/useProfiles.ts'
 import { useSessions } from '@/lib/useSessions.ts'
 
 const CWD_KEY = 'claude-worker.last-cwd'
@@ -28,6 +30,7 @@ function CreateSessionCard({ onCreated }: { onCreated: (id: string) => void }) {
   const [prompt, setPrompt] = useState('')
   const [mode, setMode] = useState<PermissionMode>(() => getDefaultPermissionMode('session'))
   const [model, setModel] = useState(() => getDefaultModel('session'))
+  const { profiles, profile, select: selectProfile } = useProfileChoice()
   const [creating, setCreating] = useState(false)
 
   const [sdkSessions, setSdkSessions] = useState<SdkSessionSummary[] | undefined>()
@@ -44,11 +47,16 @@ function CreateSessionCard({ onCreated }: { onCreated: (id: string) => void }) {
       localStorage.setItem(CWD_KEY, cwd.trim() || dir)
       const session = await client.createSession({
         cwd: dir,
+        profile: profile || undefined,
         prompt: resume ? undefined : prompt.trim() || undefined,
         permissionMode: mode,
         model: model.trim() || undefined,
         resume: resume?.sessionId,
         settingSources: ['user', 'project'],
+        // Interactive sessions: the operator is present, so pre-authorize the
+        // bypassPermissions capability — the CLI refuses to switch into it
+        // mid-session otherwise.
+        allowDangerouslySkipPermissions: true,
       })
       onCreated(session.id)
     } catch (e) {
@@ -99,6 +107,12 @@ function CreateSessionCard({ onCreated }: { onCreated: (id: string) => void }) {
           />
         </label>
         <div className='flex items-end justify-between gap-3'>
+          <ProfileSelect
+            profiles={profiles}
+            value={profile}
+            onChange={selectProfile}
+            className='min-w-32'
+          />
           <label className='flex min-w-0 flex-col gap-1'>
             <span className='text-label font-medium text-fg-3'>Permission mode</span>
             <PermissionModeSelect variant='form' mode={mode} onModeChange={setMode} className='min-w-44' />

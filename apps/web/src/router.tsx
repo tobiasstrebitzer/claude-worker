@@ -7,6 +7,8 @@ import {
 } from '@tanstack/react-router'
 import { AppShell } from '@/components/shell/AppShell.tsx'
 import { JobsView } from '@/views/JobsView.tsx'
+import { ProfileView } from '@/views/ProfileView.tsx'
+import { ProfilesView } from '@/views/ProfilesView.tsx'
 import { SessionView } from '@/views/SessionView.tsx'
 import { SessionsView } from '@/views/SessionsView.tsx'
 import { SettingsView } from '@/views/SettingsView.tsx'
@@ -39,6 +41,18 @@ const jobsRoute = createRoute({
   component: JobsView,
 })
 
+const profilesRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/profiles',
+  component: ProfilesView,
+})
+
+const profileRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/profiles/$profileName',
+  component: ProfileView,
+})
+
 const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/settings',
@@ -46,7 +60,7 @@ const settingsRoute = createRoute({
 })
 
 export const router = createRouter({
-  routeTree: rootRoute.addChildren([indexRoute, sessionsRoute, sessionRoute, jobsRoute, settingsRoute]),
+  routeTree: rootRoute.addChildren([indexRoute, sessionsRoute, sessionRoute, jobsRoute, profilesRoute, profileRoute, settingsRoute]),
   // Static bundle with no server SPA fallback — hash history keeps deep links working.
   history: createHashHistory(),
 })

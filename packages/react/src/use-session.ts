@@ -16,6 +16,13 @@ function reduce(state: TranscriptState, action: SessionEvent | AttachedFrame): T
     : applyEvent(state, action)
 }
 
+export type UseClaudeSessionOptions = {
+  /** Called when the server rejects a command with a protocol_error frame — e.g. a
+   * permission-mode switch the CLI refuses. Without a handler these are dropped
+   * silently and the UI looks like "nothing happened". */
+  onProtocolError?: (message: string) => void
+}
+
 export type UseClaudeSessionResult = {
   state: TranscriptState
   connected: boolean
@@ -32,10 +39,14 @@ export type UseClaudeSessionResult = {
 export function useClaudeSession(
   client: ClaudeWorkerClient,
   sessionId: string | undefined,
+  options?: UseClaudeSessionOptions,
 ): UseClaudeSessionResult {
   const [state, dispatch] = useReducer(reduce, initialTranscriptState)
   const [connected, setConnected] = useState(false)
   const handleRef = useRef<SessionHandle | null>(null)
+  // Ref'd so a new inline callback doesn't tear down and reopen the socket.
+  const onProtocolErrorRef = useRef(options?.onProtocolError)
+  onProtocolErrorRef.current = options?.onProtocolError
 
   useEffect(() => {
     if (!sessionId) return
@@ -44,10 +55,14 @@ export function useClaudeSession(
     const offEvent = handle.on('event', (event: SessionEvent) => dispatch(event))
     const offAttached = handle.on('attached', (frame: AttachedFrame) => dispatch(frame))
     const offConn = handle.on('connectionChange', setConnected)
+    const offProtocolError = handle.on('protocolError', (message: string) => {
+      onProtocolErrorRef.current?.(message)
+    })
     return () => {
       offEvent()
       offAttached()
       offConn()
+      offProtocolError()
       handle.detach()
       handleRef.current = null
     }

@@ -6,12 +6,13 @@ import { PERMISSION_MODES } from '@claude-worker/ui'
 /** Pre-session model choices: aliases the CLI resolves to current model ids, mirroring
  * its supportedModels shape (a 'default' sentinel row first). Live sessions get the
  * CLI's own list via the capabilities event; forms and settings use this static one. */
+// Copy kept in sync with the Claude Code CLI's model picker (see _docs/TODO.md).
 export const MODEL_OPTIONS: ModelOption[] = [
   { value: 'default', displayName: 'Default (recommended)', description: "The CLI's configured default model" },
-  { value: 'fable', displayName: 'Fable', description: 'Latest Fable — most intelligent model tier' },
-  { value: 'opus', displayName: 'Opus', description: 'Latest Opus — most capable Opus-class model' },
-  { value: 'sonnet', displayName: 'Sonnet', description: 'Latest Sonnet — balanced capability and speed' },
-  { value: 'haiku', displayName: 'Haiku', description: 'Latest Haiku — fastest and most economical' },
+  { value: 'fable', displayName: 'Fable', description: 'Fable 5 · Most capable for your hardest and longest-running tasks' },
+  { value: 'opus', displayName: 'Opus', description: 'Opus 4.8 with 1M context · Best for everyday, complex tasks' },
+  { value: 'sonnet', displayName: 'Sonnet', description: 'Sonnet 5 · Efficient for routine tasks' },
+  { value: 'haiku', displayName: 'Haiku', description: 'Haiku 4.5 · Fastest for quick answers' },
 ]
 
 /** Which creation form a default applies to: interactive sessions or queue jobs. */

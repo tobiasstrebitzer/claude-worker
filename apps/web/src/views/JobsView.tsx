@@ -34,9 +34,11 @@ import {
 } from '@claude-worker/ui'
 import { CalendarClock, Eye, ListChecks, Plus, RefreshCw, X } from 'lucide-react'
 import { ModelPicker } from '@/components/ModelPicker.tsx'
+import { ProfileSelect } from '@/components/ProfileSelect.tsx'
 import { client } from '@/lib/client.ts'
 import { getDefaultModel, getDefaultPermissionMode } from '@/lib/settings.ts'
 import { useJobs } from '@/lib/useJobs.ts'
+import { useProfileChoice } from '@/lib/useProfiles.ts'
 import { useSessions } from '@/lib/useSessions.ts'
 
 const CWD_KEY = 'claude-worker.last-cwd'
@@ -95,6 +97,8 @@ function ScheduleJobCard({ onScheduled }: { onScheduled: () => void }) {
   const [mode, setMode] = useState<PermissionMode>(() => getDefaultPermissionMode('job'))
   const [questions, setQuestions] = useState<QuestionBehavior>('auto')
   const [model, setModel] = useState(() => getDefaultModel('job'))
+  const { profiles, profile, select: selectProfile } = useProfileChoice()
+  const [allowBypass, setAllowBypass] = useState(false)
   const [maxTokens, setMaxTokens] = useState('')
   const [attempts, setAttempts] = useState('')
   const [webhookUrl, setWebhookUrl] = useState('')
@@ -121,11 +125,15 @@ function ScheduleJobCard({ onScheduled }: { onScheduled: () => void }) {
       await client.createJob({
         session: {
           cwd: cwd.trim(),
+          profile: profile || undefined,
           prompt: prompt.trim(),
           permissionMode: mode,
           questionBehavior: questions,
           model: model.trim() || undefined,
           settingSources: ['user', 'project'],
+          // Opt-in per job: pre-authorize bypassPermissions so someone watching the
+          // run can switch it on mid-run. Off by default for unattended runs.
+          allowDangerouslySkipPermissions: allowBypass || undefined,
         },
         maxTokens: tokens,
         attempts: attemptCount,
@@ -167,6 +175,12 @@ function ScheduleJobCard({ onScheduled }: { onScheduled: () => void }) {
           />
         </label>
         <div className='flex flex-wrap items-end gap-3'>
+          <ProfileSelect
+            profiles={profiles}
+            value={profile}
+            onChange={selectProfile}
+            className='min-w-32'
+          />
           <label className='flex min-w-0 flex-col gap-1'>
             <span className='text-label font-medium text-fg-3'>Permission mode</span>
             <PermissionModeSelect variant='form' mode={mode} onModeChange={setMode} className='min-w-44' />
@@ -228,6 +242,18 @@ function ScheduleJobCard({ onScheduled }: { onScheduled: () => void }) {
             Schedule
           </Button>
         </div>
+        <label
+          className='flex w-fit cursor-pointer items-center gap-2 text-body-sm text-fg-2'
+          title='Spawns the CLI with --dangerously-skip-permissions available, so the mode can be switched on while watching the run. The job still starts in the mode selected above.'>
+          <input
+            type='checkbox'
+            checked={allowBypass}
+            onChange={(e) => setAllowBypass(e.target.checked)}
+            className='size-3.5 accent-(--color-fg-1)'
+          />
+          Allow switching to <code className='font-mono'>bypassPermissions</code> mid-run
+          <span className='text-label text-fg-4'>(dangerous)</span>
+        </label>
         <p className='text-label text-fg-4'>
           Unattended runs still surface permission prompts — watch the job&apos;s session to
           approve, or pick a mode that doesn&apos;t ask. Unanswered prompts deny after the
@@ -271,6 +297,7 @@ function JobRow({
         <div className='truncate text-body-sm text-fg-1'>{job.prompt}</div>
         <div className='flex flex-wrap gap-x-3 font-mono text-label text-fg-4'>
           <span className='truncate'>{job.cwd}</span>
+          {job.profile ? <span className='shrink-0'>@{job.profile}</span> : null}
           <span className='shrink-0'>{formatRelativeTime(job.finishedAt ?? job.startedAt ?? job.createdAt)}</span>
           {job.maxAttempts !== undefined && job.maxAttempts > 1 ? (
             <span className='shrink-0'>

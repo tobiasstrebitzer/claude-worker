@@ -15,8 +15,8 @@ what's deliberately not built yet, see the [roadmap](./roadmap.md).
        queue           react
          |               |
        server            ui
-                        /  \
-                      web  demo
+                         |
+                        web
 ```
 
 `@claude-worker/protocol` depends on nothing and everything depends on it. The browser side
@@ -46,6 +46,11 @@ boundary: anything a client needs must be expressible as protocol events and com
   `authenticate` hook (refuses to start without one unless `allowUnauthenticated: true`), and —
   when the `queue` option is set — `/jobs` + `/queue` routes plus a `/queue/ws` stream of job
   events and stats. Job sessions are ordinary registry sessions, so dashboards can watch them.
+  Profiles (`profiles` option) bind names to Claude Code config dirs: creation resolves the
+  request's profile (required when several are declared, implicit with one, auto-detected from
+  `~/.claude` when unset), applies its defaults, and pins `CLAUDE_CONFIG_DIR` after the
+  `buildRunnerConfig` hook; the principal's `allowedProfiles` scopes creation and
+  `GET /profiles`.
 - **`packages/client`** — typed protocol client on platform `fetch`/`WebSocket`: REST session
   and job management, WS attach with auto-reconnect and replay-from-last-seq, `attachQueue()`
   for the live queue stream. Zero runtime deps; browser and Node.
@@ -59,8 +64,9 @@ boundary: anything a client needs must be expressible as protocol events and com
   Tailwind build compiles (`@source` scanning — wiring in the package README). The composer's
   input is a vendored copy of just-marketing/prompt-area (MIT) under `src/components/prompt-area`.
 - **`apps/web`** — the full session-control dashboard (TanStack Router, hash history): session
-  list, create/resume flow, live panel, jobs view, settings.
-- **`apps/demo`** — minimal-chrome consumer proving `client` + `ui` are portable.
+  list, create/resume flow, live panel, jobs view, profiles view, settings.
+- (A minimal second consumer, `apps/demo`, proved `client` + `ui` portability for the V1
+  acceptance scope; it was removed once that was established — see git history.)
 
 ## Session lifecycle
 

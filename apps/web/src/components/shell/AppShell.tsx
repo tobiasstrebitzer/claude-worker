@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react'
 import { Link, Outlet, useRouterState } from '@tanstack/react-router'
-import { ListChecks, PanelLeftClose, PanelLeftOpen, Settings, SquareTerminal } from 'lucide-react'
+import { ListChecks, PanelLeftClose, PanelLeftOpen, Settings, SquareTerminal, UsersRound } from 'lucide-react'
 import { cn } from '@claude-worker/ui'
 import { BrandMark } from './BrandMark.tsx'
 import { ThemeToggle } from './ThemeToggle.tsx'
@@ -8,6 +8,7 @@ import { ThemeToggle } from './ThemeToggle.tsx'
 const NAV = [
   { id: 'sessions', label: 'Sessions', icon: SquareTerminal, path: '/sessions' },
   { id: 'jobs', label: 'Jobs', icon: ListChecks, path: '/jobs' },
+  { id: 'profiles', label: 'Profiles', icon: UsersRound, path: '/profiles' },
   { id: 'settings', label: 'Settings', icon: Settings, path: '/settings' },
 ] as const
 

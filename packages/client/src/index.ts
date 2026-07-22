@@ -5,7 +5,9 @@ import type {
   CreateSessionRequest,
   JobEvent,
   JobInfo,
+  GetProfileResponse,
   PermissionMode,
+  ProfileInfo,
   QueueServerFrame,
   QueueStats,
   ResolvePermissionRequest,
@@ -320,6 +322,20 @@ export class ClaudeWorkerClient {
       `/sessions/${encodeURIComponent(sessionId)}/permissions/${encodeURIComponent(requestId)}`,
       decision,
     )
+  }
+
+  /** List the profiles (named Claude Code config dirs) this server declares, filtered
+   * to what the caller may use. Feed a result's `name` to createSession({ profile }).
+   * Servers predating profiles 404 here — catch and treat as none declared. */
+  async listProfiles(): Promise<ProfileInfo[]> {
+    const body = await this.#call('GET', '/profiles')
+    return (body as { profiles: ProfileInfo[] }).profiles
+  }
+
+  /** One profile plus a fresh, view-only snapshot of its config directory (settings,
+   * skills, agents, commands — env var names only, never values). */
+  async getProfile(name: string): Promise<GetProfileResponse> {
+    return (await this.#call('GET', `/profiles/${encodeURIComponent(name)}`)) as GetProfileResponse
   }
 
   /** List the Agent SDK's on-disk sessions (for resume across server restarts).

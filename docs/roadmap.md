@@ -1,6 +1,6 @@
 # Roadmap & open questions
 
-What's shipped, what's next, and what's still undecided. Status as of 2026-07-21.
+What's shipped, what's next, and what's still undecided. Status as of 2026-07-22.
 
 ## Shipped
 
@@ -15,6 +15,20 @@ What's shipped, what's next, and what's still undecided. Status as of 2026-07-21
 - **Session telemetry** (2026-07-21) — `context_usage` / `rate_limit` / `permission_mode_changed`
   promoted first-class; StatusBar usage rings (render nothing, never 0%, until data arrives —
   API-key sessions may never emit rate-limit events); model + permission-mode selects.
+- **Profiles** (2026-07-22) — named Claude Code config dirs (`CLAUDE_CONFIG_DIR` per session):
+  server-declared with per-profile defaults, required-unless-single on create, auto-detected
+  `default` from `~/.claude`, `allowedProfiles` scoping on the auth principal, `GET /profiles`
+  (+ `/profiles/:name` config snapshot), dashboard Profiles list/detail + pickers on both
+  create forms.
+- **Permission-mode fixes** (2026-07-22) — `allowDangerouslySkipPermissions` passthrough so
+  live sessions can switch into `bypassPermissions` (smoke-verified CLI refusal without it);
+  `dontAsk` added to the mode select; `protocol_error` frames surfaced (`onProtocolError` →
+  SessionPanel toast); pre-session model list synced to the CLI's current lineup.
+- **SDK 0.3 + bypass policy** (2026-07-22) — agent-sdk `^0.2.86` → `^0.3.217` (bundled CLI now
+  reports the current model lineup; `canUseTool` gained `requestId`, `SessionMessage` gained
+  `parent_agent_id` — tests updated, protocol mirrors unchanged); `disableBypassPermissions`
+  server policy (403 explicit mode, strip the capability, refuse the WS switch); per-job
+  bypass opt-in on the schedule form.
 
 ## Next
 

@@ -1,10 +1,14 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer, type Server } from 'node:http'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import WebSocket from 'ws'
 import type { Options, Query, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import type {
   JobEvent,
   JobInfo,
+  ProfileInfo,
   QueueServerFrame,
   QueueStats,
   ServerFrame,
@@ -180,7 +184,7 @@ describe('createWorkerServer', () => {
     const resultPromise = harness.captured.options!.canUseTool!(
       'Bash',
       { command: 'ls' },
-      { signal: new AbortController().signal, toolUseID: 'tool-1' },
+      { signal: new AbortController().signal, requestId: 'creq-1', toolUseID: 'tool-1' },
     )
     const requested = await collector.waitFor(
       (f) => f.type === 'event' && f.event.type === 'permission_requested',
@@ -239,7 +243,7 @@ describe('createWorkerServer', () => {
       ],
     }
     const resultPromise = harness.captured.options!.canUseTool!('AskUserQuestion', input, {
-      signal: new AbortController().signal,
+      signal: new AbortController().signal, requestId: 'creq-1',
       toolUseID: 'q-1',
     })
     await vi.waitFor(async () => {
@@ -548,5 +552,341 @@ describe('createWorkerServer', () => {
     expect(lister).toHaveBeenCalledWith({ dir: '/tmp/project', limit: 10, offset: undefined })
 
     expect((await fetch(`${base}/sdk-sessions`, { method: 'POST' })).status).toBe(405)
+  })
+
+  it('declares profiles: lists them, requires a choice, applies defaults, pins CLAUDE_CONFIG_DIR', async () => {
+    const harness = fakeHarness()
+    const tobyDir = mkdtempSync(join(tmpdir(), 'cw-profile-toby-'))
+    const danDir = mkdtempSync(join(tmpdir(), 'cw-profile-dan-'))
+    try {
+      expect(() =>
+        createWorkerServer({
+          allowUnauthenticated: true,
+          profiles: [{ name: 'ghost', configDir: join(tmpdir(), 'cw-does-not-exist') }],
+        }),
+      ).toThrow(/configDir/)
+
+      running = createWorkerServer({
+        allowUnauthenticated: true,
+        allowedCwdRoots: ['/tmp'],
+        profiles: [
+          { name: 'toby', configDir: tobyDir, defaults: { model: 'opus', permissionMode: 'acceptEdits' } },
+          { name: 'dan', configDir: danDir },
+        ],
+        buildRunnerConfig: (req) => ({ ...req, queryFn: harness.queryFn }),
+      })
+      const { port } = await running.listen(0, '127.0.0.1')
+      const base = `http://127.0.0.1:${port}/v1`
+
+      const listBody = (await (await fetch(`${base}/profiles`)).json()) as { profiles: ProfileInfo[] }
+      expect(listBody.profiles.map((p) => p.name)).toEqual(['toby', 'dan'])
+
+      // with several declared, session creates must pick one
+      const missing = await fetch(`${base}/sessions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ cwd: '/tmp/project' }),
+      })
+      expect(missing.status).toBe(400)
+      expect(((await missing.json()) as { error: string }).error).toMatch(/profile is required/)
+
+      const unknown = await fetch(`${base}/sessions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ cwd: '/tmp/project', profile: 'mark' }),
+      })
+      expect(unknown.status).toBe(400)
+      expect(((await unknown.json()) as { error: string }).error).toMatch(/unknown profile/)
+
+      const createRes = await fetch(`${base}/sessions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ cwd: '/tmp/project', prompt: 'hello', profile: 'toby' }),
+      })
+      expect(createRes.status).toBe(201)
+      const { session } = (await createRes.json()) as { session: SessionInfo }
+      expect(session.profile).toBe('toby')
+      await vi.waitFor(() => {
+        expect(harness.captured.options?.env?.CLAUDE_CONFIG_DIR).toBe(tobyDir)
+      })
+      // profile defaults fill unset fields...
+      expect(harness.captured.options?.model).toBe('opus')
+      expect(harness.captured.options?.permissionMode).toBe('acceptEdits')
+
+      // ...but an explicit request value wins
+      await fetch(`${base}/sessions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ cwd: '/tmp/project', prompt: 'hi', profile: 'toby', model: 'sonnet' }),
+      })
+      await vi.waitFor(() => {
+        expect(harness.captured.options?.model).toBe('sonnet')
+      })
+
+      // allowDangerouslySkipPermissions passes through to the SDK options
+      await fetch(`${base}/sessions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          cwd: '/tmp/project',
+          prompt: 'hi',
+          profile: 'dan',
+          allowDangerouslySkipPermissions: true,
+        }),
+      })
+      await vi.waitFor(() => {
+        expect(harness.captured.options?.allowDangerouslySkipPermissions).toBe(true)
+      })
+    } finally {
+      rmSync(tobyDir, { recursive: true, force: true })
+      rmSync(danDir, { recursive: true, force: true })
+    }
+  })
+
+  it('scopes profiles to the principal via allowedProfiles', async () => {
+    const harness = fakeHarness()
+    const tobyDir = mkdtempSync(join(tmpdir(), 'cw-profile-toby-'))
+    const danDir = mkdtempSync(join(tmpdir(), 'cw-profile-dan-'))
+    try {
+      running = createWorkerServer({
+        authenticate: (req) =>
+          req.headers.authorization === 'Bearer dan'
+            ? { allowedProfiles: ['dan'] }
+            : req.headers.authorization === 'Bearer admin'
+              ? { admin: true }
+              : null,
+        allowedCwdRoots: ['/tmp'],
+        profiles: [
+          { name: 'toby', configDir: tobyDir },
+          { name: 'dan', configDir: danDir },
+        ],
+        buildRunnerConfig: (req) => ({ ...req, queryFn: harness.queryFn }),
+      })
+      const { port } = await running.listen(0, '127.0.0.1')
+      const base = `http://127.0.0.1:${port}/v1`
+      const asDan = { 'content-type': 'application/json', authorization: 'Bearer dan' }
+
+      // the listing only shows what the caller may use
+      const danList = (await (
+        await fetch(`${base}/profiles`, { headers: { authorization: 'Bearer dan' } })
+      ).json()) as { profiles: ProfileInfo[] }
+      expect(danList.profiles.map((p) => p.name)).toEqual(['dan'])
+      const adminList = (await (
+        await fetch(`${base}/profiles`, { headers: { authorization: 'Bearer admin' } })
+      ).json()) as { profiles: ProfileInfo[] }
+      expect(adminList.profiles.map((p) => p.name)).toEqual(['toby', 'dan'])
+
+      const forbidden = await fetch(`${base}/sessions`, {
+        method: 'POST',
+        headers: asDan,
+        body: JSON.stringify({ cwd: '/tmp/project', profile: 'toby' }),
+      })
+      expect(forbidden.status).toBe(403)
+
+      const allowed = await fetch(`${base}/sessions`, {
+        method: 'POST',
+        headers: asDan,
+        body: JSON.stringify({ cwd: '/tmp/project', profile: 'dan' }),
+      })
+      expect(allowed.status).toBe(201)
+      expect(((await allowed.json()) as { session: SessionInfo }).session.profile).toBe('dan')
+
+      // the detail endpoint is scoped the same way
+      expect(
+        (await fetch(`${base}/profiles/toby`, { headers: { authorization: 'Bearer dan' } })).status,
+      ).toBe(403)
+      expect(
+        (await fetch(`${base}/profiles/dan`, { headers: { authorization: 'Bearer dan' } })).status,
+      ).toBe(200)
+    } finally {
+      rmSync(tobyDir, { recursive: true, force: true })
+      rmSync(danDir, { recursive: true, force: true })
+    }
+  })
+
+  it('enforces disableBypassPermissions: rejects the mode, strips the capability', async () => {
+    const harness = fakeHarness()
+    const profileDir = mkdtempSync(join(tmpdir(), 'cw-bypass-'))
+    try {
+      // a profile defaulting to bypass contradicts the policy — fail fast
+      expect(() =>
+        createWorkerServer({
+          allowUnauthenticated: true,
+          disableBypassPermissions: true,
+          profiles: [
+            { name: 'yolo', configDir: profileDir, defaults: { permissionMode: 'bypassPermissions' } },
+          ],
+        }),
+      ).toThrow(/disableBypassPermissions/)
+
+      running = createWorkerServer({
+        allowUnauthenticated: true,
+        allowedCwdRoots: ['/tmp'],
+        disableBypassPermissions: true,
+        buildRunnerConfig: (req) => ({ ...req, queryFn: harness.queryFn }),
+        queue: { maxConcurrency: 1 },
+      })
+      const { port } = await running.listen(0, '127.0.0.1')
+      const base = `http://127.0.0.1:${port}/v1`
+
+      // explicit bypass mode → 403, for sessions and jobs alike
+      const sessionRes = await fetch(`${base}/sessions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ cwd: '/tmp/project', permissionMode: 'bypassPermissions' }),
+      })
+      expect(sessionRes.status).toBe(403)
+      const jobRes = await fetch(`${base}/jobs`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          session: { cwd: '/tmp/project', prompt: 'x', permissionMode: 'bypassPermissions' },
+        }),
+      })
+      expect(jobRes.status).toBe(403)
+
+      // the pre-authorization capability is stripped, not rejected
+      const stripped = await fetch(`${base}/sessions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          cwd: '/tmp/project',
+          prompt: 'hi',
+          allowDangerouslySkipPermissions: true,
+        }),
+      })
+      expect(stripped.status).toBe(201)
+      await vi.waitFor(() => {
+        expect(harness.captured.options).toBeDefined()
+      })
+      expect(harness.captured.options?.allowDangerouslySkipPermissions).toBeUndefined()
+    } finally {
+      rmSync(profileDir, { recursive: true, force: true })
+    }
+  })
+
+  it('passes allowDangerouslySkipPermissions through to job sessions when requested', async () => {
+    const harness = fakeHarness()
+    running = createWorkerServer({
+      allowUnauthenticated: true,
+      allowedCwdRoots: ['/tmp'],
+      buildRunnerConfig: (req) => ({ ...req, queryFn: harness.queryFn }),
+      queue: { maxConcurrency: 1 },
+    })
+    const { port } = await running.listen(0, '127.0.0.1')
+    const base = `http://127.0.0.1:${port}/v1`
+
+    const res = await fetch(`${base}/jobs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        session: { cwd: '/tmp/project', prompt: 'go', allowDangerouslySkipPermissions: true },
+      }),
+    })
+    expect(res.status).toBe(201)
+    await vi.waitFor(() => {
+      expect(harness.captured.options?.allowDangerouslySkipPermissions).toBe(true)
+    })
+  })
+
+  it('serves a curated config snapshot on GET /profiles/:name', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cw-profile-snap-'))
+    try {
+      writeFileSync(
+        join(dir, 'settings.json'),
+        JSON.stringify({
+          model: 'opus',
+          permissions: { defaultMode: 'acceptEdits', allow: ['Bash(ls:*)', 'Read'], deny: ['WebFetch'] },
+          env: { MY_TOKEN: 'secret-value', FOO: 'bar' },
+          hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: 'true' }] }] },
+        }),
+      )
+      writeFileSync(join(dir, 'CLAUDE.md'), '# memory')
+      mkdirSync(join(dir, 'skills', 'review'), { recursive: true })
+      mkdirSync(join(dir, 'agents'), { recursive: true })
+      writeFileSync(join(dir, 'agents', 'helper.md'), '---\n---')
+      mkdirSync(join(dir, 'commands'), { recursive: true })
+      writeFileSync(join(dir, 'commands', 'deploy.md'), 'deploy')
+
+      running = createWorkerServer({
+        allowUnauthenticated: true,
+        profiles: [{ name: 'main', configDir: dir }],
+      })
+      const { port } = await running.listen(0, '127.0.0.1')
+      const base = `http://127.0.0.1:${port}/v1`
+
+      expect((await fetch(`${base}/profiles/nope`)).status).toBe(404)
+
+      const res = await fetch(`${base}/profiles/main`)
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as {
+        profile: ProfileInfo
+        config: {
+          settings?: Record<string, unknown>
+          hasUserMemory: boolean
+          skills: string[]
+          agents: string[]
+          commands: string[]
+        }
+      }
+      expect(body.profile.name).toBe('main')
+      expect(body.config).toMatchObject({
+        hasUserMemory: true,
+        skills: ['review'],
+        agents: ['helper'],
+        commands: ['deploy'],
+        settings: {
+          model: 'opus',
+          defaultPermissionMode: 'acceptEdits',
+          permissionRules: { allow: 2, ask: 0, deny: 1 },
+          envKeys: ['FOO', 'MY_TOKEN'],
+          hooks: ['PreToolUse'],
+        },
+      })
+      // env VALUES must never appear anywhere in the response
+      expect(JSON.stringify(body)).not.toContain('secret-value')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('treats an only profile as implicit and carries it through jobs', async () => {
+    const harness = fakeHarness()
+    const mainDir = mkdtempSync(join(tmpdir(), 'cw-profile-main-'))
+    try {
+      running = createWorkerServer({
+        allowUnauthenticated: true,
+        allowedCwdRoots: ['/tmp'],
+        profiles: [{ name: 'main', configDir: mainDir }],
+        buildRunnerConfig: (req) => ({ ...req, queryFn: harness.queryFn }),
+        queue: { maxConcurrency: 1 },
+      })
+      const { port } = await running.listen(0, '127.0.0.1')
+      const base = `http://127.0.0.1:${port}/v1`
+
+      const createRes = await fetch(`${base}/jobs`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ session: { cwd: '/tmp/project', prompt: 'go' } }),
+      })
+      expect(createRes.status).toBe(201)
+      const { job } = (await createRes.json()) as { job: JobInfo }
+      expect(job.profile).toBe('main')
+
+      await vi.waitFor(async () => {
+        const res = await fetch(`${base}/jobs/${job.id}`)
+        const body = (await res.json()) as { job: JobInfo }
+        expect(body.job.sessionId).toBeDefined()
+      })
+      await vi.waitFor(() => {
+        expect(harness.captured.options?.env?.CLAUDE_CONFIG_DIR).toBe(mainDir)
+      })
+
+      const jobNow = ((await (await fetch(`${base}/jobs/${job.id}`)).json()) as { job: JobInfo }).job
+      const sessionRes = await fetch(`${base}/sessions/${jobNow.sessionId}`)
+      expect(((await sessionRes.json()) as { session: SessionInfo }).session.profile).toBe('main')
+    } finally {
+      rmSync(mainDir, { recursive: true, force: true })
+    }
   })
 })

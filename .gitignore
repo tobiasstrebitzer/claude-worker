@@ -1,6 +1,7 @@
 node_modules/
 build/
 dist/
+_docs/
 .turbo/
 *.log
 .DS_Store

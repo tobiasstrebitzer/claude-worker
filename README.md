@@ -40,7 +40,6 @@ Each package has its own README with install and usage details.
 | [`@claude-worker/react`](packages/react) | The headless React layer: `useClaudeSession` hook + pure transcript reducer. No styling opinion. |
 | [`@claude-worker/ui`](packages/ui) | The styled agent-control component library: session panel (status bar, streaming transcript, tool-call cards, permission prompts, composer), session list, and the underlying primitives. Tailwind v4 + Base UI + cva; light/dark via tokens. See `packages/ui/README.md` for consumer wiring. |
 | `apps/web` | Full session-control web app (dashboard): session list, create/resume flow, live panel, settings. |
-| `apps/demo` | Minimal-chrome Vite + React consumer proving `@claude-worker/ui` is portable. |
 | `apps/docs` | This documentation site (Astro), deployed to GitHub Pages on push to `main`. |
 
 ## Quickstart
@@ -49,7 +48,6 @@ Each package has its own README with install and usage details.
 pnpm install
 pnpm server   # unauthenticated dev gateway on 127.0.0.1:8787 (loopback only!)
 pnpm web      # dashboard on http://localhost:5191, proxying /v1 to the gateway
-pnpm demo     # minimal demo on http://localhost:5190
 ```
 
 Create a session in the web UI: point it at a project directory, give it a prompt (plain text or
@@ -136,6 +134,37 @@ job (`result`, cumulative `usage`, cost), and the session is closed. Job session
 registry sessions, so the web dashboard can watch them stream in real time. The in-memory adapter
 is single-process and non-persistent — jobs and daily counters reset on restart; implement
 `QueueAdapter` against a shared store for anything beyond one trusted host.
+
+## Profiles: one worker, several config dirs
+
+A **profile** names a Claude Code config directory: sessions and jobs run under one, and the
+spawned CLI gets it as `CLAUDE_CONFIG_DIR` — that directory's settings, memory, skills, and
+whatever credentials the SDK resolves from it. The canonical case is a shared machine where
+several team members each keep their own config dir:
+
+```ts
+const worker = createWorkerServer({
+  authenticate: async (req) => {
+    const user = await verifyMyAppToken(req.headers.authorization)
+    return user && { allowedProfiles: user.profiles } // scope per caller, e.g. ['toby']
+  },
+  profiles: [
+    { name: 'toby', configDir: '/Users/atomic/toby/.claude', defaults: { model: 'opus' } },
+    { name: 'dan',  configDir: '/Users/atomic/dan/.claude' },
+  ],
+})
+```
+
+Profiles are declared at startup and read-only over the API (`GET /v1/profiles`, the dashboard's
+Profiles view). With more than one declared, every session/job create must name its `profile`;
+with exactly one it's implicit — and when the option is unset, a `default` profile is
+auto-created from `$CLAUDE_CONFIG_DIR`/`~/.claude`, so single-operator setups need nothing.
+`defaults` fill unset request fields (not enforced caps). **Scope profiles per caller** with
+`allowedProfiles` on the authenticate principal: each person running under their own profile is
+each person using their own account — a free-for-all picker over other people's accounts is
+account pooling (see the red lines below). Profiles never touch the credential chain: an
+`ANTHROPIC_API_KEY` in the server env still wins for every profile, and each session's
+`apiKeySource` shows what it actually used.
 
 ## Permissions are the sharp edge
 

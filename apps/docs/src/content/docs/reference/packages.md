@@ -20,8 +20,7 @@ order: 1
 
 | App | What it is |
 | --- | --- |
-| `apps/web` | Full session-control web app (dashboard): session list, create/resume flow, live panel, jobs view, settings. TanStack Router, hash history. |
-| `apps/demo` | Minimal-chrome Vite + React consumer proving `@claude-worker/ui` is portable. |
+| `apps/web` | Full session-control web app (dashboard): session list, create/resume flow, live panel, jobs view, profiles, settings. TanStack Router, hash history. |
 
 ## The dependency rule
 
@@ -34,8 +33,8 @@ order: 1
        queue           react
          |               |
        server            ui
-                        /  \
-                      web  demo
+                         |
+                        web
 ```
 
 `@claude-worker/protocol` depends on nothing and everything depends on it. The browser side

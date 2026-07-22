@@ -18,12 +18,14 @@ Returns a `WorkerServer`: `{ server, registry, queue?, listen(port, host?), clos
 
 | Option | Default | Effect |
 | --- | --- | --- |
-| `authenticate` | — | `(req: IncomingMessage) => unknown \| Promise<unknown>`. Return a truthy principal to accept, null/undefined to reject with 401. Required unless `allowUnauthenticated: true` — the worker must never be exposed bare. Covers every route including WS upgrades. |
+| `authenticate` | — | `(req: IncomingMessage) => unknown \| Promise<unknown>`. Return a truthy principal to accept, null/undefined to reject with 401. Required unless `allowUnauthenticated: true` — the worker must never be exposed bare. Covers every route including WS upgrades. A principal object may carry `allowedProfiles: string[]` to scope which profiles the caller can use. |
 | `allowUnauthenticated` | `false` | Explicit opt-in to run without auth (local dev only). Without it and without `authenticate`, `createWorkerServer` throws. |
 | `allowedCwdRoots` | off | Session `cwd` (and job `session.cwd`) must resolve inside one of these roots, else 403. Also constrains the `dir` of `/sdk-sessions` (which becomes required). Strongly recommended. |
+| `profiles` | auto-detect | Named Claude Code config dirs sessions run under (`{ name, configDir, description?, defaults? }[]`); each becomes the session's `CLAUDE_CONFIG_DIR`. More than one declared → creates must name a `profile`; exactly one → implicit. Unset: a `default` profile is auto-created from `$CLAUDE_CONFIG_DIR`/`~/.claude` when present; `[]` disables. See [Profiles](/claude-worker/docs/guides/profiles/). |
 | `buildRunnerConfig` | identity | `(req: CreateSessionRequest) => SessionRunnerConfig` — map/patch the incoming request into the runner config (inject `env`, tool policy, per-skill constraints). Applied to client sessions and queue jobs alike. |
 | `basePath` | `'/v1'` | URL prefix for all routes. |
 | `maxBodyBytes` | 1 MiB | Max JSON body size. |
+| `disableBypassPermissions` | `false` | Server-wide bypass policy: session/job creates requesting `permissionMode: 'bypassPermissions'` are rejected (403); the `allowDangerouslySkipPermissions` pre-authorization is stripped from requests, and the WS `set_permission_mode` command refuses the mode. Mirrors Claude Code's `permissions.disableBypassPermissionsMode`. |
 | `requireApiKey` | `false` | Fail closed on subscription credentials: a session initializing with `apiKeySource: 'oauth'` is terminated with a `session_error`. Recommended for services and unattended use; off, the server logs a one-time notice instead. See [Auth](/claude-worker/docs/guides/auth/). |
 | `listSdkSessions` | SDK `listSessions` | Injectable lister for `GET /sdk-sessions` (tests). |
 | `queue` | off | Enable the job queue routes — see below. |
@@ -56,13 +58,15 @@ Default `basePath: '/v1'`; every route goes through `authenticate`.
 | Route | What it does |
 | --- | --- |
 | `GET /v1/sessions` | List sessions (`SessionInfo[]`). |
-| `POST /v1/sessions` | Create a session (`CreateSessionRequest`; `cwd` required, 403 outside `allowedCwdRoots`). 201 with the `SessionInfo`. |
+| `POST /v1/sessions` | Create a session (`CreateSessionRequest`; `cwd` required, 403 outside `allowedCwdRoots`; `profile` required when several are declared, 403 outside the caller's `allowedProfiles`). 201 with the `SessionInfo`. |
 | `GET /v1/sessions/:id` | Session info. |
 | `DELETE /v1/sessions/:id` | Close and remove the session. |
 | `WS /v1/sessions/:id/ws?afterSeq=n` | Attach: `attached` frame (protocol version + snapshot), replay of events past `n`, then live events; accepts `SessionCommand` frames. |
 | `POST /v1/sessions/:id/permissions/:requestId` | Resolve a pending approval over REST (`ResolvePermissionRequest`). 404 = unknown, already resolved, or expired. |
+| `GET /v1/profiles` | List declared profiles (`ProfileInfo[]`), filtered to the caller's `allowedProfiles`. |
+| `GET /v1/profiles/:name` | One profile plus a fresh view-only config snapshot (`GetProfileResponse`: settings.json highlights, memory/skills/agents/commands — env var names only, never values). Same `allowedProfiles` scoping. |
 | `GET /v1/sdk-sessions?dir=…&limit=…&offset=…` | List the Agent SDK's on-disk sessions to offer resume. With `allowedCwdRoots` set, `dir` is required and must be inside the roots. |
-| `GET /v1/jobs` / `POST /v1/jobs` | List jobs / schedule one (`CreateJobRequest`; `session.cwd` + `session.prompt` required). Queue-configured servers only, else 404. |
+| `GET /v1/jobs` / `POST /v1/jobs` | List jobs / schedule one (`CreateJobRequest`; `session.cwd` + `session.prompt` required; `session.profile` follows the same rules as session creation). Queue-configured servers only, else 404. |
 | `GET /v1/jobs/:id` / `DELETE /v1/jobs/:id` | Job info / cancel. |
 | `GET /v1/queue` | Queue stats (`QueueStats`). |
 | `WS /v1/queue/ws` | One-way live stream: `queue_attached`, then `job_event` + refreshed `queue_stats` frames. No replay — re-list jobs on (re)connect. |

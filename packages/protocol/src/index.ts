@@ -343,6 +343,62 @@ export type ServerFrame =
 export type ClientFrame = SessionCommand
 
 // ---------------------------------------------------------------------------
+// Profiles (named Claude Code config directories)
+// ---------------------------------------------------------------------------
+
+/** Per-profile fallbacks filled into session/job requests that leave the field
+ * unset. Defaults, not enforced caps — an explicit request value always wins. */
+export type ProfileDefaults = {
+  model?: string
+  permissionMode?: PermissionMode
+}
+
+/**
+ * A named Claude Code config directory sessions can run under: the session's CLI
+ * process gets it as CLAUDE_CONFIG_DIR, so the profile carries that directory's
+ * settings, memory, skills, and whatever credentials the SDK/CLI resolves from it.
+ * Profiles are declared in server options at startup (or a 'default' one is
+ * auto-created from the operator's own config dir) — the API only reads them.
+ */
+export type ProfileInfo = {
+  /** Unique name, used as {@link CreateSessionRequest.profile}. */
+  name: string
+  /** Absolute path set as CLAUDE_CONFIG_DIR for the session's CLI process. */
+  configDir: string
+  description?: string
+  defaults?: ProfileDefaults
+}
+
+/**
+ * Curated, read-only snapshot of what a profile's config directory contains —
+ * the parts relevant to running worker sessions. Values that could carry secrets
+ * (env var values) never leave the server; only names are listed.
+ */
+export type ProfileConfigSnapshot = {
+  /** From the config dir's settings.json; absent when missing or unparseable. */
+  settings?: {
+    /** Configured default model. */
+    model?: string
+    /** permissions.defaultMode — the CLI's default permission mode. */
+    defaultPermissionMode?: string
+    /** Rule counts from permissions.allow / ask / deny. */
+    permissionRules?: { allow: number; ask: number; deny: number }
+    /** Env var NAMES declared in settings.json env (values never included). */
+    envKeys?: string[]
+    /** Hook event names with at least one hook configured. */
+    hooks?: string[]
+  }
+  /** CLAUDE.md (user memory) present in the config dir. */
+  hasUserMemory: boolean
+  /** Skill names (skills/<name>/). */
+  skills: string[]
+  /** Agent names (agents/<name>.md). */
+  agents: string[]
+  /** Custom slash-command names (commands/<name>.md). */
+  commands: string[]
+}
+
+// ---------------------------------------------------------------------------
 // REST shapes
 // ---------------------------------------------------------------------------
 
@@ -355,9 +411,17 @@ export type CreateSessionRequest = {
   /** Directory the session is rooted at. Required: `cwd` is per-query in the SDK
    * and the server re-pins it on every call. */
   cwd: string
+  /** Profile (named Claude Code config dir) to run under. Required when the server
+   * declares more than one profile; implicit when exactly one exists. */
+  profile?: string
   /** Optional initial prompt (may be a skill invocation like "/verify-content 123"). */
   prompt?: string
   permissionMode?: PermissionMode
+  /** Pre-authorize 'bypassPermissions' (the CLI's --dangerously-skip-permissions
+   * capability) so the mode can be switched on mid-session. Without it the CLI
+   * rejects `set_permission_mode: 'bypassPermissions'` on a running session.
+   * Implied when `permissionMode` is already 'bypassPermissions'. */
+  allowDangerouslySkipPermissions?: boolean
   allowedTools?: string[]
   disallowedTools?: string[]
   mcpServers?: Record<string, McpServerConfigWire>
@@ -388,6 +452,8 @@ export type SessionInfo = {
   sdkSessionId?: string
   status: SessionStatus
   cwd: string
+  /** Profile the session runs under (resolved name, present even when implicit). */
+  profile?: string
   model?: string
   permissionMode?: PermissionMode
   /** See the `system_init` event; 'oauth' = claude.ai subscription credentials. */
@@ -438,6 +504,10 @@ export type ResolvePermissionRequest =
   | { behavior: 'deny'; message?: string; interrupt?: boolean }
 export type ResolvePermissionResponse = { resolved: true }
 export type ListSdkSessionsResponse = { sdkSessions: SdkSessionSummary[] }
+/** `GET {basePath}/profiles` — filtered to the profiles the caller may use. */
+export type ListProfilesResponse = { profiles: ProfileInfo[] }
+/** `GET {basePath}/profiles/:name` — the profile plus a fresh config snapshot. */
+export type GetProfileResponse = { profile: ProfileInfo; config: ProfileConfigSnapshot }
 export type ErrorResponse = { error: string }
 
 // ---------------------------------------------------------------------------
@@ -505,6 +575,8 @@ export type JobInfo = {
   id: string
   status: JobStatus
   cwd: string
+  /** Profile the run executes under (resolved name, present even when implicit). */
+  profile?: string
   prompt: string
   /** Server session id once started — attach via the sessions WS to watch the run live. */
   sessionId?: string

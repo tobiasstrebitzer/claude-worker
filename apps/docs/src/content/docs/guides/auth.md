@@ -1,7 +1,7 @@
 ---
 title: Auth & Anthropic's terms
 description: claude-worker performs no Anthropic authentication of its own — what that means for operators and contributors.
-order: 5
+order: 6
 ---
 
 **claude-worker performs no Anthropic authentication of its own — by design.** It spawns the
@@ -44,6 +44,16 @@ Each session's credential provenance surfaces as `apiKeySource` on `SessionInfo`
 `requireApiKey: true`, an `'oauth'` session is terminated with a `session_error` telling the
 operator to set `ANTHROPIC_API_KEY` (or Bedrock/Vertex auth). Without it, the server logs a
 one-time notice instead — appropriate only for personal single-user deployments.
+
+## Profiles on shared machines
+
+[Profiles](/claude-worker/docs/guides/profiles/) let one worker serve several operators, each
+under their own Claude Code config dir — selected via the CLI's own `CLAUDE_CONFIG_DIR`
+mechanism, never by touching the credential chain. The auth-relevant part: **scope profiles per
+caller** with `allowedProfiles` on the `authenticate` principal. A shared dashboard where anyone
+may run under anyone's account is multi-account pooling — exactly the red line below — while
+each person running under their own profile is just each person using their own account. The
+subscription notice logs per profile, and `apiKeySource` shows what each session actually used.
 
 ## Compliance status: under review
 

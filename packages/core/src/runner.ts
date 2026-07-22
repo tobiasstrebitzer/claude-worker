@@ -127,6 +127,7 @@ export class SessionRunner {
       sdkSessionId: this.#sdkSessionId,
       status: this.#status,
       cwd: this.#config.cwd,
+      profile: this.#config.profile,
       model: this.#model ?? this.#config.model,
       permissionMode: this.#permissionMode,
       apiKeySource: this.#apiKeySource,
@@ -330,7 +331,11 @@ export class SessionRunner {
       canUseTool: this.#canUseTool,
       env: c.env,
       pathToClaudeCodeExecutable: c.pathToClaudeCodeExecutable,
-      ...(c.permissionMode === 'bypassPermissions'
+      // The CLI refuses to *switch into* bypassPermissions unless it was spawned
+      // with the capability — smoke-verified: "Cannot set permission mode to
+      // bypassPermissions because the session was not launched with
+      // --dangerously-skip-permissions".
+      ...(c.permissionMode === 'bypassPermissions' || c.allowDangerouslySkipPermissions
         ? { allowDangerouslySkipPermissions: true }
         : {}),
       ...c.extraOptions,
