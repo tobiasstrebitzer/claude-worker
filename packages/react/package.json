@@ -1,6 +1,6 @@
 {
   "name": "@claude-worker/react",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "description": "Headless React layer for claude-worker: useClaudeSession hook + pure transcript reducer. No styling opinion — @claude-worker/ui is the styled layer on top.",
   "license": "MIT",
