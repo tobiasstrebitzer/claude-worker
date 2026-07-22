@@ -58,10 +58,13 @@ CLI-control-request changes need a smoke; the fake harness can't validate those 
 - test: `pnpm test`
 - push: yes (github.com/tobiasstrebitzer/claude-worker, branch `master`; repo private pending
   review — re-enable the docs.yml push trigger once Pages is on)
-- version_bump: yes (aligned across all 7 packages; 0.1.1 on npm, tagged)
-- publish: yes — npm `@claude-worker` org via keybridge (`/npm-publish`); run the gatekeeper
-  audit first. MIT (LICENSE per package; ui intentionally ships `src/`, allowlisted in
-  `.claude/gatekeeper.json`).
+- version_bump: yes (aligned across all 7 packages; 0.2.0 on npm, tagged)
+- publish: yes — npm `@claude-worker` org via keybridge Touch ID: `npx -y keybridge@latest
+  publish` from each package dir, dependency order (protocol → core/client → queue → react →
+  server → ui). keybridge runs plain `npm publish`, so pin `workspace:*` inter-deps to the
+  release version first, publish, then `git checkout` the package.jsons. Run the gatekeeper
+  audit before publishing. MIT (LICENSE per package; ui intentionally ships `src/`,
+  allowlisted in `.claude/gatekeeper.json`).
 - docs: root CLAUDE.md + README.md + docs/ + apps/docs (keep site content in sync with README)
 - frontend_smoke: no (manual via `pnpm server` + `pnpm web`)
 - co_authored_by: no (global)
