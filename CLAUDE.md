@@ -27,6 +27,9 @@ session from a host app. Key docs — read before changing scope or structure:
   to update. Ships source styles (`theme.css` + `@source`-scanned classnames; wiring in its README).
 - `apps/web` — dashboard (TanStack Router, hash history). `apps/demo` — minimal-chrome consumer.
 - `apps/docs` — Astro docs site, deployed to GitHub Pages by `.github/workflows/docs.yml`.
+- `docs/assets` — brand assets ("Session Stack" mark, app icons, banner source); rules and
+  regeneration in `docs/assets/BRAND.md`. The mark is inlined in web's `BrandMark.tsx`,
+  docs' `Header.astro`, and both favicons — keep geometry identical to `icon.svg`.
 
 Dependency direction: `protocol ← core ← queue ← server`, `protocol ← client ← react ← ui ← web|demo`.
 The browser side (client/react/ui/apps) must never import core/server or the Agent SDK.

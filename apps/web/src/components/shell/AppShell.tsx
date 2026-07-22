@@ -2,6 +2,7 @@ import { useState, type ReactNode } from 'react'
 import { Link, Outlet, useRouterState } from '@tanstack/react-router'
 import { ListChecks, PanelLeftClose, PanelLeftOpen, Settings, SquareTerminal } from 'lucide-react'
 import { cn } from '@claude-worker/ui'
+import { BrandMark } from './BrandMark.tsx'
 import { ThemeToggle } from './ThemeToggle.tsx'
 
 const NAV = [
@@ -39,7 +40,7 @@ export function AppShell({ children }: { children?: ReactNode }) {
           collapsed ? 'w-14 items-center' : 'w-52',
         )}>
         <div className={cn('flex items-center py-2', collapsed ? 'justify-center' : 'gap-2 px-2')}>
-          <SquareTerminal className='size-4 shrink-0 text-fg-1' />
+          <BrandMark className='size-4 shrink-0 text-fg-1' />
           {!collapsed && (
             <span className='text-body-sm font-semibold tracking-tight text-fg-1'>
               claude-worker
