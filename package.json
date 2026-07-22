@@ -16,7 +16,6 @@
     "test": "turbo run test",
     "lint": "oxlint",
     "clean": "turbo run clean",
-    "demo": "pnpm --filter @claude-worker/demo run dev",
     "web": "pnpm --filter @claude-worker/web run dev",
     "server": "pnpm --filter @claude-worker/server run dev"
   },
