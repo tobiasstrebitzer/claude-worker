@@ -164,6 +164,55 @@ describe('transcript reducer', () => {
     expect(done.items[0]).toMatchObject({ kind: 'thinking', id: 'a1-0', text: 'Hmm, ok.' })
   })
 
+  it('keeps streamed thinking when the full message ships a signature-only block', () => {
+    seq = 0
+    const state = run(initialTranscriptState, [
+      {
+        type: 'stream_delta',
+        event: { type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: 'Weighing it.' } },
+        parentToolUseId: null,
+        uuid: 's1',
+      },
+      {
+        type: 'assistant_message',
+        // Encrypted thinking: text stripped, signature only.
+        message: { role: 'assistant', content: [{ type: 'thinking', thinking: '', signature: 'Eu8E' }] },
+        parentToolUseId: null,
+        uuid: 'a1',
+      },
+    ])
+    expect(state.items).toEqual([
+      { kind: 'thinking', id: 'a1-0', text: 'Weighing it.', parentToolUseId: null },
+    ])
+  })
+
+  it('drops thinking blocks that carry no summary at all', () => {
+    seq = 0
+    const state = run(initialTranscriptState, [
+      {
+        type: 'assistant_message',
+        message: { role: 'assistant', content: [{ type: 'thinking', thinking: '', signature: 'Eu8E' }] },
+        parentToolUseId: null,
+        uuid: 'a1',
+      },
+      {
+        type: 'assistant_message',
+        message: { role: 'assistant', content: [{ type: 'thinking', thinking: '', signature: 'EpIC' }] },
+        parentToolUseId: null,
+        uuid: 'a2',
+      },
+      {
+        type: 'assistant_message',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'Done.' }] },
+        parentToolUseId: null,
+        uuid: 'a3',
+      },
+    ])
+    expect(state.items).toEqual([
+      { kind: 'assistant_text', id: 'a3-0', text: 'Done.', streaming: false, parentToolUseId: null },
+    ])
+  })
+
   it('treats turn_result cost as session-cumulative (last-seen, not summed)', () => {
     seq = 0
     const turn = (totalCostUsd: number): SessionEventBody => ({

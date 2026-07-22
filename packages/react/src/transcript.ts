@@ -198,6 +198,15 @@ export function applyEvent(state: TranscriptState, event: SessionEvent): Transcr
     }
 
     case 'assistant_message': {
+      // Encrypted thinking arrives as a signature-only block on the final message: `thinking`
+      // is '' and the human-readable summary, when the model surfaces one at all, exists only
+      // in the thinking_delta stream. Carry the streamed text over rather than let the full
+      // message overwrite it with nothing.
+      let streamedThinking =
+        base.items.find(
+          (item): item is Extract<TranscriptItem, { kind: 'thinking' }> =>
+            item.kind === 'thinking' && item.id === STREAMING_THINKING_ID,
+        )?.text ?? ''
       // The full message supersedes any in-flight streamed text/thinking.
       let items = base.items.filter(
         (item) =>
@@ -216,10 +225,17 @@ export function applyEvent(state: TranscriptState, event: SessionEvent): Transcr
             parentToolUseId: event.parentToolUseId,
           })
         } else if (block.type === 'thinking') {
+          const text = (block as { thinking: string }).thinking || streamedThinking
+          // One streamed thought backfills at most one block, so a multi-block message
+          // doesn't repeat it.
+          streamedThinking = ''
+          // No summary anywhere: drop the block instead of leaving a "Thought process" row
+          // that expands to nothing (and, across consecutive messages, stacks up).
+          if (text.trim() === '') return
           items = upsert(items, {
             kind: 'thinking',
             id,
-            text: (block as { thinking: string }).thinking,
+            text,
             parentToolUseId: event.parentToolUseId,
           })
         } else if (block.type === 'tool_use') {
