@@ -125,9 +125,6 @@ export function StatusBar({ state, connected, className }: StatusBarProps) {
         {meta.busy ? <Spinner className='size-3 text-current' /> : null}
         {meta.label}
       </Badge>
-      {state.model ? (
-        <span className='truncate font-mono text-label text-fg-3'>{state.model}</span>
-      ) : null}
       {state.contextUsage ? <ContextMeter usage={state.contextUsage} /> : null}
       {session ? <RateLimitMeter label='Session' info={session} now={now} /> : null}
       {weekly ? <RateLimitMeter label='Weekly' info={weekly} now={now} /> : null}
