@@ -18,16 +18,20 @@ Returns a `WorkerServer`: `{ server, registry, queue?, listen(port, host?), clos
 
 | Option | Default | Effect |
 | --- | --- | --- |
-| `authenticate` | — | `(req: IncomingMessage) => unknown \| Promise<unknown>`. Return a truthy principal to accept, null/undefined to reject with 401. Required unless `allowUnauthenticated: true` — the worker must never be exposed bare. Covers every route including WS upgrades. A principal object may carry `allowedProfiles: string[]` to scope which profiles the caller can use. |
+| `authenticate` | — | `(req: IncomingMessage) => unknown \| Promise<unknown>`. Return a truthy principal to accept, null/undefined to reject with 401. Required unless `allowUnauthenticated: true` — the worker must never be exposed bare. Covers every route including WS upgrades. A principal object may carry `allowedProfiles: string[]` to scope which profiles the caller can use, and `canManageProfiles: true` to allow profile create/edit/delete (which also needs `profileStore`). |
 | `allowUnauthenticated` | `false` | Explicit opt-in to run without auth (local dev only). Without it and without `authenticate`, `createWorkerServer` throws. |
 | `allowedCwdRoots` | off | Session `cwd` (and job `session.cwd`) must resolve inside one of these roots, else 403. Also constrains the `dir` of `/sdk-sessions` (which becomes required). Strongly recommended. |
-| `profiles` | auto-detect | Named Claude Code config dirs sessions run under (`{ name, configDir, description?, defaults? }[]`); each becomes the session's `CLAUDE_CONFIG_DIR`. More than one declared → creates must name a `profile`; exactly one → implicit. Unset: a `default` profile is auto-created from `$CLAUDE_CONFIG_DIR`/`~/.claude` when present; `[]` disables. See [Profiles](/claude-worker/docs/guides/profiles/). |
+| `profiles` | auto-detect | What sessions run as (`{ name, configDir?, engine?, provider?, description?, defaults? }[]`). A `claude` profile's `configDir` becomes the session's `CLAUDE_CONFIG_DIR`; an `engine: 'provider'` profile runs the model-agnostic engine instead and needs `createEngineRunner`. More than one declared → creates must name a `profile`; exactly one → implicit. Unset: a `default` profile is auto-created from `$CLAUDE_CONFIG_DIR`/`~/.claude` when present; `[]` disables. See [Profiles](/claude-worker/docs/guides/profiles/). |
+| `profileStore` | — | Persistence for dashboard-managed profiles; setting it mounts `POST /profiles` and `PATCH`/`DELETE /profiles/:name`. `createMemoryProfileStore()` and `createFileProfileStore(path)` are bundled; the type is a three-method seam for anything else. Profiles declared in `profiles` are never stored and never editable over HTTP. |
+| `allowedConfigDirRoots` | off | Config-dir roots a *managed* Claude profile may point at (mirrors `allowedCwdRoots`). Unset means the management routes create provider profiles only — naming a config directory is choosing which credential store a session runs on. |
+| `createEngineRunner` | — | `(ctx: { config, profile, bridge }) => Runner \| Promise<Runner>` — build the runner for an `engine: 'provider'` profile. Required if any is declared (the server refuses to start otherwise). Kept as a host hook so the server imports no model SDK and never resolves provider credentials itself; may be async for assembly that has to await (a per-session MCP connect). |
 | `buildRunnerConfig` | identity | `(req: CreateSessionRequest) => SessionRunnerConfig` — map/patch the incoming request into the runner config (inject `env`, tool policy, per-skill constraints). Applied to client sessions and queue jobs alike. |
 | `basePath` | `'/v1'` | URL prefix for all routes. |
 | `maxBodyBytes` | 1 MiB | Max JSON body size. |
 | `disableBypassPermissions` | `false` | Server-wide bypass policy: session/job creates requesting `permissionMode: 'bypassPermissions'` are rejected (403); the `allowDangerouslySkipPermissions` pre-authorization is stripped from requests, and the WS `set_permission_mode` command refuses the mode. Mirrors Claude Code's `permissions.disableBypassPermissionsMode`. |
 | `requireApiKey` | `false` | Fail closed on subscription credentials: a session initializing with `apiKeySource: 'oauth'` is terminated with a `session_error`. Recommended for services and unattended use; off, the server logs a one-time notice instead. See [Auth](/claude-worker/docs/guides/auth/). |
 | `listSdkSessions` | SDK `listSessions` | Injectable lister for `GET /sdk-sessions` (tests). |
+| `parking` | in-memory store | Deferred execution: `{ store?, parkDelayMs?, onError? }`. A session that parks on an execution nothing here is running is snapshotted, its runner torn down, and its state kept in the `SessionStore` (`MemorySessionStore` bundled — a park then survives a disconnect, not a restart). `parkDelayMs` (2000) is the grace after the last client detaches. See [Job queue](/claude-worker/docs/guides/job-queue/#deferred-execution). |
 | `queue` | off | Enable the job queue routes — see below. |
 
 ### QueueServerOptions
@@ -41,7 +45,8 @@ auth-provenance watcher as client sessions):
 | `maxConcurrency` | 1 | Concurrent job sessions. |
 | `sessionTokenLimit` | off | Token cap per job session (input+output+cache); exceeding it kills the run. |
 | `dailyTokenLimit` | off | Global job-token budget per UTC day; queued jobs held once exhausted. |
-| `maxJobDurationMs` | off | Wall-clock cap per run — the watchdog against stuck CLIs. |
+| `maxJobDurationMs` | off | Wall-clock cap per run — the watchdog against stuck CLIs. Time parked on a deferred execution doesn't count: the run isn't stuck, it's waiting. |
+| `maxParkedDurationMs` | off | Cap on time parked, across all parks of one run. The execution's own deadline usually fires first and lets the agent adapt; this one fails the job. |
 | `killGraceMs` | 5000 | Grace between interrupting a killed run and force-closing it. |
 | `retention` | keep forever | `{ maxAgeMs, sweepIntervalMs? }` — expire terminal jobs (the in-memory adapter otherwise grows unboundedly). |
 | `adapter` | in-memory | `QueueAdapter` backend. The bundled adapter is single-process, non-persistent. |
@@ -59,11 +64,16 @@ Default `basePath: '/v1'`; every route goes through `authenticate`.
 | --- | --- |
 | `GET /v1/sessions` | List sessions (`SessionInfo[]`). |
 | `POST /v1/sessions` | Create a session (`CreateSessionRequest`; `cwd` required, 403 outside `allowedCwdRoots`; `profile` required when several are declared, 403 outside the caller's `allowedProfiles`). 201 with the `SessionInfo`. |
-| `GET /v1/sessions/:id` | Session info. |
-| `DELETE /v1/sessions/:id` | Close and remove the session. |
+| `GET /v1/sessions/:id` | Session info. A parked session answers from its snapshot, with `status: 'parked'`. |
+| `DELETE /v1/sessions/:id` | Close and remove the session — including a parked one, whose stored state is dropped so a late execution result can no longer wake it. |
+| `GET /v1/sessions/:id/files` / `…/files/<path>` | List the session's scratch-filesystem deliverables (`ListSessionFilesResponse`) / download one (attachment disposition, `nosniff`). 404 for engines without a VFS (Claude sessions). Served from the snapshot while parked. |
+| `POST /v1/executions/:executionId/result` | Deliver a deferred execution's result (`SubmitExecutionResultRequest`). Wakes the parked session, applies it to the agent loop, answers `{ applied, sessionId }`. Idempotent by `executionId` — a duplicate, or one racing the watchdog, answers `applied: false`. 404 = unknown id, or a session outside the caller's `allowedProfiles`. |
 | `WS /v1/sessions/:id/ws?afterSeq=n` | Attach: `attached` frame (protocol version + snapshot), replay of events past `n`, then live events; accepts `SessionCommand` frames. |
 | `POST /v1/sessions/:id/permissions/:requestId` | Resolve a pending approval over REST (`ResolvePermissionRequest`). 404 = unknown, already resolved, or expired. |
-| `GET /v1/profiles` | List declared profiles (`ProfileInfo[]`), filtered to the caller's `allowedProfiles`. |
+| `GET /v1/profiles` | List profiles (`ListProfilesResponse`), filtered to the caller's `allowedProfiles`. Store-backed ones carry `managed: true`; `canManage` says whether this caller may create more. |
+| `POST /v1/profiles` | Create a managed profile (`CreateProfileRequest`). 404 without a `profileStore`, 403 without `canManageProfiles` on the principal, 409 if the name is taken, 400 if the profile is one startup would have refused. |
+| `PATCH /v1/profiles/:name` | Merge into a managed profile (`UpdateProfileRequest`). The name is the route — profiles cannot be renamed, since sessions and jobs are pinned to it. 403 for a startup-declared profile. |
+| `DELETE /v1/profiles/:name` | Delete a managed profile (204). 403 for a startup-declared one. |
 | `GET /v1/profiles/:name` | One profile plus a fresh view-only config snapshot (`GetProfileResponse`: settings.json highlights, memory/skills/agents/commands — env var names only, never values). Same `allowedProfiles` scoping. |
 | `GET /v1/sdk-sessions?dir=…&limit=…&offset=…` | List the Agent SDK's on-disk sessions to offer resume. With `allowedCwdRoots` set, `dir` is required and must be inside the roots. |
 | `GET /v1/jobs` / `POST /v1/jobs` | List jobs / schedule one (`CreateJobRequest`; `session.cwd` + `session.prompt` required; `session.profile` follows the same rules as session creation). Queue-configured servers only, else 404. |

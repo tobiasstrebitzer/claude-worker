@@ -2,6 +2,7 @@ import type { TranscriptItem, TranscriptState } from '@claude-worker/react'
 import { cn } from '../../lib/utils.ts'
 import { formatCost, formatDuration } from '../../lib/format.ts'
 import { Conversation, ConversationContent, ConversationScrollButton } from './Conversation.tsx'
+import { FileCard } from './FileCard.tsx'
 import { Loader } from './Loader.tsx'
 import { Message, MessageContent } from './Message.tsx'
 import { Reasoning } from './Reasoning.tsx'
@@ -36,7 +37,13 @@ function NoticeRow({ item }: { item: Extract<TranscriptItem, { kind: 'notice' }>
   )
 }
 
-function TranscriptItemView({ item }: { item: TranscriptItem }) {
+function TranscriptItemView({
+  item,
+  fileUrl,
+}: {
+  item: TranscriptItem
+  fileUrl?: (path: string) => string
+}) {
   switch (item.kind) {
     case 'user':
       return (
@@ -60,6 +67,8 @@ function TranscriptItemView({ item }: { item: TranscriptItem }) {
       return <TurnResultRow item={item} />
     case 'notice':
       return <NoticeRow item={item} />
+    case 'file_delivered':
+      return <FileCard item={item} href={fileUrl?.(item.path)} />
     default:
       return null
   }
@@ -78,10 +87,13 @@ function showLoader(state: TranscriptState): boolean {
 
 export interface TranscriptProps {
   state: TranscriptState
+  /** Builds the download URL for a delivered file (see FileCard). Typically
+   * `(path) => client.sessionFileUrl(sessionId, path)`. */
+  fileUrl?: (path: string) => string
   className?: string
 }
 
-export function Transcript({ state, className }: TranscriptProps) {
+export function Transcript({ state, fileUrl, className }: TranscriptProps) {
   return (
     <Conversation className={className}>
       <ConversationContent>
@@ -89,7 +101,7 @@ export function Transcript({ state, className }: TranscriptProps) {
           <div className='py-12 text-center text-body-sm text-fg-4'>No messages yet.</div>
         ) : (
           state.items.map((item) => (
-            <TranscriptItemView key={`${item.kind}:${item.id}`} item={item} />
+            <TranscriptItemView key={`${item.kind}:${item.id}`} item={item} fileUrl={fileUrl} />
           ))
         )}
         {showLoader(state) ? (

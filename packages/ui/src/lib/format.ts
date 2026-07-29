@@ -20,6 +20,12 @@ export function formatTokens(tokens: number): string {
   return String(Math.round(tokens))
 }
 
+export function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${bytes} B`
+}
+
 /** Countdown to an epoch-ms deadline: "2h 18m", "12m", "<1m"; "now" once passed. */
 export function formatCountdown(untilEpochMs: number, now = Date.now()): string {
   const remaining = untilEpochMs - now

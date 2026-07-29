@@ -21,6 +21,7 @@ import type {
 } from '@claude-worker/protocol'
 import { InputQueue } from './input-queue.ts'
 import { normalizeSdkMessage, toApiMessage } from './normalize.ts'
+import type { PermissionDecision, Runner, SessionEventListener } from './runner-interface.ts'
 
 export type QueryFn = (params: {
   prompt: AsyncIterable<SDKUserMessage>
@@ -31,10 +32,6 @@ export type HistoryFn = (
   sdkSessionId: string,
   options: { dir?: string },
 ) => Promise<SessionMessage[]>
-
-export type PermissionDecision =
-  | { behavior: 'allow'; updatedInput?: Record<string, unknown> }
-  | { behavior: 'deny'; message?: string; interrupt?: boolean }
 
 export type SessionRunnerConfig = CreateSessionRequest & {
   /** Injectable query implementation (tests, instrumentation). Defaults to the SDK's query(). */
@@ -53,8 +50,6 @@ export type SessionRunnerConfig = CreateSessionRequest & {
   historyFn?: HistoryFn
 }
 
-export type SessionEventListener = (event: SessionEvent) => void
-
 const DEFAULT_APPROVAL_TIMEOUT_MS = 300_000
 
 type PendingApproval = {
@@ -68,7 +63,7 @@ type PendingApproval = {
  * pending-approval table, and a seq-numbered event log that subscribers can replay.
  * No transport — the server (or any host) subscribes and bridges to the wire.
  */
-export class SessionRunner {
+export class SessionRunner implements Runner {
   readonly id: string
   readonly createdAt: number
 
@@ -128,6 +123,7 @@ export class SessionRunner {
       status: this.#status,
       cwd: this.#config.cwd,
       profile: this.#config.profile,
+      engine: 'claude',
       model: this.#model ?? this.#config.model,
       permissionMode: this.#permissionMode,
       apiKeySource: this.#apiKeySource,

@@ -1,6 +1,6 @@
 # Roadmap & open questions
 
-What's shipped, what's next, and what's still undecided. Status as of 2026-07-22.
+What's shipped, what's next, and what's still undecided. Status as of 2026-07-29.
 
 ## Shipped
 
@@ -30,18 +30,57 @@ What's shipped, what's next, and what's still undecided. Status as of 2026-07-22
   server policy (403 explicit mode, strip the capability, refuse the WS switch); per-job
   bypass opt-in on the schedule form.
 
+- **Model-agnostic runtime** (2026-07-29, branch `feat/model-agnostic-runtime`) — `AiSdkRunner`
+  (AI SDK v7 ToolLoopAgent, streamed: per-token `stream_delta` + per-step messages) behind the
+  shared `Runner` interface; provider profiles +
+  `createEngineRunner`; QuickJS sandbox package with browser-bridged execution; capability-scoped
+  tools (`fs_*`, `eval_script`, `web_search`, `download`, `web_fetch` with SSRF guard + model
+  digest, `deliver_file` → `file_delivered` + `GET /sessions/:id/files` routes + download card);
+  live MCP over http/sse (`connectMcpTools`, DeepWiki-verified `smoke:mcp`). Protocol v3.
+
+- **Deferred execution** (2026-07-29) — a session can now park on work nothing here is doing:
+  `DeferredExecutor` + per-call `describe()` on the executor seam, `Runner.park()` →
+  `RunnerSnapshot` → `restore` (same id, same event log, same seq numbering, mid-turn),
+  `SessionParkManager` + the `SessionStore` seam in the server, `POST /executions/:id/result`
+  with idempotent-by-`executionId` application, an execution watchdog whose timeout reaches the
+  agent as ordinary tool output, and `parked` job runs that free their concurrency slot and stop
+  their wall-clock budget (`job_parked` / `job_resumed`, `maxParkedDurationMs`). Parked sessions
+  stay readable and downloadable from their snapshot; attaching wakes them. Protocol v4.
+
 ## Next
 
-1. **Shared-backend `QueueAdapter`** (BullMQ or plain redis) — the reason the adapter contract
+1. **Dual-engine as the product shape.** The model-agnostic runner is the new direction — not a
+   side experiment. Both engines (Claude Code via the Agent SDK, and the AI SDK runner) as
+   cleanly co-equal options, aligned with the web UI.
+   *Done (2026-07-29):* engine-aware create forms and session surfaces — `SessionInfo.engine`
+   reported by each runner, `supportsPermissionMode` as the single source of truth for the
+   restriction (forms filter, gateway 400s, startup refuses a bad profile default), operator-
+   declared `provider.models` driving the model picker, CLI-only affordances (resumable SDK
+   sessions, setting sources, bypass pre-authorization, the config-dir card) hidden for provider
+   profiles; `createEngineRunner` may now be async, which unblocks per-session MCP connects.
+   Also done: session grants on the profile (`session.capabilities` / `mcpServers` /
+   `instructions`), with `CreateSessionRequest.capabilities` narrowing but never widening (400
+   otherwise), MCP named-not-configured on the wire, and client-supplied MCP refused for provider
+   sessions.
+   Also done: profile management (`profileStore` seam with memory + JSON-file stores,
+   `canManageProfiles` on the principal, `allowedConfigDirRoots` bounding managed Claude
+   profiles, create/edit/delete in the dashboard). Startup-declared profiles stay immutable.
+   *Left:* nothing structural — the dual-engine work is feature-complete for M4.5.
+2. **Shared-backend `QueueAdapter`** (BullMQ or plain redis) — the reason the adapter contract
    exists. `claimNext` must stay atomic (BullMQ free; raw redis needs LMOVE/Lua) and honor
    `nextRunAt` (BullMQ delayed jobs); daily counters map to `INCRBY` on a dated key with TTL.
    Caveat: JobQueue assumes the claiming process runs the job — multi-worker deployments need a
    claim-lease/heartbeat so a dead worker doesn't strand jobs in `running`, and webhook ordering
    is per-process.
-2. **Promote remaining `sdk_event` passthroughs** UIs care about: tool progress, task/subagent
+3. **Promote remaining `sdk_event` passthroughs** UIs care about: tool progress, task/subagent
    events, todo lists.
-3. **Custom `SessionStore` / multi-host sessions** — V1 is single-host by design (SDK on-disk
-   transcripts); a store adapter for cross-host resume is designed but unimplemented.
+4. **Managed sandbox tier-2** — a hosted execution backend (Vercel/E2B) behind the existing
+   `ToolExecutor` seam. Deliberately after deferred execution: if a third backend needs no
+   runner-loop or protocol change, the seam held.
+5. **Durable `SessionStore` / multi-host sessions** — the seam exists and parked sessions round-
+   trip through it, but only the in-memory store is bundled, so a park survives a disconnect and
+   not a restart. A durable store (and, for Claude-engine sessions, cross-host resume over the
+   SDK's on-disk transcripts) is the remaining half.
 
 ## Open questions
 

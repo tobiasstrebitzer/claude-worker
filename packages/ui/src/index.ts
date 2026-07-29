@@ -60,6 +60,7 @@ export { Response, type ResponseProps } from './components/agent/Response.tsx'
 export { Reasoning, type ReasoningProps } from './components/agent/Reasoning.tsx'
 export { Loader } from './components/agent/Loader.tsx'
 export { ToolCallCard, type ToolCallCardProps, type ToolCallItem } from './components/agent/ToolCallCard.tsx'
+export { FileCard, type FileCardProps, type FileDeliveredItem } from './components/agent/FileCard.tsx'
 export { PermissionPrompt, type PermissionPromptProps } from './components/agent/PermissionPrompt.tsx'
 export {
   QuestionPrompt,
@@ -88,6 +89,7 @@ export { STATUS_META } from './components/agent/status.ts'
 // Utilities
 export { cn } from './lib/utils.ts'
 export {
+  formatBytes,
   formatCost,
   formatCountdown,
   formatDuration,

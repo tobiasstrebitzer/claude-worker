@@ -1,6 +1,6 @@
 {
   "name": "@claude-worker/server",
-  "version": "0.2.1",
+  "version": "0.4.0",
   "type": "module",
   "description": "The claude-worker gateway: HTTP + WebSocket session server over @claude-worker/core. Session registry (create/list/attach/interrupt/kill), pluggable auth hook, replay-from-seq attach. Runs anywhere Node runs — needs a real filesystem (no serverless).",
   "license": "MIT",
@@ -32,6 +32,7 @@
   },
   "devDependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.217",
+    "@claude-worker/sandbox": "workspace:*",
     "@swc-node/register": "^1.11.1",
     "@swc/core": "^1.15.41",
     "@types/node": "^22.10.0",

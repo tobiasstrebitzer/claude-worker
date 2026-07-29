@@ -2,19 +2,29 @@ import type {
   AttachedFrame,
   ClientFrame,
   CreateJobRequest,
+  CreateProfileRequest,
   CreateSessionRequest,
   JobEvent,
   JobInfo,
   GetProfileResponse,
+  ListProfilesResponse,
+  ListSessionFilesResponse,
   PermissionMode,
   ProfileInfo,
   QueueServerFrame,
   QueueStats,
   ResolvePermissionRequest,
+  SubmitExecutionResultRequest,
+  SubmitExecutionResultResponse,
+  SaveProfileResponse,
   SdkSessionSummary,
   ServerFrame,
   SessionEvent,
+  SessionFileInfo,
   SessionInfo,
+  ToolCallRequestFrame,
+  ToolExecutionOutput,
+  UpdateProfileRequest,
 } from '@claude-worker/protocol'
 
 export type ClientOptions = {
@@ -47,6 +57,16 @@ export type SessionHandleEvents = {
   protocolError: string
   /** WS connectivity: true on open, false on close. */
   connectionChange: boolean
+  /**
+   * The server is asking this client to execute a tool call in its own sandbox.
+   * Answer with {@link SessionHandle.sendToolCallResult} or
+   * {@link SessionHandle.sendToolCallError}, echoing the same `executionId`.
+   * Ignoring it is safe: the server fails the execution at `expiresAt`.
+   */
+  toolCallRequest: ToolCallRequestFrame
+  /** A bridged call no longer needs an answer (turn interrupted, timed out, or
+   * the session closed) — abandon any work in progress for this executionId. */
+  toolCallCanceled: { executionId: string; reason: string }
 }
 
 type Listener<T> = (payload: T) => void
@@ -116,6 +136,17 @@ export class SessionHandle {
     this.#sendFrame({ type: 'set_model', model })
   }
 
+  /** Answer a bridged tool call (see the `toolCallRequest` event). */
+  sendToolCallResult(executionId: string, output: ToolExecutionOutput, logs?: string[]): void {
+    this.#sendFrame({ type: 'tool_call_result', executionId, output, logs })
+  }
+
+  /** Report that a bridged tool call could not be executed. The failure is fed
+   * to the model as tool output, so the agent can adapt rather than stall. */
+  sendToolCallError(executionId: string, reason: string, error: string, logs?: string[]): void {
+    this.#sendFrame({ type: 'tool_call_error', executionId, reason, error, logs })
+  }
+
   /** Ask the server to terminate the session (the handle disconnects too). */
   closeSession(): void {
     this.#sendFrame({ type: 'close' })
@@ -166,6 +197,10 @@ export class SessionHandle {
         if (frame.event.seq <= this.#lastSeq) return
         this.#lastSeq = frame.event.seq
         this.#emit('event', frame.event)
+      } else if (frame.type === 'tool_call_request') {
+        this.#emit('toolCallRequest', frame)
+      } else if (frame.type === 'tool_call_canceled') {
+        this.#emit('toolCallCanceled', { executionId: frame.executionId, reason: frame.reason })
       } else if (frame.type === 'protocol_error') {
         this.#emit('protocolError', frame.message)
       }
@@ -308,6 +343,37 @@ export class ClaudeWorkerClient {
     return (body as { session: SessionInfo }).session
   }
 
+  /** List the files currently in a session's scratch filesystem (deliverables the
+   * agent wrote; see the `file_delivered` event). 404s when the session's engine
+   * has no file store (Claude-engine sessions). */
+  async listSessionFiles(sessionId: string): Promise<SessionFileInfo[]> {
+    const body = await this.#call('GET', `/sessions/${encodeURIComponent(sessionId)}/files`)
+    return (body as ListSessionFilesResponse).files
+  }
+
+  /** Download one session file as text. */
+  async fetchSessionFile(sessionId: string, path: string): Promise<string> {
+    const res = await this.#fetch(this.sessionFileUrl(sessionId, path), {
+      headers: this.#options.headers,
+    })
+    if (!res.ok) {
+      const payload = (await res.json().catch(() => ({}))) as { error?: string }
+      throw new Error(payload.error ?? `GET file failed with ${res.status}`)
+    }
+    return await res.text()
+  }
+
+  /** Direct download URL for a session file (e.g. an <a download> href). Carries
+   * no headers — on authenticated servers, use fetchSessionFile instead. */
+  sessionFileUrl(sessionId: string, path: string): string {
+    const encoded = path
+      .split('/')
+      .filter(Boolean)
+      .map(encodeURIComponent)
+      .join('/')
+    return `${this.#options.baseUrl}/sessions/${encodeURIComponent(sessionId)}/files/${encoded}`
+  }
+
   /** Resolve a pending permission over REST — the remote-controller counterpart of the
    * WS `permission_decision` command (e.g. answering a job's AskUserQuestion from a
    * webhook consumer; the request rides on job_progress deliveries). Throws if the
@@ -324,18 +390,64 @@ export class ClaudeWorkerClient {
     )
   }
 
+  /**
+   * Deliver the result of a deferred tool execution — the callback a remote
+   * worker (or a human) makes when the work a session parked on is done. The
+   * session is rehydrated if its runner was torn down, and the agent loop
+   * continues with this as the tool's output.
+   *
+   * Applied idempotently by `executionId`: a duplicate, or one racing the
+   * execution watchdog, resolves with `applied: false` instead of applying twice.
+   * Throws (404) when no session is waiting on that id.
+   */
+  async submitExecutionResult(
+    executionId: string,
+    result: SubmitExecutionResultRequest,
+  ): Promise<SubmitExecutionResultResponse> {
+    return (await this.#call(
+      'POST',
+      `/executions/${encodeURIComponent(executionId)}/result`,
+      result,
+    )) as SubmitExecutionResultResponse
+  }
+
   /** List the profiles (named Claude Code config dirs) this server declares, filtered
    * to what the caller may use. Feed a result's `name` to createSession({ profile }).
    * Servers predating profiles 404 here — catch and treat as none declared. */
-  async listProfiles(): Promise<ProfileInfo[]> {
-    const body = await this.#call('GET', '/profiles')
-    return (body as { profiles: ProfileInfo[] }).profiles
+  /** The profiles this caller may use, plus whether it may create new ones.
+   * Each profile carries `managed: true` when it is store-backed and therefore
+   * editable; profiles declared in server options are not. */
+  async listProfiles(): Promise<ListProfilesResponse> {
+    return (await this.#call('GET', '/profiles')) as ListProfilesResponse
   }
 
   /** One profile plus a fresh, view-only snapshot of its config directory (settings,
    * skills, agents, commands — env var names only, never values). */
   async getProfile(name: string): Promise<GetProfileResponse> {
     return (await this.#call('GET', `/profiles/${encodeURIComponent(name)}`)) as GetProfileResponse
+  }
+
+  /**
+   * Create a managed profile. Requires a server with a profile store and a
+   * principal allowed to manage profiles; 409 if the name is already taken by a
+   * managed or a startup-declared profile.
+   */
+  async createProfile(profile: CreateProfileRequest): Promise<ProfileInfo> {
+    const body = await this.#call('POST', '/profiles', profile)
+    return (body as SaveProfileResponse).profile
+  }
+
+  /** Merge into a managed profile. The name is the route: profiles cannot be
+   * renamed, since sessions and jobs are already pinned to the old one. */
+  async updateProfile(name: string, patch: UpdateProfileRequest): Promise<ProfileInfo> {
+    const body = await this.#call('PATCH', `/profiles/${encodeURIComponent(name)}`, patch)
+    return (body as SaveProfileResponse).profile
+  }
+
+  /** Delete a managed profile. Startup-declared profiles are refused (403) —
+   * they live in the server's options. */
+  async deleteProfile(name: string): Promise<void> {
+    await this.#call('DELETE', `/profiles/${encodeURIComponent(name)}`)
   }
 
   /** List the Agent SDK's on-disk sessions (for resume across server restarts).

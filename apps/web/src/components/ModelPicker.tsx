@@ -1,20 +1,25 @@
+import type { ModelOption } from '@claude-worker/protocol'
 import { ModelSelect } from '@claude-worker/ui'
 import { MODEL_OPTIONS } from '@/lib/settings.ts'
 
-/** Form-styled model dropdown over the static alias list. '' = the CLI's default model. */
+/** Form-styled model dropdown. '' = the engine's default model — the CLI's for a
+ * Claude profile, the profile's declared one for a provider profile. `models`
+ * defaults to the static Claude alias list. */
 export function ModelPicker({
   value,
   onChange,
+  models = MODEL_OPTIONS,
   className,
 }: {
   value: string
   onChange: (value: string) => void
+  models?: ModelOption[]
   className?: string
 }) {
   return (
     <ModelSelect
       variant='form'
-      models={MODEL_OPTIONS}
+      models={models}
       model={value || undefined}
       onModelChange={(model) => onChange(model ?? '')}
       className={className}

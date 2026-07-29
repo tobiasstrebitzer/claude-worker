@@ -19,6 +19,7 @@ import { History, Plus, RefreshCw } from 'lucide-react'
 import { ModelPicker } from '@/components/ModelPicker.tsx'
 import { ProfileSelect } from '@/components/ProfileSelect.tsx'
 import { client } from '@/lib/client.ts'
+import { engineFormOptions } from '@/lib/engine.ts'
 import { getDefaultModel, getDefaultPermissionMode } from '@/lib/settings.ts'
 import { useProfileChoice } from '@/lib/useProfiles.ts'
 import { useSessions } from '@/lib/useSessions.ts'
@@ -30,7 +31,8 @@ function CreateSessionCard({ onCreated }: { onCreated: (id: string) => void }) {
   const [prompt, setPrompt] = useState('')
   const [mode, setMode] = useState<PermissionMode>(() => getDefaultPermissionMode('session'))
   const [model, setModel] = useState(() => getDefaultModel('session'))
-  const { profiles, profile, select: selectProfile } = useProfileChoice()
+  const { profiles, profile, selected, select: selectProfile } = useProfileChoice()
+  const engine = engineFormOptions(selected, mode, model)
   const [creating, setCreating] = useState(false)
 
   const [sdkSessions, setSdkSessions] = useState<SdkSessionSummary[] | undefined>()
@@ -49,14 +51,16 @@ function CreateSessionCard({ onCreated }: { onCreated: (id: string) => void }) {
         cwd: dir,
         profile: profile || undefined,
         prompt: resume ? undefined : prompt.trim() || undefined,
-        permissionMode: mode,
-        model: model.trim() || undefined,
+        permissionMode: engine.mode,
+        model: engine.model.trim() || undefined,
         resume: resume?.sessionId,
-        settingSources: ['user', 'project'],
-        // Interactive sessions: the operator is present, so pre-authorize the
-        // bypassPermissions capability — the CLI refuses to switch into it
-        // mid-session otherwise.
-        allowDangerouslySkipPermissions: true,
+        // CLI-only: setting sources, the SDK session store, and the bypass
+        // pre-authorization are all Claude Code concepts. Interactive sessions
+        // pre-authorize bypassPermissions because the operator is present — the
+        // CLI refuses to switch into it mid-session otherwise.
+        ...(engine.isProvider
+          ? {}
+          : { settingSources: ['user', 'project'], allowDangerouslySkipPermissions: true }),
       })
       onCreated(session.id)
     } catch (e) {
@@ -115,11 +119,22 @@ function CreateSessionCard({ onCreated }: { onCreated: (id: string) => void }) {
           />
           <label className='flex min-w-0 flex-col gap-1'>
             <span className='text-label font-medium text-fg-3'>Permission mode</span>
-            <PermissionModeSelect variant='form' mode={mode} onModeChange={setMode} className='min-w-44' />
+            <PermissionModeSelect
+              variant='form'
+              mode={engine.mode}
+              onModeChange={setMode}
+              modes={engine.modes}
+              className='min-w-44'
+            />
           </label>
           <label className='flex min-w-0 flex-col gap-1'>
             <span className='text-label font-medium text-fg-3'>Model</span>
-            <ModelPicker value={model} onChange={setModel} className='min-w-44' />
+            <ModelPicker
+              value={engine.model}
+              onChange={setModel}
+              models={engine.models}
+              className='min-w-44'
+            />
           </label>
           <Button onClick={() => void create()} disabled={creating}>
             {creating ? <Spinner className='size-3.5 text-current' /> : <Plus className='size-4' />}
@@ -127,43 +142,47 @@ function CreateSessionCard({ onCreated }: { onCreated: (id: string) => void }) {
           </Button>
         </div>
 
-        <div className='mt-1 border-t border-border pt-3'>
-          <div className='flex items-center justify-between'>
-            <span className='text-label font-medium text-fg-3'>Resume a previous session</span>
-            <Button variant='ghost' size='xs' onClick={() => void loadSdkSessions()} disabled={loadingSdk}>
-              {loadingSdk ? <Spinner className='size-3 text-current' /> : <History className='size-3' />}
-              {sdkSessions ? 'Reload' : 'Browse'}
-            </Button>
+        {/* Resumable sessions come from the Agent SDK's on-disk session store —
+            there is no provider-engine equivalent to browse. */}
+        {engine.isProvider ? null : (
+          <div className='mt-1 border-t border-border pt-3'>
+            <div className='flex items-center justify-between'>
+              <span className='text-label font-medium text-fg-3'>Resume a previous session</span>
+              <Button variant='ghost' size='xs' onClick={() => void loadSdkSessions()} disabled={loadingSdk}>
+                {loadingSdk ? <Spinner className='size-3 text-current' /> : <History className='size-3' />}
+                {sdkSessions ? 'Reload' : 'Browse'}
+              </Button>
+            </div>
+            {sdkSessions !== undefined ? (
+              sdkSessions.length === 0 ? (
+                <div className='py-3 text-center text-body-sm text-fg-4'>
+                  No stored sessions for this directory.
+                </div>
+              ) : (
+                <ul className='mt-2 flex flex-col gap-1'>
+                  {sdkSessions.map((s) => (
+                    <li
+                      key={s.sessionId}
+                      className='flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-surface-hover'>
+                      <div className='min-w-0 flex-1'>
+                        <div className='truncate text-body-sm text-fg-1'>
+                          {s.customTitle ?? s.summary}
+                        </div>
+                        <div className='flex gap-2 font-mono text-label text-fg-4'>
+                          {s.gitBranch ? <span className='truncate'>{s.gitBranch}</span> : null}
+                          <span className='shrink-0'>{formatRelativeTime(s.lastModified)}</span>
+                        </div>
+                      </div>
+                      <Button variant='outline' size='xs' onClick={() => void create(s)} disabled={creating}>
+                        Resume
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              )
+            ) : null}
           </div>
-          {sdkSessions !== undefined ? (
-            sdkSessions.length === 0 ? (
-              <div className='py-3 text-center text-body-sm text-fg-4'>
-                No stored sessions for this directory.
-              </div>
-            ) : (
-              <ul className='mt-2 flex flex-col gap-1'>
-                {sdkSessions.map((s) => (
-                  <li
-                    key={s.sessionId}
-                    className='flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-surface-hover'>
-                    <div className='min-w-0 flex-1'>
-                      <div className='truncate text-body-sm text-fg-1'>
-                        {s.customTitle ?? s.summary}
-                      </div>
-                      <div className='flex gap-2 font-mono text-label text-fg-4'>
-                        {s.gitBranch ? <span className='truncate'>{s.gitBranch}</span> : null}
-                        <span className='shrink-0'>{formatRelativeTime(s.lastModified)}</span>
-                      </div>
-                    </div>
-                    <Button variant='outline' size='xs' onClick={() => void create(s)} disabled={creating}>
-                      Resume
-                    </Button>
-                  </li>
-                ))}
-              </ul>
-            )
-          ) : null}
-        </div>
+        )}
       </CardContent>
     </Card>
   )

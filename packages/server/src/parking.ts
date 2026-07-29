@@ -1,0 +1,385 @@
+import type {
+  ParkedExecution,
+  Runner,
+  RunnerSnapshot,
+  SessionRunnerConfig,
+  ToolExecutionResult,
+} from '@claude-worker/core'
+import type { SessionInfo } from '@claude-worker/protocol'
+import type { SessionRegistry } from './registry.ts'
+
+/**
+ * A session with its live runner torn down, waiting on deferred executions.
+ *
+ * Everything needed to bring it back: the wire-visible info (so it still lists and
+ * reads over REST while parked), the config to rebuild the runner, the engine's
+ * snapshot, and what it is waiting for.
+ */
+export type ParkedSessionRecord = {
+  id: string
+  /** Session info as of the park, with `status: 'parked'`. */
+  info: SessionInfo
+  profile?: string
+  /** The config the session was created with (profile defaults already applied). */
+  config: SessionRunnerConfig
+  snapshot: RunnerSnapshot
+  executions: ParkedExecution[]
+  parkedAt: number
+}
+
+/**
+ * Where parked sessions live. The bundled implementation is
+ * {@link MemorySessionStore}; a durable one (redis, sqlite, a table) implements the
+ * same three operations and makes parks survive a restart.
+ *
+ * Two things to know before writing one: the record holds the session's whole
+ * transcript and tool I/O, and `config` may carry host-injected values (env, hooks)
+ * that a JSON round-trip silently drops or, worse, persists. That is exactly why
+ * nothing durable ships here — choosing where this lands is the operator's call.
+ */
+export interface SessionStore {
+  save(record: ParkedSessionRecord): Promise<void>
+  get(id: string): Promise<ParkedSessionRecord | null>
+  list(): Promise<ParkedSessionRecord[]>
+  delete(id: string): Promise<boolean>
+}
+
+/** Single-process, no persistence: parks survive a client disconnect, not a restart. */
+export class MemorySessionStore implements SessionStore {
+  #records = new Map<string, ParkedSessionRecord>()
+
+  save(record: ParkedSessionRecord): Promise<void> {
+    this.#records.set(record.id, record)
+    return Promise.resolve()
+  }
+
+  get(id: string): Promise<ParkedSessionRecord | null> {
+    return Promise.resolve(this.#records.get(id) ?? null)
+  }
+
+  list(): Promise<ParkedSessionRecord[]> {
+    return Promise.resolve([...this.#records.values()])
+  }
+
+  delete(id: string): Promise<boolean> {
+    return Promise.resolve(this.#records.delete(id))
+  }
+}
+
+export type SessionParkOptions = {
+  registry: SessionRegistry
+  store: SessionStore
+  /** Rebuild a parked session's runner. The snapshot rides in on
+   * `config.restore`, so the engine adopts the id, event log, and history. */
+  rebuild: (record: ParkedSessionRecord) => Promise<Runner>
+  /** How many clients are attached to this session. A watched session stays live:
+   * parking would pull the runner out from under the socket. */
+  attachedCount: (sessionId: string) => number
+  /** Wait this long after the last client detaches before parking, so a reconnect
+   * (a wifi blip, a page reload) doesn't cost a teardown. Default 2000. */
+  parkDelayMs?: number
+  /** Veto + accounting hook, called before the teardown: the job queue frees the
+   * run's concurrency slot here, and refuses (false) when the run is finalizing. */
+  onParking?: (sessionId: string, executionId: string) => boolean
+  /** The session is live again under a NEW runner object — anything holding the
+   * old reference must rebind. */
+  onResumed?: (sessionId: string, runner: Runner) => void
+  /** Park/resume failures. These are not session errors — the session is intact,
+   * the host's storage or engine assembly isn't. */
+  onError?: (error: unknown, context: { sessionId: string; phase: 'park' | 'resume' }) => void
+}
+
+/**
+ * Deferred execution's other half: parking a session that is waiting on work no
+ * process in this server is doing.
+ *
+ * The runner announces the moment with `status_changed: 'parked'` — emitted only
+ * once every dispatch of the batch has been handed over, so the snapshot can never
+ * miss a call that was still being dispatched. From there this class snapshots,
+ * evicts, and persists; delivering a result rebuilds the runner under the same id
+ * and hands the result to it. The session's identity, event log, and seq numbering
+ * survive intact, so a client reattaching with `afterSeq` sees one unbroken stream.
+ */
+export class SessionParkManager {
+  #options: SessionParkOptions
+  /** executionId → sessionId, for routing a result to its session. Kept in memory
+   * across the park; rebuilt from the store by {@link hydrate}. */
+  #owners = new Map<string, string>()
+  /** Executions already settled, kept until their session ends so a late or
+   * duplicate delivery answers "already settled" instead of "never heard of it". */
+  #settled = new Map<string, string>()
+  #timers = new Map<string, ReturnType<typeof setTimeout>>()
+  /** One resume per session, ever: two results arriving together must not build
+   * two runners under the same id (the second would orphan the first, leaking the
+   * MCP connection the park existed to release). */
+  #resuming = new Map<string, Promise<Runner | undefined>>()
+  #detachTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  /** The config each live session was built from — what a rebuild needs, and the
+   * one thing a runner doesn't carry on its public surface. */
+  #configs = new Map<string, SessionRunnerConfig>()
+  #closed = false
+
+  constructor(options: SessionParkOptions) {
+    this.#options = options
+  }
+
+  /** Record the config a session was created with. Only sessions the host
+   * remembers can be parked — there is no way to rebuild the others. */
+  remember(sessionId: string, config: SessionRunnerConfig): void {
+    this.#configs.set(sessionId, config)
+  }
+
+  /** Adopt the store's contents (a durable store after a restart): re-index the
+   * executions and re-arm their watchdogs. */
+  async hydrate(): Promise<void> {
+    for (const record of await this.#options.store.list()) {
+      for (const execution of record.executions) this.#track(record.id, execution)
+    }
+  }
+
+  /**
+   * Follow a session's lifecycle: index its deferred executions, park it when the
+   * engine says the turn has come to rest on them, and clean up when it ends.
+   * `afterSeq` skips a rehydrated runner's replayed history (re-arming a watchdog
+   * from an event whose deadline already passed would fail the execution instantly).
+   */
+  watch(runner: Runner, afterSeq = 0): () => void {
+    return runner.subscribe((event) => {
+      switch (event.type) {
+        case 'execution_dispatched':
+          if (!event.deferred) return
+          this.#track(runner.id, {
+            executionId: event.executionId,
+            toolName: event.toolName,
+            expiresAt: event.expiresAt,
+          })
+          return
+        case 'execution_result':
+        case 'execution_failed':
+          this.#forget(event.executionId)
+          // One call of a multi-call park settling leaves the session parked on
+          // the rest — it has to go back down, and no new status_changed will say so.
+          if (runner.info().status === 'parked') void this.#park(runner)
+          return
+        case 'status_changed':
+          if (event.status === 'parked') void this.#park(runner)
+          return
+        case 'session_closed':
+          void this.discard(runner.id)
+          return
+        default:
+          return
+      }
+    }, afterSeq)
+  }
+
+  /** A client detached: park the session if that was the last one watching. */
+  onDetach(sessionId: string): void {
+    if (this.#closed) return
+    const runner = this.#options.registry.get(sessionId)
+    if (!runner || runner.info().status !== 'parked') return
+    clearTimeout(this.#detachTimers.get(sessionId))
+    const timer = setTimeout(() => {
+      this.#detachTimers.delete(sessionId)
+      void this.#park(runner)
+    }, this.#options.parkDelayMs ?? 2000)
+    timer.unref?.()
+    this.#detachTimers.set(sessionId, timer)
+  }
+
+  /** Which session this execution belongs to — still waiting, or already settled. */
+  sessionFor(executionId: string): string | undefined {
+    return this.#owners.get(executionId) ?? this.#settled.get(executionId)
+  }
+
+  /** The parked session's record, for the read paths (GET, list, attach). */
+  get(id: string): Promise<ParkedSessionRecord | null> {
+    return this.#options.store.get(id)
+  }
+
+  /** Every parked session's info, to merge into `GET {basePath}/sessions`. */
+  async listInfo(): Promise<SessionInfo[]> {
+    return (await this.#options.store.list()).map((record) => record.info)
+  }
+
+  /** The live runner for a session, rehydrating a parked one on demand. Undefined
+   * when the session is neither live nor parked. */
+  async ensureLive(id: string): Promise<Runner | undefined> {
+    const live = this.#options.registry.get(id)
+    if (live) return live
+    return this.#resume(id)
+  }
+
+  /**
+   * Deliver a deferred execution's result. Rehydrates the session if needed and
+   * folds the result into its agent loop.
+   *
+   * Undefined = no session is waiting on that id. `applied: false` = it was already
+   * settled: a duplicate delivery, or one racing the watchdog. Both are expected,
+   * neither is an error.
+   */
+  async submitResult(
+    executionId: string,
+    result: ToolExecutionResult,
+  ): Promise<{ applied: boolean; sessionId: string } | undefined> {
+    const sessionId = this.#owners.get(executionId)
+    if (sessionId === undefined) {
+      // Already answered — by an earlier delivery, or by the watchdog it raced.
+      // Waking the session to be told again would be worse than useless.
+      const settled = this.#settled.get(executionId)
+      return settled === undefined ? undefined : { applied: false, sessionId: settled }
+    }
+    const runner = await this.ensureLive(sessionId)
+    if (!runner) {
+      this.#forget(executionId)
+      return undefined
+    }
+    // Clear the watchdog first: settling re-enters the agent loop, and a timeout
+    // firing behind it would try to fail a call that no longer exists.
+    this.#clearTimer(executionId)
+    const applied = runner.settleExecution?.(executionId, result) ?? false
+    if (applied) this.#forget(executionId)
+    return { applied, sessionId }
+  }
+
+  /** Drop a parked session for good: the run is over (closed, canceled, killed). */
+  async discard(sessionId: string): Promise<void> {
+    clearTimeout(this.#detachTimers.get(sessionId))
+    this.#detachTimers.delete(sessionId)
+    this.#configs.delete(sessionId)
+    for (const [executionId, owner] of this.#owners) {
+      if (owner === sessionId) this.#forget(executionId)
+    }
+    for (const [executionId, owner] of this.#settled) {
+      if (owner === sessionId) this.#settled.delete(executionId)
+    }
+    await this.#options.store.delete(sessionId)
+  }
+
+  close(): void {
+    this.#closed = true
+    for (const timer of this.#timers.values()) clearTimeout(timer)
+    for (const timer of this.#detachTimers.values()) clearTimeout(timer)
+    this.#timers.clear()
+    this.#detachTimers.clear()
+  }
+
+  async #park(runner: Runner): Promise<void> {
+    if (this.#closed || !runner.park) return
+    const id = runner.id
+    if (this.#options.registry.get(id) !== runner) return
+    if (runner.info().status !== 'parked') return
+    // Someone is watching: keep it live and reconsider when they leave.
+    if (this.#options.attachedCount(id) > 0) return
+    const executions = [...this.#owners].filter(([, owner]) => owner === id).map(([e]) => e)
+    if (executions.length === 0) return
+    const config = this.#configs.get(id)
+    if (!config) return
+    if (this.#options.onParking && !this.#options.onParking(id, executions[0]!)) return
+    // park() → evict in one tick: an attach landing between them would bind a
+    // client to a runner that is already inert.
+    const snapshot = runner.park()
+    if (!snapshot) return
+    const info = { ...runner.info(), status: 'parked' as const }
+    this.#options.registry.evict(id)
+    const record: ParkedSessionRecord = {
+      id,
+      info,
+      profile: info.profile,
+      config,
+      snapshot,
+      executions: snapshot.parked,
+      parkedAt: Date.now(),
+    }
+    for (const execution of snapshot.parked) this.#track(id, execution)
+    try {
+      await this.#options.store.save(record)
+    } catch (error) {
+      // The runner is already inert and evicted; without the record the session
+      // cannot come back. Nothing to roll back to — surface it loudly.
+      this.#options.onError?.(error, { sessionId: id, phase: 'park' })
+    }
+  }
+
+  async #resume(id: string): Promise<Runner | undefined> {
+    const inFlight = this.#resuming.get(id)
+    if (inFlight) return inFlight
+    const attempt = this.#rebuild(id)
+    this.#resuming.set(id, attempt)
+    try {
+      return await attempt
+    } finally {
+      this.#resuming.delete(id)
+    }
+  }
+
+  async #rebuild(id: string): Promise<Runner | undefined> {
+    const record = await this.#options.store.get(id)
+    if (!record) return undefined
+    let runner: Runner
+    try {
+      runner = await this.#options.rebuild(record)
+    } catch (error) {
+      // Keep the record: the failure may be transient (an MCP server down), and
+      // the next delivery — or a retried one — gets another chance.
+      this.#options.onError?.(error, { sessionId: id, phase: 'resume' })
+      throw error
+    }
+    if (runner.id !== id) {
+      // The factory ignored `restore` and built a fresh session: it has none of
+      // this one's history and would strand the execution we are waking for.
+      runner.close('error')
+      const error = new Error(
+        `rebuilt session has id '${runner.id}', expected '${id}' — the engine factory must ` +
+          'forward EngineRunnerContext.restore to the runner config',
+      )
+      this.#options.onError?.(error, { sessionId: id, phase: 'resume' })
+      throw error
+    }
+    // Registered and subscribed before it starts, so nothing it emits on the way
+    // back up is missed by the queue or the watchers.
+    this.#options.registry.register(runner)
+    this.remember(id, record.config)
+    this.watch(runner, record.snapshot.seq)
+    this.#options.onResumed?.(id, runner)
+    await this.#options.store.delete(id)
+    void runner.start()
+    return runner
+  }
+
+  #track(sessionId: string, execution: ParkedExecution): void {
+    this.#owners.set(execution.executionId, sessionId)
+    if (execution.expiresAt === undefined || this.#timers.has(execution.executionId)) return
+    const timer = setTimeout(
+      () => {
+        this.#timers.delete(execution.executionId)
+        // A result that never came is ordinary tool output, not a session error:
+        // the agent gets told and adapts, exactly like a sandbox failure.
+        void this.submitResult(execution.executionId, {
+          status: 'failed',
+          reason: 'timeout',
+          error: `deferred execution '${execution.toolName}' produced no result before its deadline`,
+        }).catch((error: unknown) => {
+          this.#options.onError?.(error, { sessionId, phase: 'resume' })
+        })
+      },
+      Math.max(0, execution.expiresAt - Date.now()),
+    )
+    timer.unref?.()
+    this.#timers.set(execution.executionId, timer)
+  }
+
+  #forget(executionId: string): void {
+    this.#clearTimer(executionId)
+    const owner = this.#owners.get(executionId)
+    if (owner !== undefined) this.#settled.set(executionId, owner)
+    this.#owners.delete(executionId)
+  }
+
+  #clearTimer(executionId: string): void {
+    const timer = this.#timers.get(executionId)
+    if (timer === undefined) return
+    clearTimeout(timer)
+    this.#timers.delete(executionId)
+  }
+}

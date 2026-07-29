@@ -1,14 +1,14 @@
 # Architecture
 
-How claude-worker is put together: seven packages, three apps, one dependency rule. Scope
+How claude-worker is put together: eight packages, three apps, one dependency rule. Scope
 guards behind this shape: no serverless hosting, no multi-tenant SaaS, no claude.ai auth. For
 what's deliberately not built yet, see the [roadmap](./roadmap.md).
 
 ## The dependency rule
 
 ```
-              protocol
-             /        \
+              protocol            sandbox
+             /        \          (leaf; either side)
    (server side)    (browser side)
         core           client
          |               |
@@ -30,17 +30,57 @@ boundary: anything a client needs must be expressible as protocol events and com
   shapes, `JobInfo`/queue frames. Dependency-free and browser-safe. Breaking changes bump
   `PROTOCOL_VERSION`. SDK unions the protocol mirrors (e.g. `PermissionMode`) must stay
   assignable both directions: SDK→protocol for events, protocol→SDK for options.
-- **`packages/core`** — `SessionRunner`, the heart of the system. Wraps the Agent SDK's
-  `query()` with: a push-based async input queue (`sendMessage` feeds the SDK's streaming-input
-  iterable), promotion of `canUseTool` callbacks into pending approvals that block the tool
-  until resolved (deny-on-timeout), normalization of every SDKMessage into typed protocol
-  events, and a seq-numbered event log enabling attach/replay. No transport.
+- **`packages/core`** — the engines. `SessionRunner` (Claude) wraps the Agent SDK's `query()`
+  with: a push-based async input queue (`sendMessage` feeds the SDK's streaming-input iterable),
+  promotion of `canUseTool` callbacks into pending approvals that block the tool until resolved
+  (deny-on-timeout), normalization of every SDKMessage into typed protocol events, and a
+  seq-numbered event log enabling attach/replay. No transport. Both engines implement the
+  engine-independent `Runner` interface (`src/runner-interface.ts`) that server and queue type
+  against. `AiSdkRunner` is the model-agnostic engine over the AI SDK's `ToolLoopAgent`: its
+  durable state is a `ModelMessage[]` history, and because that loop *terminates* (never
+  suspends) on a tool without a local `execute`, continuation is message-state replay —
+  `resolveToolCall()` appends the result and re-invokes. Tool execution goes through the
+  `ToolExecutor` seam, whose dispatch either settles inline or returns `pending` keyed by
+  `executionId`, so a deferred or remote backend drops in without touching the runner or the
+  protocol. `QuickJsExecutor` is the in-process backend over `packages/sandbox`;
+  `BrowserBridgeExecutor` relays to an attached tab; `DeferredExecutor` hands work to something
+  that will answer long after this process stopped waiting. Each executor `describe()`s a call
+  before dispatch (backend, deferredness, deadline), so a routing executor can keep one tool
+  in-process and defer another. Once a turn comes to rest on nothing but deferred calls — and
+  only once every one of them has been handed over — the runner announces `status_changed:
+  'parked'`. `park()` then returns a `RunnerSnapshot` (id, event log, seq, VFS, plus the engine's
+  own continuation state, opaque to everyone else) and the instance goes inert *without* emitting
+  `session_closed`. Feeding that snapshot back as `restore` rebuilds the session as itself: same
+  id, same seq numbering, mid-turn. `createToolContext` builds a session's
+  capability-scoped tools — the agent's authority is exactly what is granted, there are no
+  built-in fs/shell tools, and `fs_*` operate on an in-memory scratch VFS rather than the host
+  disk. Each tool carries a trust level: `sandboxed` (no ambient authority, safe to execute
+  anywhere, results untrusted) or `authoritative` (server-side with server credentials — MCP and
+  secret-bearing APIs, never bridged, since bridging would let a browser forge authoritative
+  results). `createEngineSession` assembles provider model + tools + executor into a session.
+- **`packages/sandbox`** — the untrusted-code boundary: a QuickJS-NG WASM guest for
+  LLM-generated scripts, an in-memory map-backed scratch VFS (browser-safe by construction —
+  no node-fs emulation, no `Buffer`), and a by-value host bridge (values
+  cross as strings/JSON; a host object is never handed over by reference — the bridge, not the
+  WASM boundary, is where sandboxes like Terrarium/CVE-2026-5752 actually failed). Limits are
+  interpreter-enforced: `setMemoryLimit` for the allocator, an interrupt handler between
+  bytecode ops for the wall-clock deadline (so infinite loops are preempted in-thread, no worker
+  or cross-origin isolation needed). Note the deadline cannot preempt time inside a host
+  function — every granted capability carries its own timeout. The engine variant is injected,
+  so the server (Node asyncify) and a browser tab (singlefile asyncify) share one guest engine.
+  A leaf package like `protocol`: it imports neither core/server nor any model SDK.
 - **`packages/queue`** — `JobQueue` over the runner: one-shot unattended runs with bounded
   concurrency, per-session and daily token budgets, ordered webhook delivery, retries with
   exponential backoff, a wall-clock watchdog (`maxJobDurationMs` + force-close grace), and
   terminal-job retention pruning. The `QueueAdapter` contract is the seam for shared backends
   (redis/bullmq): `claimNext` must be atomic and must skip jobs whose `nextRunAt` is in the
   future; daily token counters are adapter-held. Only the in-memory adapter is bundled.
+  One-shot means "first `turn_result` completes it", not "one process residency": a run that
+  parks on a deferred execution goes `parked` at the same single finalize chokepoint —
+  surrendering its concurrency slot, stopping its wall-clock budget, emitting `job_parked` — and
+  resumes against the rebuilt runner (`onSessionParking` / `onSessionResumed`, called by whoever
+  owns the parking). Parked runs are bounded by `maxParkedDurationMs` rather than
+  `maxJobDurationMs`: waiting is not being stuck.
 - **`packages/server`** — the gateway: `node:http` + `ws`, a session registry
   (create/list/attach/interrupt/kill), resume from the SDK's on-disk sessions, a pluggable
   `authenticate` hook (refuses to start without one unless `allowUnauthenticated: true`), and —
@@ -50,13 +90,43 @@ boundary: anything a client needs must be expressible as protocol events and com
   request's profile (required when several are declared, implicit with one, auto-detected from
   `~/.claude` when unset), applies its defaults, and pins `CLAUDE_CONFIG_DIR` after the
   `buildRunnerConfig` hook; the principal's `allowedProfiles` scopes creation and
-  `GET /profiles`.
+  `GET /profiles`. With the `profileStore` option (a small seam, memory and JSON-file
+  implementations bundled) the dashboard can also create, edit, and delete profiles — gated by
+  `canManageProfiles` on the principal, and never touching the ones declared in server options,
+  which are code. A profile also picks the **engine**: `engine: 'provider'` routes creation to
+  the `createEngineRunner` hook (which may be async, for assembly that has to await) instead of
+  the SDK runner, so this package imports no model SDK and never resolves provider credentials.
+  Because the two engines answer to different vocabularies, the gateway rejects a permission mode
+  the resolved profile's engine cannot run rather than letting the engine coerce it. A provider
+  profile also declares what its sessions get (`session.capabilities` / `mcpServers` /
+  `instructions`); a request may narrow that set but never widen it, and may not bring MCP
+  servers of its own — MCP tools are authoritative, so a client-named one would be an
+  authoritative tool pointed wherever the caller liked.
+  `BridgeHub` (always on, exposed as `server.bridge`) routes tool executions
+  between a session and the tabs attached to it: it asks the first attached client and fails
+  dispatch immediately when none is attached, which is what makes autonomous jobs simply never
+  bridge. `SessionParkManager` (`server.parking`) owns the other end of the timescale: when an
+  unwatched session parks it snapshots, evicts the runner from the registry, and persists to a
+  `SessionStore` (memory bundled; the record holds the whole transcript, which is why nothing
+  durable ships by default). Parked sessions still list, read, and serve their files — from the
+  snapshot, with no runner. `POST /executions/:executionId/result` rebuilds the session under the
+  same id and folds the result into its loop, idempotently by `executionId`; an execution
+  watchdog does the same with a `timeout` failure when no result ever comes, which the agent
+  adapts to like any other tool failure. A session someone is watching stays live and parks
+  shortly after the last client leaves; attaching to a parked one wakes it, so a reconnect after
+  a network blip finds its session rather than a 404.
 - **`packages/client`** — typed protocol client on platform `fetch`/`WebSocket`: REST session
   and job management, WS attach with auto-reconnect and replay-from-last-seq, `attachQueue()`
   for the live queue stream. Zero runtime deps; browser and Node.
 - **`packages/react`** — the headless React layer: `useClaudeSession` plus `src/transcript.ts`,
   a pure framework-free reducer folding protocol events into transcript state (messages, tool
   calls, approvals, session meta). Rendering logic stays out of it; it is the unit-test surface.
+  Also the browser tool host (`createToolCallHost`, wrapped by `useToolCallHost`): it answers
+  server-bridged tool calls by running them in the tab's own QuickJS guest, seeded from the
+  request's VFS snapshot, so client-held documents can be evaluated without reaching the server.
+  The guest engine loads on the first bridged call rather than at import, and the client refuses
+  any tool it wasn't configured for — a server cannot talk a tab into running something it never
+  opted into.
 - **`packages/ui`** — the styled layer: shadcn-style primitives (`src/components/ui`) and agent
   components (`src/components/agent`: SessionPanel, Transcript, ToolCallCard, PermissionPrompt,
   QuestionPrompt, Composer, SessionList, StatusBar, ModelSelect). Tailwind v4 + Base UI + cva;
@@ -64,7 +134,10 @@ boundary: anything a client needs must be expressible as protocol events and com
   Tailwind build compiles (`@source` scanning — wiring in the package README). The composer's
   input is a vendored copy of just-marketing/prompt-area (MIT) under `src/components/prompt-area`.
 - **`apps/web`** — the full session-control dashboard (TanStack Router, hash history): session
-  list, create/resume flow, live panel, jobs view, profiles view, settings.
+  list, create/resume flow, live panel, jobs view, profiles view, settings. The create forms and
+  the session panel are engine-aware: they offer only the permission modes and models the
+  selected profile's engine actually runs, and hide the CLI-only affordances (resumable SDK
+  sessions, setting sources, the bypass pre-authorization) for provider profiles.
 - (A minimal second consumer, `apps/demo`, proved `client` + `ui` portability for the V1
   acceptance scope; it was removed once that was established — see git history.)
 
@@ -97,6 +170,27 @@ frees and budgets allow → the job runs as an ordinary registry session → web
 `job_completed` in order → first turn result completes the job and closes the session. Token
 accounting sums per-turn `usage` (input + output + cache_creation + cache_read);
 `total_cost_usd`/`num_turns` are session-cumulative and rolled up last-seen, never summed.
+
+## Deferred execution
+
+A tool call whose backend can't answer within the turn — a remote worker, a batch window, a
+human — parks the session instead of blocking it:
+
+1. The runner dispatches every deferred call, then announces `status_changed: 'parked'`. Waiting
+   for the whole batch is what stops a park from stranding a call still being dispatched.
+2. `SessionParkManager` snapshots the session, evicts the runner (releasing its model client, MCP
+   connections, and memory), and persists the record. A job at this point surrenders its
+   concurrency slot and stops its wall-clock budget → `job_parked`.
+3. `POST /v1/executions/:executionId/result` (or `parking.submitResult` in-process, or the
+   watchdog's `timeout` failure) rebuilds the session under its own id from the snapshot,
+   re-subscribes the queue past the replayed log, and hands the result to the agent loop →
+   `job_resumed`. The turn continues as if it had never stopped; its `durationMs` excludes the
+   parked stretch.
+
+Results are applied idempotently by `executionId`: a duplicate, or one racing the watchdog,
+answers `applied: false` rather than applying twice. Because the park is only a persistence
+boundary, `parked` is not terminal anywhere — `claimNext` never claims one, retention never
+prunes one, and `DELETE /v1/sessions/:id` is what actually ends one.
 
 ## Tooling conventions
 

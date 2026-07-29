@@ -414,4 +414,141 @@ describe('JobQueue', () => {
     // the local observer still sees progress
     expect(events.some((e) => e.type === 'job_progress')).toBe(true)
   })
+
+  describe('parked runs (deferred execution)', () => {
+    it('frees the concurrency slot while parked and takes it back on resume', async () => {
+      const { queue, runners, events } = makeQueue({ maxConcurrency: 1 })
+      const a = await queue.submit(jobRequest({ meta: { n: 1 } }))
+      const b = await queue.submit(jobRequest({ meta: { n: 2 } }))
+      await tick()
+      expect(runners).toHaveLength(1)
+
+      // The host parked a's session: state persisted, runner torn down.
+      expect(queue.onSessionParking(runners[0]!.id, 'exec-1')).toBe(true)
+      await vi.waitFor(async () => expect((await queue.get(a.id))?.status).toBe('parked'))
+      expect(await queue.get(a.id)).toMatchObject({ parkedExecutionId: 'exec-1' })
+      expect(events.find((e) => e.type === 'job_parked')).toMatchObject({ executionId: 'exec-1' })
+
+      // Slot freed: b runs while a waits.
+      await vi.waitFor(() => expect(runners).toHaveLength(2))
+      const stats = await queue.stats()
+      expect(stats).toMatchObject({ running: 1, parked: 1 })
+      expect((await queue.get(b.id))?.status).toBe('running')
+
+      // The result arrived: the host rebuilt the session as a NEW runner object.
+      const resumed = new FakeRunner()
+      queue.onSessionResumed(runners[0]!.id, resumed as unknown as SessionRunner)
+      await vi.waitFor(async () => expect((await queue.get(a.id))?.status).toBe('running'))
+      expect(events.find((e) => e.type === 'job_resumed')).toMatchObject({ executionId: 'exec-1' })
+      expect((await queue.get(a.id))?.parkedExecutionId).toBeUndefined()
+
+      resumed.emit(successResult(100))
+      await vi.waitFor(async () => expect((await queue.get(a.id))?.status).toBe('succeeded'))
+    })
+
+    it('re-subscribes past the replayed log so a resume does not re-deliver progress', async () => {
+      // The rehydrated runner replays its whole persisted log. Re-handling it
+      // would re-fire job_progress for the entire transcript on every resume.
+      const { queue, runners, events } = makeQueue()
+      await queue.submit(jobRequest())
+      await tick()
+      runners[0]!.emit(assistantWithUsage(20, 'before the park'))
+      await tick()
+      const progressBefore = events.filter((e) => e.type === 'job_progress').length
+      expect(progressBefore).toBe(1)
+
+      queue.onSessionParking(runners[0]!.id, 'exec-1')
+      await tick()
+
+      // Same id, same log: the resumed runner carries the pre-park events.
+      const resumed = new FakeRunner()
+      resumed.id = runners[0]!.id
+      resumed.emit(assistantWithUsage(20, 'before the park'))
+      queue.onSessionResumed(runners[0]!.id, resumed as unknown as SessionRunner)
+      await tick()
+
+      expect(events.filter((e) => e.type === 'job_progress')).toHaveLength(progressBefore)
+    })
+
+    it('excludes parked time from the wall-clock watchdog', async () => {
+      vi.useFakeTimers()
+      try {
+        const { queue, runners } = makeQueue({ maxJobDurationMs: 1000 })
+        const job = await queue.submit(jobRequest())
+        await vi.advanceTimersByTimeAsync(0)
+        await vi.advanceTimersByTimeAsync(600)
+
+        queue.onSessionParking(runners[0]!.id, 'exec-1')
+        await vi.advanceTimersByTimeAsync(0)
+        // Parked far longer than the cap: waiting is not being stuck.
+        await vi.advanceTimersByTimeAsync(60_000)
+        expect((await queue.get(job.id))?.status).toBe('parked')
+
+        const resumed = new FakeRunner()
+        queue.onSessionResumed(runners[0]!.id, resumed as unknown as SessionRunner)
+        await vi.advanceTimersByTimeAsync(0)
+        // 600ms of the budget was already spent; 300 more is still inside it.
+        await vi.advanceTimersByTimeAsync(300)
+        expect((await queue.get(job.id))?.status).toBe('running')
+        // ...and the remaining 100 tips it over.
+        await vi.advanceTimersByTimeAsync(200)
+        await vi.advanceTimersByTimeAsync(6000)
+        expect((await queue.get(job.id))?.status).toBe('failed')
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('fails a run parked longer than maxParkedDurationMs and discards its snapshot', async () => {
+      vi.useFakeTimers()
+      const discardSession = vi.fn()
+      try {
+        const { queue, runners } = makeQueue({ maxParkedDurationMs: 5000, discardSession })
+        const job = await queue.submit(jobRequest())
+        await vi.advanceTimersByTimeAsync(0)
+        const sessionId = runners[0]!.id
+        queue.onSessionParking(sessionId, 'exec-1')
+        await vi.advanceTimersByTimeAsync(0)
+
+        await vi.advanceTimersByTimeAsync(5001)
+        const failed = await queue.get(job.id)
+        expect(failed?.status).toBe('failed')
+        expect(failed?.error).toMatch(/max parked duration/)
+        expect(discardSession).toHaveBeenCalledWith(sessionId)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('cancels a parked run and discards its snapshot', async () => {
+      const discardSession = vi.fn()
+      const { queue, runners, events } = makeQueue({ discardSession })
+      const job = await queue.submit(jobRequest())
+      await tick()
+      const sessionId = runners[0]!.id
+      queue.onSessionParking(sessionId, 'exec-1')
+      await tick()
+
+      const canceled = await queue.cancel(job.id)
+      expect(canceled?.status).toBe('canceled')
+      expect(discardSession).toHaveBeenCalledWith(sessionId)
+      expect((await queue.stats()).parked).toBe(0)
+      expect(events.at(-1)).toMatchObject({ type: 'job_completed' })
+    })
+
+    it('refuses a park for a run that is already being killed', async () => {
+      // Between the kill and the run winding down, parking would persist a
+      // session nothing will ever wake.
+      const { queue, runners } = makeQueue({ sessionTokenLimit: 30 })
+      await queue.submit(jobRequest())
+      await tick()
+      runners[0]!.emit(assistantWithUsage(100))
+      await tick()
+      expect(runners[0]!.interrupt).toHaveBeenCalled()
+
+      expect(queue.onSessionParking(runners[0]!.id, 'exec-1')).toBe(false)
+      // A session that belongs to no job has nothing to object to.
+      expect(queue.onSessionParking('not-a-job-session', 'exec-2')).toBe(true)
+    })
+  })
 })

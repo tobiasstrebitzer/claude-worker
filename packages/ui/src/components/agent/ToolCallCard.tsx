@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import type { TranscriptItem } from '@claude-worker/react'
-import { ChevronDown, Wrench } from 'lucide-react'
+import { ChevronDown, Clock, Wrench } from 'lucide-react'
 import { Badge } from '../ui/Badge.tsx'
 import { CodeBlock } from '../ui/CodeBlock.tsx'
 import { Spinner } from '../ui/Spinner.tsx'
@@ -16,11 +16,23 @@ export interface ToolCallCardProps {
   className?: string
 }
 
+/** Badge per execution state. `pending`/`deferred` mean the work is happening
+ * somewhere else (this tab's sandbox, a queue) — distinct from the model still
+ * running the call itself. */
+const STATE_BADGE = {
+  running: { label: 'Running', variant: 'info', busy: true },
+  pending: { label: 'Executing', variant: 'info', busy: true },
+  deferred: { label: 'Deferred', variant: 'accent', busy: false },
+  settled: { label: 'Done', variant: 'success', busy: false },
+  failed: { label: 'Error', variant: 'danger', busy: false },
+} as const
+
 export function ToolCallCard({ item, className }: ToolCallCardProps) {
   const [open, setOpen] = useState(false)
   const [fullResult, setFullResult] = useState(false)
-  const running = item.result === undefined
-  const isError = item.result?.isError === true
+  const status = item.status ?? (item.result === undefined ? 'running' : 'settled')
+  const badge = STATE_BADGE[status]
+  const isError = status === 'failed' || item.result?.isError === true
 
   const resultText = item.result?.text ?? ''
   const truncated = !fullResult && resultText.length > RESULT_PREVIEW_CHARS
@@ -29,7 +41,7 @@ export function ToolCallCard({ item, className }: ToolCallCardProps) {
   return (
     <div
       data-slot='tool-call'
-      data-state={running ? 'running' : isError ? 'error' : 'done'}
+      data-state={status}
       className={cn('w-full overflow-hidden rounded-lg border border-border bg-surface', className)}>
       <button
         type='button'
@@ -43,20 +55,11 @@ export function ToolCallCard({ item, className }: ToolCallCardProps) {
         <span className='min-w-0 flex-1 truncate font-mono text-label text-fg-4'>
           {toolInputPreview(item.input)}
         </span>
-        {running ? (
-          <Badge variant='info' className='shrink-0 gap-1'>
-            <Spinner className='size-3 text-current' />
-            Running
-          </Badge>
-        ) : isError ? (
-          <Badge variant='danger' dot className='shrink-0'>
-            Error
-          </Badge>
-        ) : (
-          <Badge variant='success' dot className='shrink-0'>
-            Done
-          </Badge>
-        )}
+        <Badge variant={badge.variant} dot={!badge.busy} className='shrink-0 gap-1'>
+          {badge.busy ? <Spinner className='size-3 text-current' /> : null}
+          {status === 'deferred' ? <Clock className='size-3 text-current' /> : null}
+          {badge.label}
+        </Badge>
         <ChevronDown
           className={cn('size-3.5 shrink-0 text-fg-4 transition-transform', open && 'rotate-180')}
         />
@@ -64,6 +67,9 @@ export function ToolCallCard({ item, className }: ToolCallCardProps) {
       {open ? (
         <div className='flex flex-col gap-2 border-t border-border p-2.5'>
           <CodeBlock code={JSON.stringify(item.input, null, 2)} label='Parameters' />
+          {item.logs?.length ? (
+            <CodeBlock code={item.logs.join('\n')} label='Logs' />
+          ) : null}
           {item.result !== undefined ? (
             <div>
               <CodeBlock

@@ -5,22 +5,35 @@ import type { Duplex } from 'node:stream'
 import { join, resolve as resolvePath, sep } from 'node:path'
 import { WebSocketServer, type WebSocket } from 'ws'
 import { listSessions as sdkListSessions } from '@anthropic-ai/claude-agent-sdk'
-import type { SessionRunner, SessionRunnerConfig } from '@claude-worker/core'
+import type {
+  Runner,
+  RunnerSnapshot,
+  SessionRunnerConfig,
+  ToolExecutionResult,
+} from '@claude-worker/core'
 import { JobQueue, type QueueAdapter } from '@claude-worker/queue'
 import {
   PROTOCOL_VERSION,
+  PROVIDER_PERMISSION_MODES,
+  supportsPermissionMode,
   type ClientFrame,
   type CreateJobRequest,
   type CreateSessionRequest,
   type JobEvent,
+  type PermissionMode,
   type ProfileConfigSnapshot,
   type ProfileInfo,
   type QueueServerFrame,
   type ResolvePermissionRequest,
   type SdkSessionSummary,
   type ServerFrame,
+  type SubmitExecutionResultRequest,
+  type UpdateProfileRequest,
 } from '@claude-worker/protocol'
 import { SessionRegistry } from './registry.ts'
+import { BridgeHub, type BridgeHubOptions } from './bridge.ts'
+import { MemorySessionStore, SessionParkManager, type SessionStore } from './parking.ts'
+import type { ProfileStore } from './profile-store.ts'
 
 export type SdkSessionLister = (options: {
   dir?: string
@@ -47,7 +60,9 @@ const defaultSdkSessionLister: SdkSessionLister = async (options) => {
  * reject with 401. The host app supplies this — the worker has no auth story of its
  * own. A principal object may carry `allowedProfiles: string[]` to restrict which
  * profiles the caller can create sessions/jobs under (and see in GET /profiles) —
- * without it the caller may use every declared profile.
+ * without it the caller may use every declared profile. It may also carry
+ * `canManageProfiles: true` to allow creating/editing/deleting managed profiles
+ * (requires the `profileStore` option); anything else means no.
  */
 export type Authenticator = (
   req: IncomingMessage,
@@ -70,6 +85,24 @@ export type WorkerServerOptions = {
    * exists. Pass [] to run without profiles (no env pinning at all).
    */
   profiles?: ProfileInfo[]
+  /**
+   * Persistence for dashboard-managed profiles, which mounts the profile
+   * management routes (`POST /profiles`, `PATCH`/`DELETE /profiles/:name`).
+   * Without it the profile set is startup config and the API stays read-only.
+   *
+   * Profiles declared in `profiles` are never stored and never editable over
+   * HTTP — they are code. The two sets are unioned by name, declared winning.
+   * Callers still need `canManageProfiles` on their principal.
+   */
+  profileStore?: ProfileStore
+  /**
+   * Config-dir roots a *managed* Claude profile's `configDir` must resolve inside
+   * (mirrors {@link allowedCwdRoots}). Unset — the default — means the management
+   * routes create provider profiles only: naming a config directory is choosing
+   * which credential store a session runs on, so it stays operator-bounded.
+   * Declared profiles are unaffected.
+   */
+  allowedConfigDirRoots?: string[]
   /** Map/patch the incoming CreateSessionRequest into the runner config (inject queryFn,
    * env, tool policy, per-skill constraints...). Defaults to identity. */
   buildRunnerConfig?: (req: CreateSessionRequest) => SessionRunnerConfig
@@ -101,6 +134,58 @@ export type WorkerServerOptions = {
   /** Enable the job queue (`/jobs` + `/queue` routes). Jobs run as ordinary registry
    * sessions — attachable over the sessions WS — governed by these limits. */
   queue?: QueueServerOptions
+  /** Browser-bridged tool execution: how long a bridged call may go unanswered
+   * before it fails (default 60000), and where terminal results are delivered.
+   * The hub is always available on the returned server as `bridge`. */
+  bridge?: BridgeHubOptions
+  /**
+   * Deferred execution: a session that parks on an execution nothing here is
+   * running has its state persisted and its runner torn down, and comes back when
+   * the result is POSTed to `{basePath}/executions/:executionId/result`.
+   *
+   * On by default with an in-memory store, so a park survives a disconnect but not
+   * a restart; pass a durable `store` to change that (read its doc first — the
+   * record holds the whole transcript).
+   */
+  parking?: {
+    store?: SessionStore
+    /** Grace after the last client detaches before parking. Default 2000. */
+    parkDelayMs?: number
+    /** Park/resume failures — storage or engine-assembly problems, not session errors. */
+    onError?: (error: unknown, context: { sessionId: string; phase: 'park' | 'resume' }) => void
+  }
+  /**
+   * Build a runner for a `provider` profile (the model-agnostic engine).
+   * Required if any such profile is declared — the server refuses to start
+   * otherwise, rather than failing at create time.
+   *
+   * Kept as a host hook so the server package neither imports a model SDK nor
+   * decides how provider credentials are resolved: the factory reads them from
+   * the operator's environment, exactly like the Claude credential chain.
+   *
+   * May be async: assembly that has to await — a per-session MCP connect, a
+   * credential lookup — belongs here, with `AiSdkRunnerConfig.onClose` as the
+   * disposer. A rejection fails the create — the session POST answers 500 with
+   * the message, a job goes straight to `failed`.
+   */
+  createEngineRunner?: (context: EngineRunnerContext) => Runner | Promise<Runner>
+}
+
+export type EngineRunnerContext = {
+  /** The session config, with profile defaults already applied. */
+  config: SessionRunnerConfig
+  /** The profile that selected this engine. */
+  profile: ProfileInfo
+  /** Bridge hub, for handing the runner a browser-backed ToolExecutor
+   * (`bridge.executorFor(sessionId)`). */
+  bridge: BridgeHub
+  /**
+   * Set when rebuilding a session that parked on a deferred execution. Forward it
+   * as `restore` on the engine config (`createEngineSession({ config: { ...config,
+   * restore } })`) — the engine then adopts the session's id, event log, seq
+   * numbering, history, and scratch filesystem instead of starting fresh.
+   */
+  restore?: RunnerSnapshot
 }
 
 export type QueueServerOptions = {
@@ -132,6 +217,13 @@ export type WorkerServer = {
   registry: SessionRegistry
   /** The job queue, when `queue` options were provided. */
   queue?: JobQueue
+  /** Routes tool executions to attached browser clients. `bridge.executorFor(id)`
+   * is the `ToolExecutor` to hand a runner that should execute in the tab. */
+  bridge: BridgeHub
+  /** Parked sessions: the store, the execution index, and the rehydration path.
+   * Deliver a deferred result with `parking.submitResult(...)` in-process, or POST
+   * it to `{basePath}/executions/:executionId/result`. */
+  parking: SessionParkManager
   listen: (port: number, host?: string) => Promise<{ port: number }>
   close: () => Promise<void>
 }
@@ -164,9 +256,13 @@ async function readJsonBody(
  * Curated, view-only snapshot of a profile's config dir for GET /profiles/:name.
  * Best-effort: a missing or unparseable settings.json just omits the settings block.
  * Env var VALUES are never read into the response — names only.
+ *
+ * Provider profiles have no config dir, so the snapshot is empty for them: their
+ * configuration is the `provider` block already on ProfileInfo.
  */
 function readProfileConfig(profile: ProfileInfo): ProfileConfigSnapshot {
   const dir = profile.configDir
+  if (!dir) return { hasUserMemory: false, skills: [], agents: [], commands: [] }
   const listDirs = (path: string): string[] => {
     try {
       return readdirSync(path, { withFileTypes: true })
@@ -220,6 +316,28 @@ function readProfileConfig(profile: ProfileInfo): ProfileConfigSnapshot {
   return snapshot
 }
 
+/** Conservative content types for VFS downloads: text formats the agent actually
+ * produces; anything unrecognized ships as plain text (the VFS is string-backed). */
+const CONTENT_TYPES: Record<string, string> = {
+  json: 'application/json; charset=utf-8',
+  md: 'text/markdown; charset=utf-8',
+  html: 'text/html; charset=utf-8',
+  csv: 'text/csv; charset=utf-8',
+  xml: 'application/xml; charset=utf-8',
+  svg: 'image/svg+xml; charset=utf-8',
+}
+
+function contentTypeFor(filename: string): string {
+  const ext = filename.includes('.') ? filename.split('.').pop()!.toLowerCase() : ''
+  return CONTENT_TYPES[ext] ?? 'text/plain; charset=utf-8'
+}
+
+/** A profile runs the model-agnostic engine rather than Claude Code. `engine` is
+ * optional so profiles written before provider support keep meaning 'claude'. */
+function isProviderProfile(profile: ProfileInfo): boolean {
+  return profile.engine === 'provider'
+}
+
 /** Auto-created profile when none are declared: the operator's own config dir. */
 function detectDefaultProfiles(): ProfileInfo[] {
   const dir = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude')
@@ -249,23 +367,142 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
   // Profiles: declared at startup, or a single 'default' auto-created from the
   // operator's own config dir. Misdeclared dirs fail fast — the CLI would otherwise
   // silently start from an empty config (and a different credential chain).
-  const profiles = options.profiles ?? detectDefaultProfiles()
-  const profileByName = new Map(profiles.map((p) => [p.name, p]))
-  if (profileByName.size !== profiles.length) {
+  const declared = options.profiles ?? detectDefaultProfiles()
+  const declaredByName = new Map(declared.map((p) => [p.name, p]))
+  if (declaredByName.size !== declared.length) {
     throw new Error('createWorkerServer: duplicate profile names in `profiles`')
   }
-  for (const p of options.profiles ?? []) {
-    if (!existsSync(p.configDir)) {
-      throw new Error(
-        `createWorkerServer: profile '${p.name}' configDir does not exist: ${p.configDir}`,
-      )
+
+  /**
+   * Everything wrong with a profile that the server can tell without running it.
+   * Shared by startup (where it throws) and the management routes (where it 400s),
+   * so a profile created over HTTP can never be one startup would have refused.
+   */
+  const validateProfile = (p: ProfileInfo): string | null => {
+    if (isProviderProfile(p)) {
+      // Provider profiles have no config dir; they need an engine factory to
+      // build a runner at all, so refuse up front rather than at create time.
+      if (!p.provider?.id) return `provider profile '${p.name}' is missing provider.id`
+      if (!options.createEngineRunner) {
+        return (
+          `profile '${p.name}' uses engine 'provider' but no ` +
+          '`createEngineRunner` was provided to build one'
+        )
+      }
+    } else if (!p.configDir || !existsSync(p.configDir)) {
+      return `profile '${p.name}' configDir does not exist: ${p.configDir}`
     }
     if (options.disableBypassPermissions && p.defaults?.permissionMode === 'bypassPermissions') {
-      throw new Error(
-        `createWorkerServer: profile '${p.name}' defaults to bypassPermissions but ` +
-          'disableBypassPermissions is set',
+      return `profile '${p.name}' defaults to bypassPermissions but disableBypassPermissions is set`
+    }
+    // A default the profile's own engine can't run is misconfiguration: catch it
+    // here rather than on every create under that profile.
+    const fallbackMode = p.defaults?.permissionMode
+    if (fallbackMode && !supportsPermissionMode(p.engine, fallbackMode)) {
+      return (
+        `profile '${p.name}' defaults to permission mode '${fallbackMode}', which engine ` +
+        `'${p.engine}' does not support (supported: ${PROVIDER_PERMISSION_MODES.join(', ')})`
       )
     }
+    return null
+  }
+
+  for (const p of options.profiles ?? []) {
+    const invalid = validateProfile(p)
+    if (invalid) throw new Error(`createWorkerServer: ${invalid}`)
+  }
+
+  /**
+   * Store-managed profiles, mirrored in memory so every lookup on the request path
+   * stays synchronous. Loaded once at `listen()` and refreshed after each mutation
+   * — single-process, exactly like the bundled queue adapter.
+   */
+  const stored = new Map<string, ProfileInfo>()
+  const refreshStored = async (): Promise<void> => {
+    if (!options.profileStore) return
+    stored.clear()
+    for (const p of await options.profileStore.list()) stored.set(p.name, p)
+  }
+
+  /** Response-only marker so a UI knows which rows it may edit. Declared profiles
+   * are code; only store-backed ones can be changed over the API. */
+  const withManagedFlag = (p: ProfileInfo): ProfileInfo =>
+    declaredByName.has(p.name) ? p : { ...p, managed: true }
+
+  /** Declared profiles first: a name collision means the code wins, and the stored
+   * one is unreachable rather than silently overriding server options. */
+  const allProfiles = (): ProfileInfo[] => [
+    ...declared,
+    ...[...stored.values()].filter((p) => !declaredByName.has(p.name)),
+  ]
+  const profileFor = (name: string): ProfileInfo | undefined =>
+    declaredByName.get(name) ?? stored.get(name)
+
+  type Refusal = { status: number; error: string }
+
+  /** Profile management is doubly opt-in: the operator wires a store, and the host
+   * marks the principal. Neither on its own is enough. */
+  const manageGuard = (auth: { canManageProfiles?: boolean }): Refusal | null => {
+    if (!options.profileStore) {
+      return { status: 404, error: 'profile management is not enabled on this server' }
+    }
+    if (!auth.canManageProfiles) {
+      return { status: 403, error: 'not allowed to manage profiles' }
+    }
+    return null
+  }
+
+  /** Startup-declared profiles are code. Editing one over HTTP would make the
+   * server options lie about what is actually running. */
+  const declaredGuard = (profile: ProfileInfo): Refusal | null =>
+    declaredByName.has(profile.name)
+      ? {
+          status: 403,
+          error:
+            `profile '${profile.name}' is declared in server options and cannot be changed ` +
+            'over the API — edit the `profiles` option instead',
+        }
+      : null
+
+  /**
+   * A managed Claude profile names a config directory, and that directory is a
+   * credential store. Bound it to operator-declared roots; unset roots means the
+   * management routes create provider profiles only.
+   */
+  const configDirGuard = (profile: ProfileInfo): Refusal | null => {
+    if (isProviderProfile(profile)) return null
+    const roots = options.allowedConfigDirRoots
+    if (!roots || roots.length === 0) {
+      return {
+        status: 403,
+        error:
+          'managed Claude profiles are disabled: set `allowedConfigDirRoots` to the ' +
+          'directories they may point at',
+      }
+    }
+    return profile.configDir && cwdAllowed(profile.configDir, roots)
+      ? null
+      : { status: 403, error: 'configDir is outside the allowed roots' }
+  }
+
+  /** Validate, persist, and re-read: shared by create and update so a PATCH can
+   * never leave behind a profile a POST would have refused. */
+  const saveManagedProfile = async (res: ServerResponse, incoming: ProfileInfo): Promise<void> => {
+    // `managed` is server-computed on every response; never persist a client's copy.
+    const { managed: _clientClaim, ...profile } = incoming
+    const refused = configDirGuard(profile)
+    if (refused) {
+      json(res, refused.status, { error: refused.error })
+      return
+    }
+    const invalid = validateProfile(profile)
+    if (invalid) {
+      json(res, 400, { error: invalid })
+      return
+    }
+    await options.profileStore!.save(profile)
+    await refreshStored()
+    json(res, 200, { profile: withManagedFlag(profile) })
   }
 
   /** Enforce the server's bypass policy on a create request. Returns a 403 message
@@ -280,21 +517,106 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
     return null
   }
 
+  /** Reject a permission mode the resolved profile's engine has no meaning for.
+   * The create form already filters what it offers, but the API is the boundary:
+   * a provider session asked for 'plan' should be told so, not silently coerced
+   * into 'default' by whatever assembles its runner. Returns an error message. */
+  const checkPermissionMode = (
+    mode: PermissionMode | undefined,
+    profile: ProfileInfo | undefined,
+  ): string | null => {
+    if (mode === undefined || supportsPermissionMode(profile?.engine, mode)) return null
+    return (
+      `permission mode '${mode}' is not supported by profile '${profile!.name}' ` +
+      `(engine '${profile!.engine}') — supported: ${PROVIDER_PERMISSION_MODES.join(', ')}`
+    )
+  }
+
+  /**
+   * Enforce the provider engine's grant rules on a create request. Two of them:
+   *
+   * - Capabilities narrow, never widen. A request may run with fewer than the
+   *   profile grants; naming one it doesn't is refused rather than quietly
+   *   downgraded, so a caller learns instead of wondering where the tool went.
+   * - MCP servers are the profile's to declare. MCP tools are authoritative —
+   *   server-side, with server credentials, never bridged — so honoring a
+   *   client-supplied server would let a caller point an authoritative tool
+   *   anywhere it liked. The profile names servers; the host holds their configs.
+   */
+  const checkEngineGrants = (
+    req: CreateSessionRequest,
+    profile: ProfileInfo | undefined,
+  ): string | null => {
+    if (!profile || !isProviderProfile(profile)) return null
+    if (req.mcpServers && Object.keys(req.mcpServers).length > 0) {
+      return (
+        `profile '${profile.name}' runs the provider engine, whose MCP servers are declared ` +
+        'on the profile (session.mcpServers) — a session request cannot add its own'
+      )
+    }
+    const granted = profile.session?.capabilities
+    if (!req.capabilities || !granted) return null
+    const ungranted = req.capabilities.filter((c) => !granted.includes(c))
+    if (ungranted.length === 0) return null
+    return (
+      `profile '${profile.name}' does not grant: ${ungranted.join(', ')} ` +
+      `(granted: ${granted.join(', ') || 'none'}) — a request may narrow capabilities, not widen them`
+    )
+  }
+
   /** Profile-aware config hook: fill the profile's defaults into unset request fields,
    * run the host hook, then pin CLAUDE_CONFIG_DIR — the profile wins even when the
    * host hook set its own env. Handed to the queue too, so jobs inherit profiles. */
   const buildRunnerConfig = (req: CreateSessionRequest): SessionRunnerConfig => {
-    const profile = req.profile !== undefined ? profileByName.get(req.profile) : undefined
+    const profile = req.profile !== undefined ? profileFor(req.profile) : undefined
     if (!profile) return hostBuildRunnerConfig(req)
     const config = hostBuildRunnerConfig({
       ...req,
-      model: req.model ?? profile.defaults?.model,
+      model: req.model ?? profile.defaults?.model ?? profile.provider?.model,
       permissionMode: req.permissionMode ?? profile.defaults?.permissionMode,
     })
+    // Provider profiles have no config dir to pin: their credentials come from
+    // the operator's environment through the engine factory.
+    if (isProviderProfile(profile)) return config
     return {
       ...config,
-      env: { ...(config.env ?? process.env), CLAUDE_CONFIG_DIR: profile.configDir },
+      env: { ...(config.env ?? process.env), CLAUDE_CONFIG_DIR: profile.configDir! },
     }
+  }
+
+  /** Build a runner for a session, choosing the engine from its profile. Async
+   * because the engine factory may be: a provider session can need an awaited
+   * assembly step (per-session MCP connect) before it has a runner at all.
+   *
+   * `restore` rebuilds a parked session rather than creating a new one — same id,
+   * same log, mid-task. */
+  const buildRunner = async (
+    config: SessionRunnerConfig,
+    restore?: RunnerSnapshot,
+  ): Promise<Runner> => {
+    const name = config.profile
+    const profile = name !== undefined ? profileFor(name) : undefined
+    if (name !== undefined && !profile) {
+      // Only reachable on a resume: profiles can be deleted between park and
+      // wake-up, and the session cannot be rebuilt without the one it ran on.
+      throw new Error(`unknown profile: ${name}`)
+    }
+    if (profile && isProviderProfile(profile)) {
+      // Guaranteed present: startup refuses provider profiles without a factory.
+      return options.createEngineRunner!({ config, profile, bridge, restore })
+    }
+    if (restore) throw new Error('the Claude engine cannot rebuild a parked session')
+    return new Promise<Runner>((resolve) => resolve(registry.prepare(config)))
+  }
+
+  const createRunner = async (config: SessionRunnerConfig): Promise<Runner> => {
+    const runner = registry.register(await buildRunner(config))
+    // Watchers first, then start: a session must not emit anything before the
+    // things that persist and account for it are listening.
+    parking.remember(runner.id, config)
+    parking.watch(runner)
+    void runner.start()
+    return runner
   }
 
   /** Resolve a request's profile: required when several are declared, implicit with
@@ -307,6 +629,7 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
     if (name !== undefined && typeof name !== 'string') {
       return { ok: false, status: 400, error: 'profile must be a string' }
     }
+    const profiles = allProfiles()
     if (profiles.length === 0) {
       return name !== undefined
         ? { ok: false, status: 400, error: 'no profiles are configured on this server' }
@@ -317,7 +640,7 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
       const available = profiles.map((p) => p.name).join(', ')
       return { ok: false, status: 400, error: `profile is required (available: ${available})` }
     }
-    const profile = profileByName.get(effective)
+    const profile = profileFor(effective)
     if (!profile) return { ok: false, status: 400, error: `unknown profile: ${effective}` }
     if (allowedProfiles && !allowedProfiles.includes(profile.name)) {
       return { ok: false, status: 403, error: `profile not allowed: ${profile.name}` }
@@ -326,6 +649,29 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
   }
 
   const registry = new SessionRegistry()
+  const bridge = new BridgeHub({
+    ...options.bridge,
+    onResult: (sessionId, executionId, result) => {
+      // A runner that executes out-of-band (the model-agnostic engine bridging
+      // to a browser tab) gets the result fed straight back into its loop —
+      // operators don't wire this themselves. The host callback still fires,
+      // for observability.
+      registry.get(sessionId)?.settleExecution?.(executionId, result)
+      options.bridge?.onResult?.(sessionId, executionId, result)
+    },
+  })
+  const parking = new SessionParkManager({
+    registry,
+    store: options.parking?.store ?? new MemorySessionStore(),
+    parkDelayMs: options.parking?.parkDelayMs,
+    onError: options.parking?.onError,
+    rebuild: (record) => buildRunner(record.config, record.snapshot),
+    attachedCount: (sessionId) => bridge.attachedCount(sessionId),
+    // Accounting is the queue's: it frees the run's slot and stops its clock, and
+    // refuses the park outright when the run is already finalizing.
+    onParking: (sessionId, executionId) => queue?.onSessionParking(sessionId, executionId) ?? true,
+    onResumed: (sessionId, runner) => queue?.onSessionResumed(sessionId, runner),
+  })
   const wss = new WebSocketServer({ noServer: true })
   /** Profiles (by name; '' = none) whose oauth notice has been logged. */
   const subscriptionNoticeShown = new Set<string>()
@@ -360,19 +706,23 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
           }
         },
         // Job sessions are ordinary registry sessions (attachable/watchable) and go
-        // through the same config hook and auth-provenance watcher as client sessions.
-        createRunner: (config) => {
-          const runner = registry.create(config)
+        // through the same config hook, engine selection, and auth-provenance
+        // watcher as client sessions.
+        createRunner: async (config) => {
+          const runner = await createRunner(config)
           watchAuthSource(runner)
           return runner
         },
         buildRunnerConfig,
+        // A run that ends while parked (canceled, killed) leaves a snapshot behind
+        // that nothing will ever wake.
+        discardSession: (sessionId) => parking.discard(sessionId),
       })
     : undefined
 
   // Watch each session's init handshake for its auth provenance ('oauth' = claude.ai
   // subscription). The listener is a no-op after the first init; not worth unsubscribing.
-  const watchAuthSource = (runner: SessionRunner): void => {
+  const watchAuthSource = (runner: Runner): void => {
     let seen = false
     runner.subscribe((event) => {
       if (seen || event.type !== 'system_init') return
@@ -402,7 +752,7 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
     })
   }
 
-  type AuthContext = { ok: boolean; allowedProfiles?: string[] }
+  type AuthContext = { ok: boolean; allowedProfiles?: string[]; canManageProfiles?: boolean }
   const authenticate = async (req: IncomingMessage): Promise<AuthContext> => {
     if (!options.authenticate) return { ok: true }
     const principal = await options.authenticate(req)
@@ -414,13 +764,17 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
         Array.isArray(allowed) && allowed.every((p) => typeof p === 'string')
           ? (allowed as string[])
           : undefined,
+      // Opt-in, and only ever true when the host says so: an unauthenticated dev
+      // server (no `authenticate`) returns early above and manages nothing.
+      canManageProfiles:
+        (principal as { canManageProfiles?: unknown }).canManageProfiles === true,
     }
   }
 
-  // Route pattern: {basePath}/sessions[/:id[/ws | /permissions/:requestId]]
+  // Route pattern: {basePath}/sessions[/:id[/ws | /permissions/:requestId | /files[/<path>]]]
   const parseRoute = (
     url: string,
-  ): { id?: string; ws?: boolean; permissionId?: string } | null => {
+  ): { id?: string; ws?: boolean; permissionId?: string; files?: boolean; filePath?: string } | null => {
     const pathname = new URL(url, 'http://internal').pathname
     if (!pathname.startsWith(basePath + '/sessions')) return null
     const rest = pathname.slice((basePath + '/sessions').length)
@@ -432,6 +786,16 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
     }
     if (parts.length === 3 && parts[1] === 'permissions') {
       return { id: decodeURIComponent(parts[0]!), permissionId: decodeURIComponent(parts[2]!) }
+    }
+    if (parts.length >= 2 && parts[1] === 'files') {
+      // The remainder is a VFS path — slashes are its separators, so segments
+      // are decoded individually and rejoined.
+      const filePath = parts.slice(2).map(decodeURIComponent).join('/')
+      return {
+        id: decodeURIComponent(parts[0]!),
+        files: true,
+        filePath: filePath === '' ? undefined : '/' + filePath,
+      }
     }
     return null
   }
@@ -515,6 +879,13 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
           json(res, resolved.status, { error: resolved.error })
           return
         }
+        const badRequest =
+          checkPermissionMode(body.session.permissionMode, resolved.profile) ??
+          checkEngineGrants(body.session, resolved.profile)
+        if (badRequest) {
+          json(res, 400, { error: badRequest })
+          return
+        }
         // Normalize to the resolved name so an implicit single profile still lands
         // on JobInfo.profile and reaches the runner config at claim time.
         body.session.profile = resolved.profile?.name
@@ -548,6 +919,71 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
     json(res, 405, { error: 'method not allowed' })
   }
 
+  /**
+   * `POST {basePath}/executions/:executionId/result` — a deferred executor
+   * delivering its outcome. Wakes the parked session, applies the result to its
+   * agent loop, and lets the run continue.
+   *
+   * Scoped like every other session route: a principal restricted to certain
+   * profiles cannot settle an execution belonging to a session outside them —
+   * a result is trusted tool input, and injecting one into another tenant's loop
+   * would be a way to steer it.
+   */
+  const handleExecutionResult = async (
+    req: IncomingMessage,
+    res: ServerResponse,
+    pathname: string,
+    auth: AuthContext,
+  ): Promise<void> => {
+    const rest = pathname.slice((basePath + '/executions/').length).split('/')
+    if (rest.length !== 2 || rest[1] !== 'result' || !rest[0]) {
+      json(res, 404, { error: 'not found' })
+      return
+    }
+    if (req.method !== 'POST') {
+      json(res, 405, { error: 'method not allowed' })
+      return
+    }
+    const executionId = decodeURIComponent(rest[0])
+    const body = (await readJsonBody(req, maxBodyBytes)) as SubmitExecutionResultRequest
+    let result: ToolExecutionResult
+    if (body?.status === 'ok') {
+      if (!body.output || typeof body.output !== 'object') {
+        json(res, 400, { error: "output is required for status 'ok'" })
+        return
+      }
+      result = { status: 'ok', output: body.output.value, logs: body.logs }
+    } else if (body?.status === 'failed') {
+      if (typeof body.reason !== 'string' || typeof body.error !== 'string') {
+        json(res, 400, { error: "reason and error are required for status 'failed'" })
+        return
+      }
+      result = { status: 'failed', reason: body.reason, error: body.error, logs: body.logs }
+    } else {
+      json(res, 400, { error: "status must be 'ok' or 'failed'" })
+      return
+    }
+    if (auth.allowedProfiles) {
+      const owner = parking.sessionFor(executionId)
+      const profile =
+        owner === undefined
+          ? undefined
+          : (registry.get(owner)?.info().profile ?? (await parking.get(owner))?.profile)
+      // Indistinguishable from an unknown id on purpose: whether an execution
+      // exists elsewhere is not this caller's business.
+      if (owner === undefined || (profile !== undefined && !auth.allowedProfiles.includes(profile))) {
+        json(res, 404, { error: 'execution not found' })
+        return
+      }
+    }
+    const applied = await parking.submitResult(executionId, result)
+    if (!applied) {
+      json(res, 404, { error: 'execution not found (unknown id, or its session has ended)' })
+      return
+    }
+    json(res, 200, applied)
+  }
+
   const handleRequest = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const pathname = new URL(req.url ?? '/', 'http://internal').pathname
     if (
@@ -569,20 +1005,41 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
         json(res, 401, { error: 'unauthorized' })
         return
       }
-      if (req.method !== 'GET') {
+      const rest = pathname.slice((basePath + '/profiles').length).replace(/^\//, '')
+      if (rest === '') {
+        if (req.method === 'GET') {
+          const visible = auth.allowedProfiles
+            ? allProfiles().filter((p) => auth.allowedProfiles!.includes(p.name))
+            : allProfiles()
+          json(res, 200, {
+            profiles: visible.map(withManagedFlag),
+            canManage: manageGuard(auth) === null,
+          })
+          return
+        }
+        if (req.method === 'POST') {
+          const refused = manageGuard(auth)
+          if (refused) {
+            json(res, refused.status, { error: refused.error })
+            return
+          }
+          const body = (await readJsonBody(req, maxBodyBytes)) as ProfileInfo
+          if (!body.name || typeof body.name !== 'string') {
+            json(res, 400, { error: 'name is required' })
+            return
+          }
+          if (profileFor(body.name)) {
+            json(res, 409, { error: `profile already exists: ${body.name}` })
+            return
+          }
+          await saveManagedProfile(res, body)
+          return
+        }
         json(res, 405, { error: 'method not allowed' })
         return
       }
-      const rest = pathname.slice((basePath + '/profiles').length).replace(/^\//, '')
-      if (rest === '') {
-        const visible = auth.allowedProfiles
-          ? profiles.filter((p) => auth.allowedProfiles!.includes(p.name))
-          : profiles
-        json(res, 200, { profiles: visible })
-        return
-      }
       const name = decodeURIComponent(rest)
-      const profile = name.includes('/') ? undefined : profileByName.get(name)
+      const profile = name.includes('/') ? undefined : profileFor(name)
       if (!profile) {
         json(res, 404, { error: 'profile not found' })
         return
@@ -591,7 +1048,38 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
         json(res, 403, { error: `profile not allowed: ${profile.name}` })
         return
       }
-      json(res, 200, { profile, config: readProfileConfig(profile) })
+      if (req.method === 'GET') {
+        json(res, 200, { profile: withManagedFlag(profile), config: readProfileConfig(profile) })
+        return
+      }
+      if (req.method === 'PATCH' || req.method === 'DELETE') {
+        const refused = manageGuard(auth) ?? declaredGuard(profile)
+        if (refused) {
+          json(res, refused.status, { error: refused.error })
+          return
+        }
+        if (req.method === 'DELETE') {
+          await options.profileStore!.delete(profile.name)
+          await refreshStored()
+          res.writeHead(204).end()
+          return
+        }
+        const patch = (await readJsonBody(req, maxBodyBytes)) as UpdateProfileRequest
+        // `name` is the route, not the body — a rename would orphan every session
+        // and job already pinned to the old one.
+        await saveManagedProfile(res, { ...profile, ...patch, name: profile.name })
+        return
+      }
+      json(res, 405, { error: 'method not allowed' })
+      return
+    }
+    if (pathname.startsWith(basePath + '/executions/')) {
+      const auth = await authenticate(req)
+      if (!auth.ok) {
+        json(res, 401, { error: 'unauthorized' })
+        return
+      }
+      await handleExecutionResult(req, res, pathname, auth)
       return
     }
     if (pathname === basePath + '/sdk-sessions') {
@@ -615,7 +1103,9 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
 
     if (!route.id) {
       if (req.method === 'GET') {
-        json(res, 200, { sessions: registry.list() })
+        // Parked sessions are live sessions that happen to have no runner right
+        // now — leaving them out would read as "gone".
+        json(res, 200, { sessions: [...registry.list(), ...(await parking.listInfo())] })
         return
       }
       if (req.method === 'POST') {
@@ -638,9 +1128,16 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
           json(res, resolved.status, { error: resolved.error })
           return
         }
+        const badRequest =
+          checkPermissionMode(body.permissionMode, resolved.profile) ??
+          checkEngineGrants(body, resolved.profile)
+        if (badRequest) {
+          json(res, 400, { error: badRequest })
+          return
+        }
         // Resolved name (even when implicit) so SessionInfo.profile is always set.
         body.profile = resolved.profile?.name
-        const runner = registry.create(buildRunnerConfig(body))
+        const runner = await createRunner(buildRunnerConfig(body))
         watchAuthSource(runner)
         json(res, 201, { session: runner.info() })
         return
@@ -650,8 +1147,49 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
     }
 
     const runner = registry.get(route.id)
-    if (!runner) {
+    // A parked session has no runner but is very much alive: it reads, lists, and
+    // serves its files from the snapshot, and only waking it needs a rebuild.
+    const parked = runner ? null : await parking.get(route.id)
+    if (!runner && !parked) {
       json(res, 404, { error: 'session not found' })
+      return
+    }
+    if (route.files) {
+      // Deliverables live in the session's in-memory VFS — downloadable while
+      // the session lives (durability is a persistence-tier concern, not ours).
+      if (req.method !== 'GET') {
+        json(res, 405, { error: 'method not allowed' })
+        return
+      }
+      const snapshotFiles = parked?.snapshot.vfs
+      const vfs = runner?.vfs ?? (snapshotFiles && {
+        list: () => Object.keys(snapshotFiles).sort(),
+        read: (path: string) => snapshotFiles[path],
+      })
+      if (!vfs) {
+        json(res, 404, { error: 'session has no file store' })
+        return
+      }
+      if (route.filePath === undefined) {
+        const files = vfs.list().map((path) => ({ path, bytes: vfs.read(path)?.length ?? 0 }))
+        json(res, 200, { files })
+        return
+      }
+      const content = vfs.read(route.filePath)
+      if (content === undefined) {
+        json(res, 404, { error: `no such file: ${route.filePath}` })
+        return
+      }
+      const filename = route.filePath.split('/').pop() || 'file'
+      res.writeHead(200, {
+        'content-type': contentTypeFor(filename),
+        'content-length': Buffer.byteLength(content),
+        // RFC 5987 filename* so non-ASCII names survive; plain filename for the rest.
+        'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`,
+        // Agent-authored content must never render on this origin.
+        'x-content-type-options': 'nosniff',
+      })
+      res.end(content)
       return
     }
     if (route.permissionId) {
@@ -666,6 +1204,10 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
         json(res, 400, { error: "behavior must be 'allow' or 'deny'" })
         return
       }
+      if (!runner) {
+        json(res, 409, { error: 'session is parked (it has no pending permission requests)' })
+        return
+      }
       if (!runner.resolvePermission(route.permissionId, body)) {
         json(res, 404, { error: 'permission request not found (already resolved or expired)' })
         return
@@ -674,12 +1216,19 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
       return
     }
     if (req.method === 'GET') {
-      json(res, 200, { session: runner.info() })
+      json(res, 200, { session: runner?.info() ?? parked!.info })
       return
     }
     if (req.method === 'DELETE') {
       registry.remove(route.id)
-      json(res, 200, { session: runner.info() })
+      // Fail anything still bridged: the session is gone, so no answer can land.
+      bridge.remove(route.id)
+      // And drop any parked state, so a late execution result can't wake a session
+      // the client just ended.
+      await parking.discard(route.id)
+      json(res, 200, {
+        session: runner?.info() ?? { ...parked!.info, status: 'closed' as const },
+      })
       return
     }
     json(res, 405, { error: 'method not allowed' })
@@ -729,7 +1278,9 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
         socket.destroy()
         return
       }
-      const runner = registry.get(route.id)
+      // Attaching to a parked session wakes it: the client wants to drive it, and
+      // its whole event log comes back with it, so `afterSeq` still lines up.
+      const runner = await parking.ensureLive(route.id).catch(() => undefined)
       if (!runner) {
         socket.write('HTTP/1.1 404 Not Found\r\n\r\n')
         socket.destroy()
@@ -741,7 +1292,7 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
     })().catch(() => socket.destroy())
   })
 
-  const attachClient = (ws: WebSocket, runner: SessionRunner, req: IncomingMessage): void => {
+  const attachClient = (ws: WebSocket, runner: Runner, req: IncomingMessage): void => {
     const url = new URL(req.url ?? '/', 'http://internal')
     const afterSeq = Number(url.searchParams.get('afterSeq') ?? '0') || 0
 
@@ -756,6 +1307,9 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
       replayingFrom: afterSeq,
     })
     const unsubscribe = runner.subscribe((event) => send({ type: 'event', event }), afterSeq)
+    // Register for bridged tool calls: this client can be asked to execute them
+    // in its own sandbox (see BridgeHub).
+    const detachBridge = bridge.attach(runner.id, send)
 
     ws.on('message', (data: Buffer) => {
       let frame: ClientFrame
@@ -772,10 +1326,16 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
         })
       })
     })
-    ws.on('close', unsubscribe)
+    ws.on('close', () => {
+      unsubscribe()
+      detachBridge()
+      // Nobody watching any more: a session waiting on a deferred execution can
+      // give its runner back (after a grace period, so a reconnect costs nothing).
+      parking.onDetach(runner.id)
+    })
   }
 
-  const handleCommand = async (frame: ClientFrame, runner: SessionRunner): Promise<void> => {
+  const handleCommand = async (frame: ClientFrame, runner: Runner): Promise<void> => {
     switch (frame.type) {
       case 'user_message':
         runner.sendMessage(frame.text)
@@ -806,6 +1366,20 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
       case 'set_model':
         await runner.setModel(frame.model)
         return
+      case 'tool_call_result':
+        // Untrusted client input by contract — fine for the user's own data,
+        // never a source for server-authoritative state. Unknown or already
+        // settled ids are ignored rather than erroring: a late answer racing a
+        // timeout is expected, not a client bug.
+        bridge.resolve(runner.id, frame.executionId, { output: frame.output, logs: frame.logs })
+        return
+      case 'tool_call_error':
+        bridge.resolve(runner.id, frame.executionId, {
+          reason: frame.reason,
+          error: frame.error,
+          logs: frame.logs,
+        })
+        return
       case 'close':
         runner.close('client')
         return
@@ -818,17 +1392,26 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
     server,
     registry,
     queue,
-    listen: (port, host) =>
-      new Promise((resolve, reject) => {
+    bridge,
+    parking,
+    listen: async (port, host) => {
+      // Before the first request: every lookup on the request path reads the
+      // in-memory mirror, so it has to be populated before anything can hit it.
+      await refreshStored()
+      // Re-index and re-arm anything a durable store carried across a restart.
+      await parking.hydrate()
+      return new Promise((resolve, reject) => {
         server.once('error', reject)
         server.listen(port, host, () => {
           const address = server.address()
           resolve({ port: typeof address === 'object' && address ? address.port : port })
         })
-      }),
+      })
+    },
     close: () =>
       new Promise((resolve) => {
         queue?.close()
+        parking.close()
         registry.closeAll()
         for (const ws of queueSockets) ws.close()
         queueSockets.clear()

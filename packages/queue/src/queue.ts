@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import type { SessionRunner, SessionRunnerConfig } from '@claude-worker/core'
+import type { Runner, SessionRunnerConfig } from '@claude-worker/core'
 import type {
   ApiMessage,
   CreateJobRequest,
@@ -14,8 +14,10 @@ import { InMemoryQueueAdapter, type JobRecord, type QueueAdapter } from './adapt
 
 export type JobQueueOptions = {
   /** Turn a session config into a live runner — typically the server registry's create(),
-   * so job sessions are ordinary sessions clients can attach to and watch. */
-  createRunner: (config: SessionRunnerConfig) => SessionRunner
+   * so job sessions are ordinary sessions clients can attach to and watch. May be
+   * async: engines whose assembly awaits (a provider session's MCP connect) resolve
+   * here, and a rejection fails the job like any other start error. */
+  createRunner: (config: SessionRunnerConfig) => Runner | Promise<Runner>
   /** Storage/claiming backend. Defaults to the in-memory adapter (single process). */
   adapter?: QueueAdapter
   /** Concurrent job sessions. Default 1. */
@@ -27,8 +29,13 @@ export type JobQueueOptions = {
   dailyTokenLimit?: number
   /** Wall-clock cap per job run; exceeding it interrupts the run and fails the job.
    * The watchdog for stuck CLIs — without it, a run that never yields a result keeps
-   * its job (and concurrency slot) forever. */
+   * its job (and concurrency slot) forever. Time spent parked on a deferred
+   * execution does not count against it: the run isn't stuck, it's waiting. */
   maxJobDurationMs?: number
+  /** Cap on time parked on a deferred execution, across all parks of one run.
+   * Exceeding it fails the job (the execution's own watchdog, when the backend set
+   * one, usually fires first and lets the agent adapt instead). Unset = unbounded. */
+  maxParkedDurationMs?: number
   /** How long a killed run (token/duration limit) may wind down after interrupt()
    * before the queue force-finalizes it and closes the session. Default 5000. */
   killGraceMs?: number
@@ -38,6 +45,12 @@ export type JobQueueOptions = {
   retention?: { maxAgeMs: number; sweepIntervalMs?: number }
   /** Patch job session configs (inject queryFn, env, tool policy) before they run. */
   buildRunnerConfig?: (req: CreateSessionRequest) => SessionRunnerConfig
+  /**
+   * Drop a parked session's persisted state: the run ended (cancel, kill, retry)
+   * while parked, so nothing will ever rehydrate it. The host that parks sessions
+   * — {@link JobQueue.onSessionParking}'s caller — wires this to its session store.
+   */
+  discardSession?: (sessionId: string) => void | Promise<void>
   /** Webhook transport. Defaults to global fetch. */
   fetchImpl?: typeof fetch
   /** Webhook delivery attempts per event (exponential backoff). Default 3. */
@@ -50,8 +63,13 @@ export type JobQueueOptions = {
 
 type RunningJob = {
   record: JobRecord
-  runner: SessionRunner
+  /** Rebuilt on every resume: a rehydrated session is a NEW runner object under
+   * the same session id, so nothing may hold the old reference. */
+  runner: Runner
   unsubscribe: () => void
+  /** Highest event seq seen. A resumed run re-subscribes from here, so the parked
+   * session's replayed log doesn't re-deliver a turn the queue already acted on. */
+  lastSeq: number
   /** Mid-run token estimate from assistant-message usage (enforcement + progress). */
   estimatedTokens: number
   /** Set when the queue killed the run (limits, cancel) — decides the terminal status. */
@@ -64,6 +82,17 @@ type RunningJob = {
   durationTimer?: ReturnType<typeof setTimeout>
   /** Backstop after a kill: force-finalizes if interrupt() never yields a result. */
   forceTimer?: ReturnType<typeof setTimeout>
+  /** Wall-clock actually spent running (parked stretches excluded), plus when the
+   * current running leg started. Together they bound the duration watchdog across
+   * any number of parks. */
+  runningMs: number
+  legStartedAt: number
+  /** Set while parked: when it parked and what it waits on. */
+  parkedAt?: number
+  parkedExecutionId?: string
+  /** Watchdog on total parked time (maxParkedDurationMs). */
+  parkTimer?: ReturnType<typeof setTimeout>
+  parkedMs: number
 }
 
 const dayKey = (epochMs: number): string => new Date(epochMs).toISOString().slice(0, 10)
@@ -110,6 +139,9 @@ export class JobQueue {
   #options: JobQueueOptions
   #adapter: QueueAdapter
   #running = new Map<string, RunningJob>()
+  /** Runs waiting on a deferred execution: alive, but holding no concurrency slot
+   * and no live runner. Keyed by job id like `#running`. */
+  #parked = new Map<string, RunningJob>()
   #pumping = false
   #closed = false
   #offWork: (() => void) | undefined
@@ -172,11 +204,121 @@ export class JobQueue {
     return (await this.#adapter.list()).map((j) => j.info)
   }
 
-  /** Cancel a queued or running job. Returns the job, or null if unknown. */
+  /**
+   * A run's session is about to be parked on a deferred execution: the host has
+   * snapshotted it and is tearing the live runner down. The queue drops its
+   * subscription to the doomed runner, frees the concurrency slot, and stops the
+   * duration clock.
+   *
+   * Returns false when the queue refuses the park — the run is already finalizing
+   * or has been killed, so the host must leave the session alone. A session that
+   * belongs to no job accepts trivially (there is nothing to account for).
+   */
+  onSessionParking(sessionId: string, executionId: string): boolean {
+    const job = this.#bySession(this.#running, sessionId)
+    if (!job) return true
+    if (job.finalized || job.killReason) return false
+    const now = Date.now()
+    job.unsubscribe()
+    job.runningMs += now - job.legStartedAt
+    clearTimeout(job.durationTimer)
+    job.durationTimer = undefined
+    job.parkedAt = now
+    job.parkedExecutionId = executionId
+    this.#running.delete(job.record.info.id)
+    this.#parked.set(job.record.info.id, job)
+    const parkedLimit = this.#options.maxParkedDurationMs
+    if (parkedLimit !== undefined) {
+      job.parkTimer = setTimeout(
+        () => this.#kill(job, `job exceeded max parked duration (${parkedLimit}ms)`),
+        Math.max(0, parkedLimit - job.parkedMs),
+      )
+      job.parkTimer.unref?.()
+    }
+    void this.#recordPark(job, executionId)
+    return true
+  }
+
+  async #recordPark(job: RunningJob, executionId: string): Promise<void> {
+    const updated = await this.#adapter.update(job.record.info.id, {
+      status: 'parked',
+      parkedAt: job.parkedAt,
+      parkedExecutionId: executionId,
+    })
+    if (updated) job.record = updated
+    this.#emit(
+      job.record,
+      { type: 'job_parked', job: job.record.info, executionId, ts: Date.now() },
+      job,
+    )
+    // The slot is free now — let a queued job take it.
+    void this.#pump()
+  }
+
+  /**
+   * The parked session was rehydrated (same session id, new runner object) because
+   * its execution's result arrived. Re-subscribe and restart the clock with the
+   * budget the run had left.
+   *
+   * A resume takes its slot back immediately, so a burst of resumes can transiently
+   * exceed `maxConcurrency` — the alternative would be holding a result the agent
+   * loop has already been handed.
+   */
+  onSessionResumed(sessionId: string, runner: Runner): void {
+    const job = this.#bySession(this.#parked, sessionId)
+    if (!job || job.finalized) return
+    const now = Date.now()
+    const executionId = job.parkedExecutionId ?? ''
+    clearTimeout(job.parkTimer)
+    job.parkTimer = undefined
+    job.parkedMs += now - (job.parkedAt ?? now)
+    job.parkedAt = undefined
+    job.parkedExecutionId = undefined
+    job.legStartedAt = now
+    job.runner = runner
+    this.#parked.delete(job.record.info.id)
+    this.#running.set(job.record.info.id, job)
+    const durationLimit = this.#effectiveDurationLimit(job.record.request)
+    if (durationLimit !== undefined) {
+      job.durationTimer = setTimeout(
+        () => this.#kill(job, `job exceeded max duration (${durationLimit}ms)`),
+        Math.max(0, durationLimit - job.runningMs),
+      )
+      job.durationTimer.unref?.()
+    }
+    // From lastSeq, not 0: the rehydrated runner replays the whole persisted log,
+    // and re-handling those events would double-count tokens and could re-finalize
+    // the job on an old turn_result.
+    job.unsubscribe = runner.subscribe((event) => void this.#handleEvent(job, event), job.lastSeq)
+    void this.#recordResume(job, executionId)
+  }
+
+  async #recordResume(job: RunningJob, executionId: string): Promise<void> {
+    const updated = await this.#adapter.update(job.record.info.id, {
+      status: 'running',
+      parkedAt: undefined,
+      parkedExecutionId: undefined,
+    })
+    if (updated) job.record = updated
+    this.#emit(
+      job.record,
+      { type: 'job_resumed', job: job.record.info, executionId, ts: Date.now() },
+      job,
+    )
+  }
+
+  #bySession(jobs: Map<string, RunningJob>, sessionId: string): RunningJob | undefined {
+    for (const job of jobs.values()) {
+      if (job.record.info.sessionId === sessionId) return job
+    }
+    return undefined
+  }
+
+  /** Cancel a queued, running, or parked job. Returns the job, or null if unknown. */
   async cancel(id: string): Promise<JobInfo | null> {
     const record = await this.#adapter.get(id)
     if (!record) return null
-    const running = this.#running.get(id)
+    const running = this.#running.get(id) ?? this.#parked.get(id)
     if (running) {
       running.canceled = true
       running.killReason = 'canceled'
@@ -204,6 +346,7 @@ export class JobQueue {
     return {
       maxConcurrency: this.#options.maxConcurrency ?? 1,
       running: this.#running.size,
+      parked: this.#parked.size,
       queued: jobs.filter((j) => j.info.status === 'queued').length,
       sessionTokenLimit: this.#options.sessionTokenLimit,
       dailyTokenLimit,
@@ -252,9 +395,9 @@ export class JobQueue {
   async #start(record: JobRecord): Promise<void> {
     const id = record.info.id
     const build = this.#options.buildRunnerConfig ?? ((req: CreateSessionRequest) => req)
-    let runner: SessionRunner
+    let runner: Runner
     try {
-      runner = this.#options.createRunner(build(record.request.session))
+      runner = await this.#options.createRunner(build(record.request.session))
     } catch (error) {
       const failed = await this.#adapter.update(id, {
         status: 'failed',
@@ -268,10 +411,14 @@ export class JobQueue {
       record,
       runner,
       unsubscribe: () => {},
+      lastSeq: 0,
       estimatedTokens: 0,
       canceled: false,
       finalized: false,
       deliveries: Promise.resolve(),
+      runningMs: 0,
+      legStartedAt: Date.now(),
+      parkedMs: 0,
     }
     this.#running.set(id, job)
     const updated = await this.#adapter.update(id, {
@@ -296,6 +443,16 @@ export class JobQueue {
   #kill(job: RunningJob, reason: string): void {
     if (job.finalized || job.killReason) return
     job.killReason = reason
+    if (job.parkedAt !== undefined) {
+      // Parked: there is no live runner to interrupt and no result coming, so the
+      // grace period would just be dead time.
+      void this.#finalize(job, {
+        usage: { tokens: job.estimatedTokens, totalCostUsd: 0, numTurns: 0 },
+        status: job.canceled ? 'canceled' : 'failed',
+        error: reason,
+      })
+      return
+    }
     void job.runner.interrupt().catch(() => {})
     job.forceTimer = setTimeout(() => {
       void this.#finalize(job, {
@@ -309,6 +466,7 @@ export class JobQueue {
 
   async #handleEvent(job: RunningJob, event: SessionEvent): Promise<void> {
     if (job.finalized) return
+    job.lastSeq = Math.max(job.lastSeq, event.seq)
     switch (event.type) {
       case 'system_init':
         await this.#adapter.update(job.record.info.id, { sdkSessionId: event.sdkSessionId })
@@ -403,8 +561,21 @@ export class JobQueue {
     job.unsubscribe()
     clearTimeout(job.durationTimer)
     clearTimeout(job.forceTimer)
+    clearTimeout(job.parkTimer)
     this.#running.delete(job.record.info.id)
+    const wasParked = this.#parked.delete(job.record.info.id)
     job.runner.close('server')
+    if (wasParked && job.record.info.sessionId) {
+      // The live runner is already gone; what survives the run is the persisted
+      // snapshot, and nothing will ever rehydrate it now.
+      try {
+        void Promise.resolve(this.#options.discardSession?.(job.record.info.sessionId)).catch(
+          () => {},
+        )
+      } catch {
+        // discard failures must not break finalization
+      }
+    }
     const attemptUsage = patch.usage ?? { tokens: 0, totalCostUsd: 0, numTurns: 0 }
     if (attemptUsage.tokens > 0) {
       await this.#adapter.addDailyTokens(dayKey(Date.now()), attemptUsage.tokens)

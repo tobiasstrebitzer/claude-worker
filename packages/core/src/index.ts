@@ -1,10 +1,44 @@
 export { SessionRunner } from './runner.ts'
+export { AiSdkRunner } from './ai-sdk-runner.ts'
 export type {
-  HistoryFn,
+  AiSdkRunnerConfig,
+  AiSdkSessionState,
+  PendingToolCall,
+  ToolCallOutput,
+} from './ai-sdk-runner.ts'
+export type { HistoryFn, QueryFn, SessionRunnerConfig } from './runner.ts'
+export type {
+  ParkedExecution,
   PermissionDecision,
-  QueryFn,
+  Runner,
+  RunnerSnapshot,
   SessionEventListener,
-  SessionRunnerConfig,
-} from './runner.ts'
+} from './runner-interface.ts'
+export type {
+  ToolExecutionCall,
+  ToolExecutionDispatch,
+  ToolExecutionResult,
+  ToolExecutor,
+} from './tool-executor.ts'
+export { QuickJsExecutor, isHostAllowed } from './quickjs-executor.ts'
+export type { HostFetch, QuickJsExecutorOptions } from './quickjs-executor.ts'
+export { BrowserBridgeExecutor, toExecutionResult } from './browser-bridge-executor.ts'
+export type { BridgeAnswer, BrowserBridgeExecutorOptions } from './browser-bridge-executor.ts'
+export { DeferredExecutor } from './deferred-executor.ts'
+export type { DeferredDispatch, DeferredExecutorOptions } from './deferred-executor.ts'
+export { connectMcpTools, createEngineSession } from './engine.ts'
+export type { EngineSessionOptions, McpConnection } from './engine.ts'
+export { createToolContext, withMcpTools } from './tools.ts'
+export type { ToolContext, ToolContextOptions, ToolDefinition, ToolTrust } from './tools.ts'
+export { createWebFetch, htmlToMarkdown, isPrivateAddress } from './web-fetch.ts'
+export type { WebFetchDigest, WebFetchFn, WebFetchOptions, WebFetchResult } from './web-fetch.ts'
+export { PendingRequestRegistry } from './pending-registry.ts'
+export type {
+  PendingEntry,
+  PendingKind,
+  PendingOutcome,
+  RegisterOptions,
+  SettledBy,
+} from './pending-registry.ts'
 export { InputQueue } from './input-queue.ts'
 export { normalizeSdkMessage, toApiMessage } from './normalize.ts'

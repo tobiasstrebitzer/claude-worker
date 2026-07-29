@@ -259,6 +259,22 @@ describe('transcript reducer', () => {
     expect(state.items.map((i) => i.kind)).toEqual(['user', 'assistant_text'])
   })
 
+  it('renders a delivered file as a download card item', () => {
+    seq = 0
+    const state = run(initialTranscriptState, [
+      { type: 'file_delivered', path: '/SUMMARY.md', bytes: 42, description: 'the summary' },
+    ])
+    expect(state.items).toEqual([
+      {
+        kind: 'file_delivered',
+        id: 'file-1',
+        path: '/SUMMARY.md',
+        bytes: 42,
+        description: 'the summary',
+      },
+    ])
+  })
+
   it('renders local-command output as a notice, not a user bubble', () => {
     seq = 0
     const state = run(initialTranscriptState, [
@@ -357,6 +373,7 @@ describe('transcript reducer', () => {
       id: 'srv-1',
       status: 'idle',
       cwd: '/tmp/p',
+      engine: 'provider',
       model: 'sonnet',
       permissionMode: 'acceptEdits',
       createdAt: 0,
@@ -370,6 +387,9 @@ describe('transcript reducer', () => {
       model: 'sonnet',
       permissionMode: 'acceptEdits',
       cwd: '/tmp/p',
+      // No event carries the engine — the snapshot is its only source, and
+      // surfaces gate CLI-only affordances on it.
+      engine: 'provider',
     })
 
     // after events have arrived, the event stream stays authoritative
@@ -393,5 +413,98 @@ describe('transcript reducer', () => {
     expect(reseeded.status).toBe('running')
     expect(reseeded.model).toBe('claude-sonnet-4-6')
     expect(reseeded.permissionMode).toBe('default')
+  })
+
+  describe('tool-call execution states', () => {
+    const toolUse = (id: string): SessionEventBody => ({
+      type: 'assistant_message',
+      message: { role: 'assistant', content: [{ type: 'tool_use', id, name: 'eval_script', input: { script: '1+1' } }] },
+      parentToolUseId: null,
+      uuid: `a-${id}`,
+    })
+    const call = (state: TranscriptState) => state.items.find((i) => i.kind === 'tool_call')
+
+    it('starts a tool call as running', () => {
+      seq = 0
+      const state = run(initialTranscriptState, [toolUse('t1')])
+      expect(call(state)).toMatchObject({ status: 'running' })
+      expect(call(state)).not.toHaveProperty('result.text')
+    })
+
+    it('moves to pending when dispatched, then settles with the result', () => {
+      seq = 0
+      const dispatched = run(initialTranscriptState, [
+        toolUse('t1'),
+        { type: 'execution_dispatched', executionId: 't1', toolName: 'eval_script', backend: 'browser' },
+      ])
+      expect(call(dispatched)).toMatchObject({ status: 'pending', backend: 'browser', executionId: 't1' })
+
+      const settled = run(dispatched, [
+        { type: 'execution_result', executionId: 't1', output: { type: 'json', value: { n: 2 } }, logs: ['[log] hi'] },
+      ])
+      expect(call(settled)).toMatchObject({
+        status: 'settled',
+        result: { text: '{"n":2}', isError: false },
+        logs: ['[log] hi'],
+      })
+    })
+
+    it('marks a deferred dispatch distinctly from a pending one', () => {
+      seq = 0
+      const state = run(initialTranscriptState, [
+        toolUse('t1'),
+        { type: 'execution_dispatched', executionId: 't1', toolName: 'eval_script', backend: 'remote', deferred: true },
+      ])
+      expect(call(state)).toMatchObject({ status: 'deferred', backend: 'remote' })
+    })
+
+    it('renders an execution failure as a failed call carrying the reason', () => {
+      seq = 0
+      const state = run(initialTranscriptState, [
+        toolUse('t1'),
+        { type: 'execution_dispatched', executionId: 't1', toolName: 'eval_script', backend: 'browser' },
+        { type: 'execution_failed', executionId: 't1', reason: 'timeout', error: 'guest exceeded its deadline' },
+      ])
+      expect(call(state)).toMatchObject({
+        status: 'failed',
+        result: { text: 'timeout: guest exceeded its deadline', isError: true },
+      })
+    })
+
+    it('settles via a tool_result block too (the Claude engine path)', () => {
+      seq = 0
+      const ok = run(initialTranscriptState, [
+        toolUse('t1'),
+        {
+          type: 'user_message',
+          message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'done' }] },
+          parentToolUseId: null,
+          synthetic: true,
+          uuid: 'r1',
+        },
+      ])
+      expect(call(ok)).toMatchObject({ status: 'settled', result: { text: 'done', isError: false } })
+
+      seq = 0
+      const failed = run(initialTranscriptState, [
+        toolUse('t2'),
+        {
+          type: 'user_message',
+          message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't2', content: 'nope', is_error: true }] },
+          parentToolUseId: null,
+          synthetic: true,
+          uuid: 'r2',
+        },
+      ])
+      expect(call(failed)).toMatchObject({ status: 'failed', result: { isError: true } })
+    })
+
+    it('ignores execution events for an unknown id instead of inventing an item', () => {
+      seq = 0
+      const state = run(initialTranscriptState, [
+        { type: 'execution_result', executionId: 'ghost', output: { type: 'text', value: 'x' } },
+      ])
+      expect(state.items).toHaveLength(0)
+    })
   })
 })
