@@ -15,6 +15,8 @@ import type {
   ServerFrame,
   SessionEvent,
   SessionInfo,
+  ToolCallRequestFrame,
+  ToolExecutionOutput,
 } from '@claude-worker/protocol'
 
 export type ClientOptions = {
@@ -47,6 +49,16 @@ export type SessionHandleEvents = {
   protocolError: string
   /** WS connectivity: true on open, false on close. */
   connectionChange: boolean
+  /**
+   * The server is asking this client to execute a tool call in its own sandbox.
+   * Answer with {@link SessionHandle.sendToolCallResult} or
+   * {@link SessionHandle.sendToolCallError}, echoing the same `executionId`.
+   * Ignoring it is safe: the server fails the execution at `expiresAt`.
+   */
+  toolCallRequest: ToolCallRequestFrame
+  /** A bridged call no longer needs an answer (turn interrupted, timed out, or
+   * the session closed) — abandon any work in progress for this executionId. */
+  toolCallCanceled: { executionId: string; reason: string }
 }
 
 type Listener<T> = (payload: T) => void
@@ -116,6 +128,17 @@ export class SessionHandle {
     this.#sendFrame({ type: 'set_model', model })
   }
 
+  /** Answer a bridged tool call (see the `toolCallRequest` event). */
+  sendToolCallResult(executionId: string, output: ToolExecutionOutput, logs?: string[]): void {
+    this.#sendFrame({ type: 'tool_call_result', executionId, output, logs })
+  }
+
+  /** Report that a bridged tool call could not be executed. The failure is fed
+   * to the model as tool output, so the agent can adapt rather than stall. */
+  sendToolCallError(executionId: string, reason: string, error: string, logs?: string[]): void {
+    this.#sendFrame({ type: 'tool_call_error', executionId, reason, error, logs })
+  }
+
   /** Ask the server to terminate the session (the handle disconnects too). */
   closeSession(): void {
     this.#sendFrame({ type: 'close' })
@@ -166,6 +189,10 @@ export class SessionHandle {
         if (frame.event.seq <= this.#lastSeq) return
         this.#lastSeq = frame.event.seq
         this.#emit('event', frame.event)
+      } else if (frame.type === 'tool_call_request') {
+        this.#emit('toolCallRequest', frame)
+      } else if (frame.type === 'tool_call_canceled') {
+        this.#emit('toolCallCanceled', { executionId: frame.executionId, reason: frame.reason })
       } else if (frame.type === 'protocol_error') {
         this.#emit('protocolError', frame.message)
       }
