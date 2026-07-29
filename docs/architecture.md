@@ -1,14 +1,14 @@
 # Architecture
 
-How claude-worker is put together: seven packages, three apps, one dependency rule. Scope
+How claude-worker is put together: eight packages, three apps, one dependency rule. Scope
 guards behind this shape: no serverless hosting, no multi-tenant SaaS, no claude.ai auth. For
 what's deliberately not built yet, see the [roadmap](./roadmap.md).
 
 ## The dependency rule
 
 ```
-              protocol
-             /        \
+              protocol            sandbox
+             /        \          (leaf; either side)
    (server side)    (browser side)
         core           client
          |               |
@@ -30,11 +30,29 @@ boundary: anything a client needs must be expressible as protocol events and com
   shapes, `JobInfo`/queue frames. Dependency-free and browser-safe. Breaking changes bump
   `PROTOCOL_VERSION`. SDK unions the protocol mirrors (e.g. `PermissionMode`) must stay
   assignable both directions: SDK→protocol for events, protocol→SDK for options.
-- **`packages/core`** — `SessionRunner`, the heart of the system. Wraps the Agent SDK's
-  `query()` with: a push-based async input queue (`sendMessage` feeds the SDK's streaming-input
-  iterable), promotion of `canUseTool` callbacks into pending approvals that block the tool
-  until resolved (deny-on-timeout), normalization of every SDKMessage into typed protocol
-  events, and a seq-numbered event log enabling attach/replay. No transport.
+- **`packages/core`** — the engines. `SessionRunner` (Claude) wraps the Agent SDK's `query()`
+  with: a push-based async input queue (`sendMessage` feeds the SDK's streaming-input iterable),
+  promotion of `canUseTool` callbacks into pending approvals that block the tool until resolved
+  (deny-on-timeout), normalization of every SDKMessage into typed protocol events, and a
+  seq-numbered event log enabling attach/replay. No transport. Both engines implement the
+  engine-independent `Runner` interface (`src/runner-interface.ts`) that server and queue type
+  against. `AiSdkRunner` is the model-agnostic engine over the AI SDK's `ToolLoopAgent`: its
+  durable state is a `ModelMessage[]` history, and because that loop *terminates* (never
+  suspends) on a tool without a local `execute`, continuation is message-state replay —
+  `resolveToolCall()` appends the result and re-invokes. Tool execution goes through the
+  `ToolExecutor` seam, whose dispatch either settles inline or returns `pending` keyed by
+  `executionId`, so a deferred or remote backend drops in without touching the runner or the
+  protocol. `QuickJsExecutor` is the in-process backend over `packages/sandbox`.
+- **`packages/sandbox`** — the untrusted-code boundary: a QuickJS-NG WASM guest for
+  LLM-generated scripts, an in-memory `memfs` scratch VFS, and a by-value host bridge (values
+  cross as strings/JSON; a host object is never handed over by reference — the bridge, not the
+  WASM boundary, is where sandboxes like Terrarium/CVE-2026-5752 actually failed). Limits are
+  interpreter-enforced: `setMemoryLimit` for the allocator, an interrupt handler between
+  bytecode ops for the wall-clock deadline (so infinite loops are preempted in-thread, no worker
+  or cross-origin isolation needed). Note the deadline cannot preempt time inside a host
+  function — every granted capability carries its own timeout. The engine variant is injected,
+  so the server (Node asyncify) and a browser tab (singlefile asyncify) share one guest engine.
+  A leaf package like `protocol`: it imports neither core/server nor any model SDK.
 - **`packages/queue`** — `JobQueue` over the runner: one-shot unattended runs with bounded
   concurrency, per-session and daily token budgets, ordered webhook delivery, retries with
   exponential backoff, a wall-clock watchdog (`maxJobDurationMs` + force-close grace), and

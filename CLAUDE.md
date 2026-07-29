@@ -11,8 +11,14 @@ session from a host app. Key docs — read before changing scope or structure:
 
 - `packages/protocol` — wire protocol types (events/commands/REST). Dependency-free,
   browser-safe; everything depends on it, it depends on nothing. Breaking → bump `PROTOCOL_VERSION`.
-- `packages/core` — `SessionRunner` over the SDK's `query()`: input queue, pending approvals
-  (`canUseTool`), SDKMessage→event normalization, seq-numbered event log. No transport.
+- `packages/core` — engines. `SessionRunner` over the SDK's `query()`: input queue, pending
+  approvals (`canUseTool`), SDKMessage→event normalization, seq-numbered event log. No transport.
+  Both engines implement `Runner` (`src/runner-interface.ts`) — the interface server/queue type
+  against. `AiSdkRunner` is the model-agnostic engine (AI SDK v7 `ToolLoopAgent`); tool execution
+  goes through the `ToolExecutor` seam (`QuickJsExecutor` is the in-process backend).
+- `packages/sandbox` — untrusted-code boundary: QuickJS-NG WASM guest + memfs VFS + by-value host
+  bridge, interpreter-enforced memory/time limits. Leaf like `protocol` (no core/server/model-SDK
+  imports); engine variant is injected so server and browser share one guest.
 - `packages/queue` — `JobQueue` + `QueueAdapter` (in-memory bundled; `claimNext` must stay
   atomic and skip future `nextRunAt`). Concurrency, token budgets, webhooks, retries, watchdog,
   retention. Jobs are one-shot: first turn_result completes them and closes the session.
@@ -34,8 +40,9 @@ session from a host app. Key docs — read before changing scope or structure:
   regeneration in `docs/assets/BRAND.md`. The mark is inlined in web's `BrandMark.tsx`,
   docs' `Header.astro`, and both favicons — keep geometry identical to `icon.svg`.
 
-Dependency direction: `protocol ← core ← queue ← server`, `protocol ← client ← react ← ui ← web`.
-The browser side (client/react/ui/apps) must never import core/server or the Agent SDK.
+Dependency direction: `protocol ← core ← queue ← server`, `protocol ← client ← react ← ui ← web`,
+with `sandbox` a leaf usable from either side. The browser side (client/react/ui/apps) must never
+import core/server, the Agent SDK, or any model SDK.
 
 ## Tooling
 
@@ -58,10 +65,11 @@ CLI-control-request changes need a smoke; the fake harness can't validate those 
 - test: `pnpm test`
 - push: yes (github.com/tobiasstrebitzer/claude-worker, branch `master`; repo private pending
   review — re-enable the docs.yml push trigger once Pages is on)
-- version_bump: yes (aligned across all 7 packages; 0.2.0 on npm, tagged)
+- version_bump: yes (aligned across all 8 packages; 0.2.0 on npm, tagged — `sandbox` is new and
+  not yet published)
 - publish: yes — npm `@claude-worker` org via keybridge Touch ID: `npx -y keybridge@latest
-  publish` from each package dir, dependency order (protocol → core/client → queue → react →
-  server → ui). keybridge runs plain `npm publish`, so pin `workspace:*` inter-deps to the
+  publish` from each package dir, dependency order (protocol/sandbox → core/client → queue →
+  react → server → ui). keybridge runs plain `npm publish`, so pin `workspace:*` inter-deps to the
   release version first, publish, then `git checkout` the package.jsons. Run the gatekeeper
   audit before publishing. MIT (LICENSE per package; ui intentionally ships `src/`,
   allowlisted in `.claude/gatekeeper.json`).
@@ -115,3 +123,19 @@ in tampering with the credential chain. Compliance/legal review is in progress �
 - Promptless sessions emit no `system_init` until the first message, but the CLI answers control
   requests immediately — the runner fetches capabilities/context eagerly; `useClaudeSession`
   seeds mode/model/status from the `attached` frame's SessionInfo.
+- AI SDK v7 inverts two conventions this repo had baked in: `result.usage` is **already
+  cumulative** across steps (summing per-step usage on top double-counts — `AiSdkRunner` maps it
+  once per turn), and a tool without a local `execute` **terminates** the loop rather than pausing
+  it. Continuation is therefore message-state replay (persist `responseMessages`, append a
+  `ToolResultPart`, re-invoke), not resuming a suspended loop. Approvals map to v7's separate
+  `toolApproval` mechanism, not to execute-less tools. v7 is ESM-only and needs Node ≥ 22.
+- `PermissionMode`'s vocabulary is Claude Code's; `AiSdkRunner` supports only
+  `default`/`bypassPermissions`/`dontAsk` and throws otherwise (surfacing as `protocol_error`).
+- Sandbox guest limits are interpreter-enforced, but the interrupt deadline **cannot preempt time
+  inside a host function** — give every granted capability its own timeout (see
+  `QuickJsExecutor#fetchText`). Host↔guest values cross **by value only**; never hand the guest a
+  host object by reference (that prototype-chain leak is the CVE-2026-5752 failure shape, covered
+  by a red-team test).
+- A package that imports a workspace sibling needs the vitest workspace-source alias (see
+  `packages/core/vitest.config.ts`) — the `@claude-worker/source` condition alone isn't enough,
+  vite-node externalizes siblings to their unbuilt `build/` entries.
