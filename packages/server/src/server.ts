@@ -252,6 +252,22 @@ function readProfileConfig(profile: ProfileInfo): ProfileConfigSnapshot {
   return snapshot
 }
 
+/** Conservative content types for VFS downloads: text formats the agent actually
+ * produces; anything unrecognized ships as plain text (the VFS is string-backed). */
+const CONTENT_TYPES: Record<string, string> = {
+  json: 'application/json; charset=utf-8',
+  md: 'text/markdown; charset=utf-8',
+  html: 'text/html; charset=utf-8',
+  csv: 'text/csv; charset=utf-8',
+  xml: 'application/xml; charset=utf-8',
+  svg: 'image/svg+xml; charset=utf-8',
+}
+
+function contentTypeFor(filename: string): string {
+  const ext = filename.includes('.') ? filename.split('.').pop()!.toLowerCase() : ''
+  return CONTENT_TYPES[ext] ?? 'text/plain; charset=utf-8'
+}
+
 /** A profile runs the model-agnostic engine rather than Claude Code. `engine` is
  * optional so profiles written before provider support keep meaning 'claude'. */
 function isProviderProfile(profile: ProfileInfo): boolean {
@@ -492,10 +508,10 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
     }
   }
 
-  // Route pattern: {basePath}/sessions[/:id[/ws | /permissions/:requestId]]
+  // Route pattern: {basePath}/sessions[/:id[/ws | /permissions/:requestId | /files[/<path>]]]
   const parseRoute = (
     url: string,
-  ): { id?: string; ws?: boolean; permissionId?: string } | null => {
+  ): { id?: string; ws?: boolean; permissionId?: string; files?: boolean; filePath?: string } | null => {
     const pathname = new URL(url, 'http://internal').pathname
     if (!pathname.startsWith(basePath + '/sessions')) return null
     const rest = pathname.slice((basePath + '/sessions').length)
@@ -507,6 +523,16 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
     }
     if (parts.length === 3 && parts[1] === 'permissions') {
       return { id: decodeURIComponent(parts[0]!), permissionId: decodeURIComponent(parts[2]!) }
+    }
+    if (parts.length >= 2 && parts[1] === 'files') {
+      // The remainder is a VFS path — slashes are its separators, so segments
+      // are decoded individually and rejoined.
+      const filePath = parts.slice(2).map(decodeURIComponent).join('/')
+      return {
+        id: decodeURIComponent(parts[0]!),
+        files: true,
+        filePath: filePath === '' ? undefined : '/' + filePath,
+      }
     }
     return null
   }
@@ -727,6 +753,40 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
     const runner = registry.get(route.id)
     if (!runner) {
       json(res, 404, { error: 'session not found' })
+      return
+    }
+    if (route.files) {
+      // Deliverables live in the session's in-memory VFS — downloadable while
+      // the session lives (durability is a persistence-tier concern, not ours).
+      if (req.method !== 'GET') {
+        json(res, 405, { error: 'method not allowed' })
+        return
+      }
+      const vfs = runner.vfs
+      if (!vfs) {
+        json(res, 404, { error: 'session has no file store' })
+        return
+      }
+      if (route.filePath === undefined) {
+        const files = vfs.list().map((path) => ({ path, bytes: vfs.read(path)?.length ?? 0 }))
+        json(res, 200, { files })
+        return
+      }
+      const content = vfs.read(route.filePath)
+      if (content === undefined) {
+        json(res, 404, { error: `no such file: ${route.filePath}` })
+        return
+      }
+      const filename = route.filePath.split('/').pop() || 'file'
+      res.writeHead(200, {
+        'content-type': contentTypeFor(filename),
+        'content-length': Buffer.byteLength(content),
+        // RFC 5987 filename* so non-ASCII names survive; plain filename for the rest.
+        'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`,
+        // Agent-authored content must never render on this origin.
+        'x-content-type-options': 'nosniff',
+      })
+      res.end(content)
       return
     }
     if (route.permissionId) {

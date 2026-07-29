@@ -23,7 +23,7 @@ import { join } from 'node:path'
 import type { LanguageModel } from 'ai'
 import type { ProfileInfo } from '@claude-worker/protocol'
 import { createVfs } from '@claude-worker/sandbox'
-import { createEngineSession, type ToolExecutor } from '@claude-worker/core'
+import { connectMcpTools, createEngineSession, type ToolExecutor } from '@claude-worker/core'
 import { createWorkerServer } from '@claude-worker/server'
 
 type ProviderSetup = {
@@ -79,6 +79,19 @@ if (profiles.length === 0) {
   process.exit(1)
 }
 
+// Live MCP: one shared connection for the whole process (sessions must NOT close
+// it — it outlives them; it dies with the process). DeepWiki is free/no-auth and
+// answers questions about public GitHub repos. Unreachable = sessions simply
+// don't get the tools; the dev server still starts.
+const mcp = await connectMcpTools(
+  process.env.NO_MCP ? {} : { deepwiki: { type: 'http', url: 'https://mcp.deepwiki.com/mcp' } },
+  {
+    onError: (name, error) =>
+      console.warn(`[provider-example] MCP '${name}' unavailable: ${String(error)}`),
+  },
+)
+const mcpToolNames = Object.keys(mcp.tools)
+
 const { listen } = createWorkerServer({
   allowUnauthenticated: true,
   profiles,
@@ -107,11 +120,21 @@ const { listen } = createWorkerServer({
       resolveModel: (_profile, c) => factory(c.model ?? modelId),
       selectExecutor: () => toBrowser,
       backend: 'browser',
+      // web_fetch with defaults: SSRF-guarded fetch + HTML→markdown, digested by
+      // the session's own model (billed into the turn). deliver_file is granted
+      // by default alongside it.
+      capabilities: { webFetch: {} },
+      mcpTools: mcp.tools,
       instructions:
         'You evaluate sales leads. Use the eval_script tool to compute answers from files in the ' +
         'scratch filesystem — never guess numbers. Inside eval_script the sandbox exposes ' +
         'vfs.read(path), vfs.write(path, text), and vfs.list(dir); the value of the last ' +
-        'expression is returned to you. To persist files for the operator, use the fs_write tool.',
+        'expression is returned to you. Use web_fetch to answer questions about a web page. ' +
+        'To hand a file to the user, write it with fs_write, then call deliver_file — the user ' +
+        'gets a download card.' +
+        (mcpToolNames.length > 0
+          ? ` For questions about public GitHub repositories, use the ${mcpToolNames.join(', ')} tools.`
+          : ''),
       executionLimits: { timeoutMs: 15_000 },
     })
   },
@@ -129,4 +152,9 @@ const missing = Object.entries(PROVIDERS).filter(([, s]) => !process.env[s.env])
 for (const [name, setup] of missing) {
   console.log(`[provider-example] no ${setup.env} — profile '${name}' not offered`)
 }
+console.log(
+  mcpToolNames.length > 0
+    ? `[provider-example] MCP tools: ${mcpToolNames.join(', ')}`
+    : '[provider-example] no MCP tools (DeepWiki unreachable or NO_MCP set)',
+)
 console.log('\n[provider-example] next: `pnpm web`, open http://localhost:5191, and follow examples/README.md')

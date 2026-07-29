@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import {
   ToolLoopAgent,
+  generateText,
   isStepCount,
   type LanguageModel,
   type ModelMessage,
@@ -59,6 +60,9 @@ export type AiSdkRunnerConfig = Omit<CreateSessionRequest, 'cwd'> & {
   executionBackend?: ToolExecutionBackend
   /** Swap models mid-session (`set_model`). Unset = setModel() is rejected. */
   resolveModel?: (modelId: string | undefined) => LanguageModel
+  /** Called once when the session closes — release per-session resources the
+   * host attached (an MCP connection, a watcher). Errors are swallowed. */
+  onClose?: () => void | Promise<void>
 }
 
 /** An external (execute-less) tool call the loop is parked on. */
@@ -72,23 +76,15 @@ export type ToolCallOutput =
   | { type: 'text'; value: string }
   | { type: 'json'; value: unknown }
 
-type AssistantPart = {
-  type: string
-  text?: string
-  toolCallId?: string
-  toolName?: string
-  input?: unknown
-  output?: { type: string; value?: unknown; reason?: string }
-  [key: string]: unknown
-}
-
 /**
  * Model-agnostic runner over the AI SDK v7 ToolLoopAgent. The session's durable
  * state is its ModelMessage history: every turn — including continuation after an
- * externally-executed tool call — is a fresh generate() over that history
- * (message-state replay; the loop cannot be suspended). Emits the same
- * seq-numbered SessionEvent log as SessionRunner; engine-specific CLI telemetry
- * (system_init, capabilities, rate_limit, ...) is simply never emitted.
+ * externally-executed tool call — is a fresh streamed call over that history
+ * (message-state replay; the loop cannot be suspended). Output is emitted as it
+ * happens: `stream_delta` per token (unless includePartialMessages is false) and
+ * assistant/tool messages per step. Emits the same seq-numbered SessionEvent log
+ * as SessionRunner; engine-specific CLI telemetry (system_init, capabilities,
+ * rate_limit, ...) is simply never emitted.
  */
 export class AiSdkRunner implements Runner {
   readonly id: string
@@ -151,6 +147,12 @@ export class AiSdkRunner implements Runner {
     return []
   }
 
+  /** The session's scratch filesystem (see Runner.vfs) — the server's file
+   * routes serve deliverables straight from it. */
+  get vfs(): SandboxVfs | undefined {
+    return this.#config.vfs
+  }
+
   info(): SessionInfo {
     return {
       id: this.id,
@@ -195,19 +197,32 @@ export class AiSdkRunner implements Runner {
    * Idempotent per toolCallId: unknown/already-settled ids return false.
    */
   resolveToolCall(toolCallId: string, output: ToolCallOutput, options?: { isError?: boolean }): boolean {
+    if (!this.#settlePendingCall(toolCallId, output, options?.isError === true)) return false
+    if (this.#pendingToolCalls.size === 0) this.#scheduleTurn()
+    return true
+  }
+
+  /** Record a parked call's outcome into the message history (so it stays
+   * replayable — a dangling tool call without a result is invalid input for
+   * providers) and the event log. Does NOT re-enter the loop. */
+  #settlePendingCall(toolCallId: string, output: ToolCallOutput, isError: boolean): boolean {
     const pending = this.#pendingToolCalls.get(toolCallId)
     if (!pending || this.#closed) return false
     this.#pendingToolCalls.delete(toolCallId)
-    this.#messages.push({
+    // Keep the result adjacent to the assistant message that made the call:
+    // user messages typed while the turn was parked must sort AFTER the tool
+    // results, or providers reject the replayed history (a tool call whose
+    // result is not in the directly following message).
+    let insertAt = this.#messages.length
+    while (insertAt > 0 && this.#messages[insertAt - 1]!.role === 'user') insertAt--
+    this.#messages.splice(insertAt, 0, {
       role: 'tool',
       content: [
         {
           type: 'tool-result',
           toolCallId,
           toolName: pending.toolName,
-          output: (options?.isError
-            ? { type: 'error-text', value: textValue(output) }
-            : output) as never,
+          output: (isError ? { type: 'error-text', value: textValue(output) } : output) as never,
         },
       ],
     })
@@ -220,7 +235,7 @@ export class AiSdkRunner implements Runner {
             type: 'tool_result',
             tool_use_id: toolCallId,
             content: textValue(output),
-            is_error: options?.isError,
+            is_error: isError || undefined,
           },
         ],
       },
@@ -228,7 +243,6 @@ export class AiSdkRunner implements Runner {
       synthetic: true,
       uuid: randomUUID(),
     })
-    if (this.#pendingToolCalls.size === 0) this.#scheduleTurn()
     return true
   }
 
@@ -236,8 +250,61 @@ export class AiSdkRunner implements Runner {
     return false
   }
 
+  /** Emit `file_delivered` — the deliver_file tool's hand-over event (wired by
+   * createEngineSession via ToolContextOptions.onFileDelivered). */
+  emitFileDelivered(file: { path: string; bytes: number; description?: string }): void {
+    if (this.#closed) return
+    this.#emit({ type: 'file_delivered', ...file })
+  }
+
+  /**
+   * One plain generateText over the session's current model, billed into the
+   * running turn's usage accumulator — the web_fetch digest pass uses this so
+   * its tokens are never lost from the turn's accounting.
+   */
+  async generateDigest(prompt: string): Promise<string> {
+    const result = await generateText({
+      model: this.#model,
+      prompt,
+      abortSignal: this.#abort?.signal,
+    })
+    const accum = this.#turnAccum
+    if (accum) {
+      accum.input += result.usage.inputTokens ?? 0
+      accum.output += result.usage.outputTokens ?? 0
+      accum.cacheWrite += result.usage.inputTokenDetails?.cacheWriteTokens ?? 0
+      accum.cacheRead += result.usage.inputTokenDetails?.cacheReadTokens ?? 0
+    }
+    return result.text
+  }
+
   async interrupt(): Promise<void> {
-    this.#abort?.abort()
+    if (this.#abort) {
+      this.#abort.abort()
+    } else if (this.#pendingToolCalls.size > 0) {
+      // A parked turn has no generate() in flight to abort. Fail the parked
+      // calls (recorded as error results so the history stays replayable) and
+      // finish the turn — otherwise a park nobody answers is unrecoverable.
+      const accum = this.#turnAccum ?? { startedAt: Date.now(), input: 0, output: 0, cacheWrite: 0, cacheRead: 0 }
+      // Snapshot first: settling mutates the map we are iterating.
+      for (const call of Array.from(this.#pendingToolCalls.values())) {
+        this.#settlePendingCall(call.toolCallId, { type: 'text', value: 'interrupted' }, true)
+      }
+      this.#dispatched.clear()
+      this.#numTurns += 1
+      this.#emit({
+        type: 'turn_result',
+        subtype: 'error_during_execution',
+        isError: true,
+        durationMs: Date.now() - accum.startedAt,
+        numTurns: this.#numTurns,
+        totalCostUsd: 0,
+        errors: ['interrupted'],
+        usage: turnUsage(accum),
+      })
+      this.#turnAccum = undefined
+      this.#setStatus('idle')
+    }
     await this.#turnChain
   }
 
@@ -271,6 +338,11 @@ export class AiSdkRunner implements Runner {
     this.#dispatched.clear()
     this.#emit({ type: 'session_closed', reason })
     this.#setStatus('closed')
+    try {
+      void Promise.resolve(this.#config.onClose?.()).catch(() => {})
+    } catch {
+      // Disposer errors must not break teardown.
+    }
   }
 
   subscribe(listener: SessionEventListener, afterSeq = 0): () => void {
@@ -369,6 +441,11 @@ export class AiSdkRunner implements Runner {
 
   async #runTurn(): Promise<void> {
     if (this.#closed || this.#pendingToolCalls.size > 0) return
+    // Nothing to respond to: the history already ends with the assistant.
+    // Happens when several triggers queued turns for the same input (a message
+    // typed mid-park + the park resolving) — one turn answers all of it, the
+    // stragglers must not burn a generate() on an already-answered history.
+    if (this.#messages.at(-1)?.role === 'assistant') return
     this.#setStatus('running')
     const agent = new ToolLoopAgent({
       model: this.#model,
@@ -386,24 +463,139 @@ export class AiSdkRunner implements Runner {
       cacheRead: 0,
     })
     try {
-      const result = await agent.generate({
+      // Streamed, not generate(): a multi-step turn must reach the transcript
+      // as it happens — token deltas while text is produced, each step's
+      // messages the moment the step completes — not as one blob at the end.
+      const result = await agent.stream({
         messages: [...this.#messages],
         abortSignal: abort.signal,
       })
-      if (this.#closed) return
-      // v7's result.usage is already cumulative across THIS call's steps — add it
-      // once per leg, never per step.
-      accum.input += result.usage.inputTokens ?? 0
-      accum.output += result.usage.outputTokens ?? 0
-      accum.cacheWrite += result.usage.inputTokenDetails?.cacheWriteTokens ?? 0
-      accum.cacheRead += result.usage.inputTokenDetails?.cacheReadTokens ?? 0
-      this.#messages.push(...(result.responseMessages as ModelMessage[]))
-      for (const message of result.responseMessages) {
-        this.#emitResponseMessage(message as { role: string; content: unknown })
+      const partials = this.#config.includePartialMessages !== false
+      // Completed blocks of the step in progress, flushed as an assistant
+      // message at each tool call (its result may follow immediately and the
+      // transcript needs the call first) and at every step boundary.
+      let blocks: ContentBlock[] = []
+      const textBuf = new Map<string, string>()
+      const reasoningBuf = new Map<string, string>()
+      const flush = (): void => {
+        if (blocks.length === 0) return
+        this.#emit({
+          type: 'assistant_message',
+          message: { role: 'assistant', content: blocks, model: this.#modelId() },
+          parentToolUseId: null,
+          uuid: randomUUID(),
+        })
+        blocks = []
       }
+      const emitToolResult = (toolCallId: string, content: string, isError?: boolean): void => {
+        flush()
+        this.#emit({
+          type: 'user_message',
+          message: {
+            role: 'user',
+            content: [{ type: 'tool_result', tool_use_id: toolCallId, content, is_error: isError }],
+          },
+          parentToolUseId: null,
+          synthetic: true,
+          uuid: randomUUID(),
+        })
+      }
+      let streamError: unknown
+      for await (const part of result.fullStream) {
+        if (this.#closed) break
+        switch (part.type) {
+          case 'text-delta':
+            textBuf.set(part.id, (textBuf.get(part.id) ?? '') + part.text)
+            if (partials) {
+              this.#emit({
+                type: 'stream_delta',
+                event: { type: 'content_block_delta', delta: { type: 'text_delta', text: part.text } },
+                parentToolUseId: null,
+                uuid: randomUUID(),
+              })
+            }
+            break
+          case 'text-end': {
+            const text = textBuf.get(part.id)
+            textBuf.delete(part.id)
+            if (text) blocks.push({ type: 'text', text })
+            break
+          }
+          case 'reasoning-delta':
+            reasoningBuf.set(part.id, (reasoningBuf.get(part.id) ?? '') + part.text)
+            if (partials) {
+              this.#emit({
+                type: 'stream_delta',
+                event: { type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: part.text } },
+                parentToolUseId: null,
+                uuid: randomUUID(),
+              })
+            }
+            break
+          case 'reasoning-end': {
+            const thinking = reasoningBuf.get(part.id)
+            reasoningBuf.delete(part.id)
+            if (thinking) blocks.push({ type: 'thinking', thinking })
+            break
+          }
+          case 'tool-call':
+            blocks.push({
+              type: 'tool_use',
+              id: part.toolCallId,
+              name: part.toolName,
+              input: part.input,
+            })
+            flush()
+            break
+          case 'tool-result':
+            emitToolResult(
+              part.toolCallId,
+              typeof part.output === 'string' ? part.output : JSON.stringify(part.output),
+            )
+            break
+          case 'tool-error':
+            emitToolResult(part.toolCallId, errorText(part.error), true)
+            break
+          case 'finish-step':
+            flush()
+            break
+          case 'error':
+            streamError ??= part.error
+            break
+          default:
+            break
+        }
+      }
+      flush()
+      if (streamError !== undefined) throw streamError
+      if (abort.signal.aborted) throw new Error('interrupted')
+      const [responseMessages, usage, toolCalls, text] = await Promise.all([
+        result.responseMessages,
+        result.totalUsage,
+        result.toolCalls,
+        result.text,
+      ])
+      if (this.#closed) return
+      // v7's totalUsage is already cumulative across THIS call's steps — add it
+      // once per leg, never per step.
+      accum.input += usage.inputTokens ?? 0
+      accum.output += usage.outputTokens ?? 0
+      accum.cacheWrite += usage.inputTokenDetails?.cacheWriteTokens ?? 0
+      accum.cacheRead += usage.inputTokenDetails?.cacheReadTokens ?? 0
+      this.#messages.push(...(responseMessages as ModelMessage[]))
       // Tool calls the SDK did not execute locally (no `execute`) park the loop.
-      const settled = new Set(result.toolResults.map((r) => r.toolCallId))
-      for (const call of result.toolCalls) {
+      // Settled = every call with a tool message in the response — NOT
+      // `result.toolResults`, which omits errored executions (`tool-error`
+      // parts). An errored call was already fed back to the model by the SDK;
+      // parking on it would hang the session forever (nobody owns it).
+      const settled = new Set<string>()
+      for (const message of responseMessages as ModelMessage[]) {
+        if (message.role !== 'tool' || !Array.isArray(message.content)) continue
+        for (const part of message.content) {
+          if (part.type === 'tool-result') settled.add(part.toolCallId)
+        }
+      }
+      for (const call of toolCalls) {
         if (settled.has(call.toolCallId)) continue
         this.#pendingToolCalls.set(call.toolCallId, {
           toolCallId: call.toolCallId,
@@ -417,7 +609,7 @@ export class AiSdkRunner implements Runner {
         this.#dispatchPending()
         return
       }
-      this.#finishTurn(result.text)
+      this.#finishTurn(text)
     } catch (error) {
       if (this.#closed) return
       const message = error instanceof Error ? error.message : String(error)
@@ -461,42 +653,6 @@ export class AiSdkRunner implements Runner {
     })
     this.#turnAccum = undefined
     this.#setStatus('idle')
-  }
-
-  #emitResponseMessage(message: { role: string; content: unknown }): void {
-    if (message.role === 'assistant') {
-      this.#emit({
-        type: 'assistant_message',
-        message: {
-          role: 'assistant',
-          content: assistantContentBlocks(message.content),
-          model: this.#modelId(),
-        },
-        parentToolUseId: null,
-        uuid: randomUUID(),
-      })
-      return
-    }
-    if (message.role === 'tool' && Array.isArray(message.content)) {
-      const blocks: ContentBlock[] = (message.content as AssistantPart[])
-        .filter((part) => part.type === 'tool-result')
-        .map((part) => ({
-          type: 'tool_result',
-          tool_use_id: part.toolCallId ?? '',
-          content: toolResultText(part.output),
-          is_error: part.output?.type.includes('denied') || part.output?.type.includes('error')
-            ? true
-            : undefined,
-        }))
-      if (blocks.length === 0) return
-      this.#emit({
-        type: 'user_message',
-        message: { role: 'user', content: blocks },
-        parentToolUseId: null,
-        synthetic: true,
-        uuid: randomUUID(),
-      })
-    }
   }
 
   #modelId(): string | undefined {
@@ -543,37 +699,10 @@ function turnUsage(accum: { input: number; output: number; cacheWrite: number; c
   }
 }
 
-function assistantContentBlocks(content: unknown): ContentBlock[] {
-  if (typeof content === 'string') return [{ type: 'text', text: content }]
-  if (!Array.isArray(content)) return []
-  const blocks: ContentBlock[] = []
-  for (const part of content as AssistantPart[]) {
-    if (part.type === 'text' && typeof part.text === 'string') {
-      blocks.push({ type: 'text', text: part.text })
-    } else if (part.type === 'reasoning' && typeof part.text === 'string') {
-      blocks.push({ type: 'thinking', thinking: part.text })
-    } else if (part.type === 'tool-call') {
-      blocks.push({
-        type: 'tool_use',
-        id: part.toolCallId ?? '',
-        name: part.toolName ?? '',
-        input: part.input,
-      })
-    } else {
-      blocks.push(part as ContentBlock)
-    }
-  }
-  return blocks
-}
-
-function toolResultText(output: AssistantPart['output']): string {
-  if (!output) return ''
-  if (typeof output.value === 'string') return output.value
-  if (output.value !== undefined) return JSON.stringify(output.value)
-  if (output.reason) return output.reason
-  return ''
-}
-
 function textValue(output: ToolCallOutput): string {
   return output.type === 'text' ? output.value : JSON.stringify(output.value)
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }

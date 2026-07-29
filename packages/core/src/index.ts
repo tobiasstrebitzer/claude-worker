@@ -17,6 +17,8 @@ export { connectMcpTools, createEngineSession } from './engine.ts'
 export type { EngineSessionOptions, McpConnection } from './engine.ts'
 export { createToolContext, withMcpTools } from './tools.ts'
 export type { ToolContext, ToolContextOptions, ToolDefinition, ToolTrust } from './tools.ts'
+export { createWebFetch, htmlToMarkdown, isPrivateAddress } from './web-fetch.ts'
+export type { WebFetchDigest, WebFetchFn, WebFetchOptions, WebFetchResult } from './web-fetch.ts'
 export { PendingRequestRegistry } from './pending-registry.ts'
 export type {
   PendingEntry,

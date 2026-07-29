@@ -66,7 +66,10 @@ export function SessionPanel({ client, sessionId, header, className }: SessionPa
       className={cn('flex h-full min-h-0 flex-col overflow-hidden bg-bg', className)}>
       {header}
       <StatusBar state={state} connected={connected} />
-      <Transcript state={state} />
+      <Transcript
+        state={state}
+        fileUrl={sessionId ? (path) => client.sessionFileUrl(sessionId, path) : undefined}
+      />
       {state.pendingApprovals.length > 0 ? (
         <div className='px-3 pb-2'>
           <div className='mx-auto flex w-full max-w-3xl flex-col gap-2'>

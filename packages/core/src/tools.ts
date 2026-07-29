@@ -2,6 +2,7 @@ import { tool, type Tool, type ToolSet } from 'ai'
 import { z } from 'zod'
 import { createVfs, type SandboxVfs } from '@claude-worker/sandbox'
 import type { ToolExecutionResult, ToolExecutor } from './tool-executor.ts'
+import type { WebFetchFn } from './web-fetch.ts'
 
 /**
  * How much authority a tool carries, which decides where it may run.
@@ -33,6 +34,13 @@ export type ToolContextOptions = {
   search?: (query: string, limit: number) => Promise<Array<{ title: string; url: string; snippet?: string }>>
   /** Document fetcher for `download`. Omitted = the tool is not granted. */
   download?: (url: string) => Promise<{ contentType?: string; text: string }>
+  /** Page digester for `web_fetch` (see {@link createWebFetch}). Omitted = the
+   * tool is not granted. */
+  webFetch?: WebFetchFn
+  /** Notified when the agent hands over a VFS file via `deliver_file`, so the
+   * host can emit the `file_delivered` session event. The tool is only granted
+   * when this is set — a delivery nobody hears is not a delivery. */
+  onFileDelivered?: (file: { path: string; bytes: number; description?: string }) => void
   /** Per-call sandbox limits. */
   limits?: { timeoutMs?: number; memoryLimitBytes?: number }
   /** Notified when a sandboxed execution is dispatched and when it settles, so
@@ -101,6 +109,31 @@ export function createToolContext(options: ToolContextOptions): ToolContext {
     }),
   })
 
+  // --- File hand-over: only when the host listens for deliveries ------------
+  if (options.onFileDelivered) {
+    const onFileDelivered = options.onFileDelivered
+    definitions.push({
+      name: 'deliver_file',
+      trust: 'authoritative',
+      tool: tool({
+        description:
+          'Hand a file from the scratch filesystem over to the user as a deliverable. ' +
+          'Write it with fs_write first, then deliver it.',
+        inputSchema: z.object({
+          path: z.string().describe('Path of an existing file in the scratch filesystem'),
+          description: z.string().optional().describe('What this file is, for the recipient'),
+        }),
+        execute: async ({ path, description }) => {
+          const content = vfs.read(path)
+          if (content === undefined) return { error: `no such file: ${path}` }
+          const file = { path, bytes: content.length, description }
+          onFileDelivered(file)
+          return { delivered: true, ...file }
+        },
+      }),
+    })
+  }
+
   // --- Network capabilities: only when the host supplied a backend ----------
   if (options.search) {
     const search = options.search
@@ -135,6 +168,32 @@ export function createToolContext(options: ToolContextOptions): ToolContext {
             const stored = truncate(text)
             vfs.write(path, stored)
             return { path, bytes: stored.length, contentType }
+          } catch (error) {
+            // A failed fetch is data the agent can react to, not a turn-ending throw.
+            return { error: error instanceof Error ? error.message : String(error) }
+          }
+        },
+      }),
+    })
+  }
+
+  if (options.webFetch) {
+    const webFetch = options.webFetch
+    definitions.push({
+      name: 'web_fetch',
+      trust: 'authoritative',
+      tool: tool({
+        description:
+          'Fetch a web page and process its content against a prompt. Returns the answer ' +
+          '(or the page as markdown). Distinct from download: use web_fetch to answer a ' +
+          'question about a page, download to store raw text for eval_script.',
+        inputSchema: z.object({
+          url: z.string().describe('Absolute http(s) URL'),
+          prompt: z.string().describe('What to extract or answer from the page'),
+        }),
+        execute: async ({ url, prompt }) => {
+          try {
+            return await webFetch(url, prompt)
           } catch (error) {
             // A failed fetch is data the agent can react to, not a turn-ending throw.
             return { error: error instanceof Error ? error.message : String(error) }

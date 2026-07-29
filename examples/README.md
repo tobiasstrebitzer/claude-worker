@@ -71,6 +71,27 @@ Also worth trying:
 - Ask it to `vfs.list('/')` — the scratch VFS is all it can see; no host filesystem, no network.
 - Close the tab mid-execution and re-attach — late results are ignored idempotently.
 
+## 5b. Deliverables, web pages, and MCP
+
+Provider sessions in this example also get `web_fetch`, `deliver_file`, and (when DeepWiki is
+reachable at startup — set `NO_MCP=1` to skip) the `deepwiki__*` MCP tools. Try:
+
+> Now create SUMMARY.md summarizing what you did and deliver it to me.
+
+The `deliver_file` call renders a **download card** in the transcript — the file is served by
+`GET /v1/sessions/:id/files/<path>` from the session's in-memory VFS (it lives as long as the
+session does).
+
+> What does https://example.com say it is for?
+
+`web_fetch` runs server-side: SSRF-guarded fetch, HTML→markdown, then a digest pass by the
+session's own model (those tokens are billed into the turn's usage).
+
+> What does the wiki for facebook/react say about hooks?
+
+The `deepwiki__ask_question` call is a live remote MCP tool — authoritative, executed
+server-side, never bridged to the tab.
+
 ## 6. Compare with the Claude engine
 
 Create a second session under the `claude` profile with a real project directory — the full

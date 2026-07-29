@@ -10,7 +10,7 @@
  */
 
 /** Bumped on any breaking change to events, commands, or REST shapes. */
-export const PROTOCOL_VERSION = 2
+export const PROTOCOL_VERSION = 3
 
 // ---------------------------------------------------------------------------
 // Session lifecycle
@@ -342,6 +342,10 @@ export type SessionEventBody =
       logs?: string[]
       durationMs?: number
     }
+  /** The agent handed over a file from its session scratch filesystem (the
+   * `deliver_file` tool). Download it via `GET {basePath}/sessions/:id/files/<path>`
+   * for as long as the session lives (the VFS is in-memory). */
+  | { type: 'file_delivered'; path: string; bytes: number; description?: string }
   /** Any SDKMessage this protocol version doesn't model first-class (task progress,
    * compaction boundaries, auth status, ...). Payload is the raw SDK message. */
   | { type: 'sdk_event'; payload: { type: string; [key: string]: unknown } }
@@ -626,6 +630,12 @@ export type SdkSessionSummary = {
   cwd?: string
 }
 
+/** One deliverable in the session's scratch filesystem (see the `file_delivered` event). */
+export type SessionFileInfo = { path: string; bytes: number }
+/** `GET {basePath}/sessions/:id/files` — every file currently in the session's VFS.
+ * `GET {basePath}/sessions/:id/files/<path>` downloads one (attachment disposition).
+ * 404 when the session's engine exposes no VFS (Claude-engine sessions). */
+export type ListSessionFilesResponse = { files: SessionFileInfo[] }
 export type ListSessionsResponse = { sessions: SessionInfo[] }
 export type CreateSessionResponse = { session: SessionInfo }
 export type GetSessionResponse = { session: SessionInfo }

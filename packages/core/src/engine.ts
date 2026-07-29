@@ -4,6 +4,7 @@ import { createVfs } from '@claude-worker/sandbox'
 import { AiSdkRunner, type AiSdkRunnerConfig } from './ai-sdk-runner.ts'
 import { createToolContext, withMcpTools, type ToolContextOptions } from './tools.ts'
 import type { ToolExecutor } from './tool-executor.ts'
+import { createWebFetch, type WebFetchFn, type WebFetchOptions } from './web-fetch.ts'
 
 export type EngineSessionOptions = {
   /** Resolved session config (profile defaults already applied). */
@@ -25,7 +26,23 @@ export type EngineSessionOptions = {
   /** Which backend `selectExecutor` returned, for the execution_* events. */
   backend?: 'server' | 'browser' | 'managed' | 'remote'
   /** Backends for the granted capabilities. Omitted ones are simply not granted. */
-  capabilities?: Pick<ToolContextOptions, 'search' | 'download'>
+  capabilities?: {
+    search?: ToolContextOptions['search']
+    download?: ToolContextOptions['download']
+    /**
+     * Grants `web_fetch`. Pass options (or `{}`) to use the built-in
+     * {@link createWebFetch} backend — its digest pass then runs on the
+     * session's own model, billed into the turn's usage. Pass `digest: false`
+     * to skip the digest (the tool returns page markdown), a custom digest fn
+     * to bring your own model, or a complete {@link WebFetchFn} to replace the
+     * backend outright.
+     */
+    webFetch?: WebFetchFn | (Omit<WebFetchOptions, 'digest'> & { digest?: WebFetchOptions['digest'] | false })
+    /** Grants `deliver_file`: the agent can hand VFS files over to the user
+     * (emitting `file_delivered`, downloadable via the server's file routes).
+     * Default true — set false to withhold it. */
+    deliverFiles?: boolean
+  }
   /** Authoritative tools that run server-side with server credentials (MCP).
    * Never bridged to a client. */
   mcpTools?: ToolSet
@@ -43,16 +60,42 @@ export type EngineSessionOptions = {
 export function createEngineSession(options: EngineSessionOptions): AiSdkRunner {
   const vfs = options.config.vfs ?? createVfs()
   const executor = options.selectExecutor()
+  // The runner doesn't exist yet while the tools are being built; these
+  // capabilities reach back into it lazily (they only ever run mid-turn).
+  let runner: AiSdkRunner | undefined
+  const webFetchCap = options.capabilities?.webFetch
+  const webFetch =
+    typeof webFetchCap === 'function'
+      ? webFetchCap
+      : webFetchCap
+        ? createWebFetch({
+            ...webFetchCap,
+            digest:
+              webFetchCap.digest === false
+                ? undefined
+                : (webFetchCap.digest ??
+                  ((markdown, prompt) =>
+                    runner!.generateDigest(
+                      'Answer the request below using ONLY this web page content.\n\n' +
+                        `<page>\n${markdown}\n</page>\n\nRequest: ${prompt}`,
+                    ))),
+          })
+        : undefined
   const base = createToolContext({
     executor,
     sessionId: 'pending',
     vfs,
     search: options.capabilities?.search,
     download: options.capabilities?.download,
+    webFetch,
+    onFileDelivered:
+      options.capabilities?.deliverFiles === false
+        ? undefined
+        : (file) => runner?.emitFileDelivered(file),
   })
   const context = options.mcpTools ? withMcpTools(base, options.mcpTools) : base
 
-  return new AiSdkRunner({
+  runner = new AiSdkRunner({
     ...options.config,
     languageModel: options.resolveModel(options.profile, options.config),
     instructions: options.instructions ?? options.config.instructions,
@@ -63,6 +106,7 @@ export function createEngineSession(options: EngineSessionOptions): AiSdkRunner 
     executionBackend: options.backend ?? 'server',
     executionLimits: options.executionLimits,
   })
+  return runner
 }
 
 export type McpConnection = {

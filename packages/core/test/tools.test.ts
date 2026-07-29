@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
-import { MockLanguageModelV3 } from 'ai/test'
+import { MockLanguageModelV3, convertArrayToReadableStream } from 'ai/test'
 import { tool } from 'ai'
 import { z } from 'zod'
 import variant from '@jitl/quickjs-ng-wasmfile-release-asyncify'
@@ -25,16 +25,20 @@ const USAGE = {
   raw: undefined,
 }
 const text = (t: string) => ({
-  content: [{ type: 'text' as const, text: t }],
-  finishReason: { unified: 'stop' as const, raw: undefined },
-  usage: USAGE,
-  warnings: [],
+  stream: convertArrayToReadableStream([
+    { type: 'stream-start' as const, warnings: [] },
+    { type: 'text-start' as const, id: 't1' },
+    { type: 'text-delta' as const, id: 't1', delta: t },
+    { type: 'text-end' as const, id: 't1' },
+    { type: 'finish' as const, finishReason: { unified: 'stop' as const, raw: undefined }, usage: USAGE },
+  ]),
 })
 const call = (id: string, name: string, input: unknown) => ({
-  content: [{ type: 'tool-call' as const, toolCallId: id, toolName: name, input: JSON.stringify(input) }],
-  finishReason: { unified: 'tool-calls' as const, raw: undefined },
-  usage: USAGE,
-  warnings: [],
+  stream: convertArrayToReadableStream([
+    { type: 'stream-start' as const, warnings: [] },
+    { type: 'tool-call' as const, toolCallId: id, toolName: name, input: JSON.stringify(input) },
+    { type: 'finish' as const, finishReason: { unified: 'tool-calls' as const, raw: undefined }, usage: USAGE },
+  ]),
 })
 
 describe('capability-scoped tool set', () => {
@@ -109,6 +113,48 @@ describe('capability-scoped tool set', () => {
     })
   })
 
+  it('grants deliver_file only when the host listens, and validates the path', async () => {
+    const withoutListener = createToolContext({ executor: stubExecutor(), sessionId: 's' })
+    expect(withoutListener.tools.deliver_file).toBeUndefined()
+
+    const delivered: unknown[] = []
+    const vfs = createVfs({ '/SUMMARY.md': '# Summary' })
+    const context = createToolContext({
+      executor: stubExecutor(),
+      sessionId: 's',
+      vfs,
+      onFileDelivered: (file) => delivered.push(file),
+    })
+    const deliver = context.tools.deliver_file!.execute!
+    expect(await deliver({ path: '/missing.md' }, {} as never)).toMatchObject({
+      error: expect.stringContaining('no such file'),
+    })
+    expect(delivered).toEqual([])
+    expect(
+      await deliver({ path: '/SUMMARY.md', description: 'the summary' }, {} as never),
+    ).toMatchObject({ delivered: true, bytes: 9 })
+    expect(delivered).toEqual([{ path: '/SUMMARY.md', bytes: 9, description: 'the summary' }])
+  })
+
+  it('grants web_fetch only with a backend and turns its failures into data', async () => {
+    const withoutBackend = createToolContext({ executor: stubExecutor(), sessionId: 's' })
+    expect(withoutBackend.tools.web_fetch).toBeUndefined()
+
+    const context = createToolContext({
+      executor: stubExecutor(),
+      sessionId: 's',
+      webFetch: async () => {
+        throw new Error('boom')
+      },
+    })
+    expect(context.definitions.find((d) => d.name === 'web_fetch')?.trust).toBe('authoritative')
+    const result = await context.tools.web_fetch!.execute!(
+      { url: 'http://203.0.113.5/', prompt: 'what?' },
+      {} as never,
+    )
+    expect(result).toMatchObject({ error: 'boom' })
+  })
+
   it('turns a failed download into data the agent can react to', async () => {
     const context = createToolContext({
       executor: stubExecutor(),
@@ -131,7 +177,7 @@ describe('runner-driven tool execution', () => {
     // through an MCP tool, then answer.
     const model = new MockLanguageModelV3({
       modelId: 'mock-1',
-      doGenerate: [
+      doStream: [
         call('c1', 'download', { url: 'https://acme.example/about', path: '/leads/acme.txt' }),
         call('c2', 'eval_script', {
           script: `const doc = vfs.read('/leads/acme.txt')
@@ -197,7 +243,7 @@ describe('runner-driven tool execution', () => {
   it('feeds a sandbox failure back as tool output instead of failing the session', async () => {
     const model = new MockLanguageModelV3({
       modelId: 'mock-1',
-      doGenerate: [
+      doStream: [
         call('c1', 'eval_script', { script: 'while (true) {}' }),
         text('That timed out; trying something simpler.'),
       ],
@@ -229,7 +275,7 @@ describe('runner-driven tool execution', () => {
   it('leaves calls the executor does not own for the host to answer', async () => {
     const model = new MockLanguageModelV3({
       modelId: 'mock-1',
-      doGenerate: [call('c1', 'ask_human', { q: 'ok?' }), text('done')],
+      doStream: [call('c1', 'ask_human', { q: 'ok?' }), text('done')],
     })
     const dispatched: string[] = []
     const executor: ToolExecutor = {

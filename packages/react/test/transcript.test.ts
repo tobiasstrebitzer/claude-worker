@@ -259,6 +259,22 @@ describe('transcript reducer', () => {
     expect(state.items.map((i) => i.kind)).toEqual(['user', 'assistant_text'])
   })
 
+  it('renders a delivered file as a download card item', () => {
+    seq = 0
+    const state = run(initialTranscriptState, [
+      { type: 'file_delivered', path: '/SUMMARY.md', bytes: 42, description: 'the summary' },
+    ])
+    expect(state.items).toEqual([
+      {
+        kind: 'file_delivered',
+        id: 'file-1',
+        path: '/SUMMARY.md',
+        bytes: 42,
+        description: 'the summary',
+      },
+    ])
+  })
+
   it('renders local-command output as a notice, not a user bubble', () => {
     seq = 0
     const state = run(initialTranscriptState, [

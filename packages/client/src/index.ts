@@ -6,6 +6,7 @@ import type {
   JobEvent,
   JobInfo,
   GetProfileResponse,
+  ListSessionFilesResponse,
   PermissionMode,
   ProfileInfo,
   QueueServerFrame,
@@ -14,6 +15,7 @@ import type {
   SdkSessionSummary,
   ServerFrame,
   SessionEvent,
+  SessionFileInfo,
   SessionInfo,
   ToolCallRequestFrame,
   ToolExecutionOutput,
@@ -333,6 +335,37 @@ export class ClaudeWorkerClient {
   async deleteSession(id: string): Promise<SessionInfo> {
     const body = await this.#call('DELETE', `/sessions/${encodeURIComponent(id)}`)
     return (body as { session: SessionInfo }).session
+  }
+
+  /** List the files currently in a session's scratch filesystem (deliverables the
+   * agent wrote; see the `file_delivered` event). 404s when the session's engine
+   * has no file store (Claude-engine sessions). */
+  async listSessionFiles(sessionId: string): Promise<SessionFileInfo[]> {
+    const body = await this.#call('GET', `/sessions/${encodeURIComponent(sessionId)}/files`)
+    return (body as ListSessionFilesResponse).files
+  }
+
+  /** Download one session file as text. */
+  async fetchSessionFile(sessionId: string, path: string): Promise<string> {
+    const res = await this.#fetch(this.sessionFileUrl(sessionId, path), {
+      headers: this.#options.headers,
+    })
+    if (!res.ok) {
+      const payload = (await res.json().catch(() => ({}))) as { error?: string }
+      throw new Error(payload.error ?? `GET file failed with ${res.status}`)
+    }
+    return await res.text()
+  }
+
+  /** Direct download URL for a session file (e.g. an <a download> href). Carries
+   * no headers — on authenticated servers, use fetchSessionFile instead. */
+  sessionFileUrl(sessionId: string, path: string): string {
+    const encoded = path
+      .split('/')
+      .filter(Boolean)
+      .map(encodeURIComponent)
+      .join('/')
+    return `${this.#options.baseUrl}/sessions/${encodeURIComponent(sessionId)}/files/${encoded}`
   }
 
   /** Resolve a pending permission over REST — the remote-controller counterpart of the

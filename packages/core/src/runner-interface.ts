@@ -4,6 +4,7 @@ import type {
   SessionEvent,
   SessionInfo,
 } from '@claude-worker/protocol'
+import type { SandboxVfs } from '@claude-worker/sandbox'
 import type { ToolExecutionResult } from './tool-executor.ts'
 
 export type SessionEventListener = (event: SessionEvent) => void
@@ -22,6 +23,10 @@ export type PermissionDecision =
 export interface Runner {
   readonly id: string
   readonly pendingApprovals: PermissionRequest[]
+  /** The session's scratch filesystem, when its engine has one. The server's
+   * file routes (GET /sessions/:id/files[...]) read it to serve deliverables;
+   * engines without a VFS (the Claude CLI engine) simply don't expose it. */
+  readonly vfs?: SandboxVfs
   /** Begin the session. Idempotent; returns the run promise (resolves when the run ends). */
   start(): Promise<void>
   info(): SessionInfo

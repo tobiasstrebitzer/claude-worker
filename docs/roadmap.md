@@ -1,6 +1,6 @@
 # Roadmap & open questions
 
-What's shipped, what's next, and what's still undecided. Status as of 2026-07-22.
+What's shipped, what's next, and what's still undecided. Status as of 2026-07-29.
 
 ## Shipped
 
@@ -30,17 +30,30 @@ What's shipped, what's next, and what's still undecided. Status as of 2026-07-22
   server policy (403 explicit mode, strip the capability, refuse the WS switch); per-job
   bypass opt-in on the schedule form.
 
+- **Model-agnostic runtime** (2026-07-29, branch `feat/model-agnostic-runtime`) — `AiSdkRunner`
+  (AI SDK v7 ToolLoopAgent, streamed: per-token `stream_delta` + per-step messages) behind the
+  shared `Runner` interface; provider profiles +
+  `createEngineRunner`; QuickJS sandbox package with browser-bridged execution; capability-scoped
+  tools (`fs_*`, `eval_script`, `web_search`, `download`, `web_fetch` with SSRF guard + model
+  digest, `deliver_file` → `file_delivered` + `GET /sessions/:id/files` routes + download card);
+  live MCP over http/sse (`connectMcpTools`, DeepWiki-verified `smoke:mcp`). Protocol v3.
+
 ## Next
 
-1. **Shared-backend `QueueAdapter`** (BullMQ or plain redis) — the reason the adapter contract
+1. **Dual-engine as the product shape.** The model-agnostic runner is the new direction — not a
+   side experiment. Make both engines (Claude Code via the Agent SDK, and the AI SDK runner)
+   cleanly co-equal options, aligned with the web UI: profile management (create/edit, not just
+   read), per-profile default model selection, engine-aware create forms and session surfaces
+   (hide CLI-only affordances for provider sessions and vice versa).
+2. **Shared-backend `QueueAdapter`** (BullMQ or plain redis) — the reason the adapter contract
    exists. `claimNext` must stay atomic (BullMQ free; raw redis needs LMOVE/Lua) and honor
    `nextRunAt` (BullMQ delayed jobs); daily counters map to `INCRBY` on a dated key with TTL.
    Caveat: JobQueue assumes the claiming process runs the job — multi-worker deployments need a
    claim-lease/heartbeat so a dead worker doesn't strand jobs in `running`, and webhook ordering
    is per-process.
-2. **Promote remaining `sdk_event` passthroughs** UIs care about: tool progress, task/subagent
+3. **Promote remaining `sdk_event` passthroughs** UIs care about: tool progress, task/subagent
    events, todo lists.
-3. **Custom `SessionStore` / multi-host sessions** — V1 is single-host by design (SDK on-disk
+4. **Custom `SessionStore` / multi-host sessions** — V1 is single-host by design (SDK on-disk
    transcripts); a store adapter for cross-host resume is designed but unimplemented.
 
 ## Open questions

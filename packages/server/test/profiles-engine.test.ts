@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import WebSocket from 'ws'
+import { createVfs } from '@claude-worker/sandbox'
 import type { Runner, SessionRunnerConfig, ToolExecutionResult } from '@claude-worker/core'
 import type { ProfileInfo, SessionInfo } from '@claude-worker/protocol'
 import { createWorkerServer, type EngineRunnerContext, type WorkerServer } from '../src/index.ts'
@@ -194,6 +195,64 @@ describe('provider profiles and engine selection', () => {
     })
     expect(hostResults).toEqual(['exec-1'])
     ws.close()
+  })
+
+  it('serves session files straight from the runner VFS', async () => {
+    const vfs = createVfs({
+      '/out/report.json': '{"revenuePerEmployee":348}',
+      '/SUMMARY.md': '# Summary\n',
+    })
+    running = createWorkerServer({
+      allowUnauthenticated: true,
+      allowedCwdRoots: ['/tmp'],
+      profiles: [providerProfile()],
+      createEngineRunner: ({ config }) => ({ ...fakeRunner('engine-1', config), vfs }),
+    })
+    const { port } = await running.listen(0, '127.0.0.1')
+    const created = await fetch(`http://127.0.0.1:${port}/v1/sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ cwd: '/tmp/project', profile: 'kimi' }),
+    })
+    const { session } = (await created.json()) as { session: SessionInfo }
+    const base = `http://127.0.0.1:${port}/v1/sessions/${session.id}/files`
+
+    const list = await fetch(base)
+    expect(list.status).toBe(200)
+    expect(await list.json()).toEqual({
+      files: [
+        { path: '/SUMMARY.md', bytes: 10 },
+        { path: '/out/report.json', bytes: 26 },
+      ],
+    })
+
+    const download = await fetch(`${base}/out/report.json`)
+    expect(download.status).toBe(200)
+    expect(download.headers.get('content-type')).toContain('application/json')
+    expect(download.headers.get('content-disposition')).toContain('attachment')
+    expect(download.headers.get('content-disposition')).toContain('report.json')
+    expect(await download.text()).toBe('{"revenuePerEmployee":348}')
+
+    expect((await fetch(`${base}/nope.txt`)).status).toBe(404)
+  })
+
+  it('404s the file routes for engines without a VFS', async () => {
+    running = createWorkerServer({
+      allowUnauthenticated: true,
+      allowedCwdRoots: ['/tmp'],
+      profiles: [providerProfile()],
+      createEngineRunner: ({ config }) => fakeRunner('engine-1', config),
+    })
+    const { port } = await running.listen(0, '127.0.0.1')
+    const created = await fetch(`http://127.0.0.1:${port}/v1/sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ cwd: '/tmp/project', profile: 'kimi' }),
+    })
+    const { session } = (await created.json()) as { session: SessionInfo }
+    const res = await fetch(`http://127.0.0.1:${port}/v1/sessions/${session.id}/files`)
+    expect(res.status).toBe(404)
+    expect(await res.json()).toEqual({ error: 'session has no file store' })
   })
 
   it('serves provider profiles over the profiles API without a config snapshot', async () => {

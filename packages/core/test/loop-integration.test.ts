@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it } from 'vitest'
 import { tool } from 'ai'
-import { MockLanguageModelV3 } from 'ai/test'
+import { MockLanguageModelV3, convertArrayToReadableStream } from 'ai/test'
 import { z } from 'zod'
 import variant from '@jitl/quickjs-ng-wasmfile-release-asyncify'
 import { createVfs, loadEngine, type SandboxEngine } from '@claude-worker/sandbox'
@@ -17,6 +17,22 @@ const USAGE = {
   outputTokens: { total: 5, text: 5, reasoning: undefined },
   raw: undefined,
 }
+const streamText = (t: string) => ({
+  stream: convertArrayToReadableStream([
+    { type: 'stream-start' as const, warnings: [] },
+    { type: 'text-start' as const, id: 't1' },
+    { type: 'text-delta' as const, id: 't1', delta: t },
+    { type: 'text-end' as const, id: 't1' },
+    { type: 'finish' as const, finishReason: { unified: 'stop' as const, raw: undefined }, usage: USAGE },
+  ]),
+})
+const streamCall = (toolCallId: string, toolName: string, input: unknown) => ({
+  stream: convertArrayToReadableStream([
+    { type: 'stream-start' as const, warnings: [] },
+    { type: 'tool-call' as const, toolCallId, toolName, input: JSON.stringify(input) },
+    { type: 'finish' as const, finishReason: { unified: 'tool-calls' as const, raw: undefined }, usage: USAGE },
+  ]),
+})
 
 /**
  * The M1+M2 seam end to end: the model calls an execute-less `eval_script`
@@ -29,33 +45,16 @@ describe('agent loop + sandboxed tool execution', () => {
   it('parks on eval_script, executes it in the sandbox, and completes the turn', async () => {
     const model = new MockLanguageModelV3({
       modelId: 'mock-1',
-      doGenerate: [
-        {
-          content: [
-            {
-              type: 'tool-call' as const,
-              toolCallId: 'call-1',
-              toolName: 'eval_script',
-              input: JSON.stringify({
-                script: `
-                  const doc = vfs.read('/leads/acme.txt')
-                  const revenue = Number(doc.split('revenue:')[1].trim())
-                  vfs.write('/out/acme.json', JSON.stringify({ revenue }))
-                  revenue >= 100 ? 'qualified' : 'skip'
-                `,
-              }),
-            },
-          ],
-          finishReason: { unified: 'tool-calls' as const, raw: undefined },
-          usage: USAGE,
-          warnings: [],
-        },
-        {
-          content: [{ type: 'text' as const, text: 'Acme is qualified.' }],
-          finishReason: { unified: 'stop' as const, raw: undefined },
-          usage: USAGE,
-          warnings: [],
-        },
+      doStream: [
+        streamCall('call-1', 'eval_script', {
+          script: `
+            const doc = vfs.read('/leads/acme.txt')
+            const revenue = Number(doc.split('revenue:')[1].trim())
+            vfs.write('/out/acme.json', JSON.stringify({ revenue }))
+            revenue >= 100 ? 'qualified' : 'skip'
+          `,
+        }),
+        streamText('Acme is qualified.'),
       ],
     })
 
@@ -112,26 +111,9 @@ describe('agent loop + sandboxed tool execution', () => {
   it('feeds a sandbox failure back into the loop so the model can adapt', async () => {
     const model = new MockLanguageModelV3({
       modelId: 'mock-1',
-      doGenerate: [
-        {
-          content: [
-            {
-              type: 'tool-call' as const,
-              toolCallId: 'call-2',
-              toolName: 'eval_script',
-              input: JSON.stringify({ script: 'while (true) {}' }),
-            },
-          ],
-          finishReason: { unified: 'tool-calls' as const, raw: undefined },
-          usage: USAGE,
-          warnings: [],
-        },
-        {
-          content: [{ type: 'text' as const, text: 'That script timed out; trying a simpler approach.' }],
-          finishReason: { unified: 'stop' as const, raw: undefined },
-          usage: USAGE,
-          warnings: [],
-        },
+      doStream: [
+        streamCall('call-2', 'eval_script', { script: 'while (true) {}' }),
+        streamText('That script timed out; trying a simpler approach.'),
       ],
     })
     const runner = new AiSdkRunner({

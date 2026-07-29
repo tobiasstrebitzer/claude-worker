@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { tool } from 'ai'
-import { MockLanguageModelV3 } from 'ai/test'
+import { MockLanguageModelV3, convertArrayToReadableStream } from 'ai/test'
 import { z } from 'zod'
 import type { SessionEvent } from '@claude-worker/protocol'
 import { AiSdkRunner, type AiSdkRunnerConfig } from '../src/index.ts'
@@ -11,21 +11,27 @@ const USAGE = {
   raw: undefined,
 }
 
+// The runner streams every model call (doStream, not doGenerate). One entry =
+// one LLM call; text arrives as deltas like a real provider would send it.
 function textResponse(text: string) {
   return {
-    content: [{ type: 'text' as const, text }],
-    finishReason: { unified: 'stop' as const, raw: undefined },
-    usage: USAGE,
-    warnings: [],
+    stream: convertArrayToReadableStream([
+      { type: 'stream-start' as const, warnings: [] },
+      { type: 'text-start' as const, id: 't1' },
+      ...[...text].map((ch) => ({ type: 'text-delta' as const, id: 't1', delta: ch })),
+      { type: 'text-end' as const, id: 't1' },
+      { type: 'finish' as const, finishReason: { unified: 'stop' as const, raw: undefined }, usage: USAGE },
+    ]),
   }
 }
 
 function toolCallResponse(toolCallId: string, toolName: string, input: unknown) {
   return {
-    content: [{ type: 'tool-call' as const, toolCallId, toolName, input: JSON.stringify(input) }],
-    finishReason: { unified: 'tool-calls' as const, raw: undefined },
-    usage: USAGE,
-    warnings: [],
+    stream: convertArrayToReadableStream([
+      { type: 'stream-start' as const, warnings: [] },
+      { type: 'tool-call' as const, toolCallId, toolName, input: JSON.stringify(input) },
+      { type: 'finish' as const, finishReason: { unified: 'tool-calls' as const, raw: undefined }, usage: USAGE },
+    ]),
   }
 }
 
@@ -47,7 +53,7 @@ function makeRunner(config: Partial<AiSdkRunnerConfig> & { languageModel: AiSdkR
 
 describe('AiSdkRunner', () => {
   it('runs a plain text turn: user_message, assistant_message, turn_result, idle', async () => {
-    const model = new MockLanguageModelV3({ modelId: 'mock-1', doGenerate: textResponse('hello there') })
+    const model = new MockLanguageModelV3({ modelId: 'mock-1', doStream: textResponse('hello there') })
     const { runner, eventsOf, waitFor } = makeRunner({ languageModel: model })
 
     runner.sendMessage('hi')
@@ -73,7 +79,7 @@ describe('AiSdkRunner', () => {
   it('executes local tools inside the loop and emits tool_use + synthetic tool_result', async () => {
     const model = new MockLanguageModelV3({
       modelId: 'mock-1',
-      doGenerate: [
+      doStream: [
         toolCallResponse('call-1', 'lookup', { key: 'k' }),
         textResponse('found it'),
       ],
@@ -102,10 +108,57 @@ describe('AiSdkRunner', () => {
     })
   })
 
+  it('streams: token deltas while text is produced, step messages as steps complete', async () => {
+    const model = new MockLanguageModelV3({
+      modelId: 'mock-1',
+      doStream: [toolCallResponse('c1', 'lookup', { key: 'k' }), textResponse('found it')],
+    })
+    const tools = {
+      lookup: tool({
+        inputSchema: z.object({ key: z.string() }),
+        execute: async ({ key }) => ({ value: `${key}-value` }),
+      }),
+    }
+    const h = makeRunner({ languageModel: model, tools })
+    h.runner.sendMessage('go')
+    await h.waitFor(() => h.eventsOf('turn_result').length === 1)
+
+    // Token-by-token deltas in the Anthropic content_block_delta shape the
+    // reducer already renders ('found it' char-by-char = several deltas).
+    const deltas = h.eventsOf('stream_delta')
+    expect(deltas.length).toBeGreaterThan(1)
+    expect(deltas[0]).toMatchObject({
+      event: { type: 'content_block_delta', delta: { type: 'text_delta' } },
+    })
+    // Step messages arrive AS the turn progresses: the tool call and its
+    // result are both emitted before the final text message, not in one blob
+    // after the loop ends.
+    const toolUseSeq = h.eventsOf('assistant_message').find((e) =>
+      (e as { message: { content: Array<{ type: string }> } }).message.content.some((b) => b.type === 'tool_use'),
+    )!.seq
+    const toolResultSeq = h.eventsOf('user_message').find((e) => (e as { synthetic?: boolean }).synthetic)!.seq
+    const finalTextSeq = h.eventsOf('assistant_message').find((e) =>
+      (e as { message: { content: Array<{ type: string; text?: string }> } }).message.content.some(
+        (b) => b.type === 'text' && b.text === 'found it',
+      ),
+    )!.seq
+    expect(toolUseSeq).toBeLessThan(toolResultSeq)
+    expect(toolResultSeq).toBeLessThan(finalTextSeq)
+  })
+
+  it('emits no stream_delta when includePartialMessages is false', async () => {
+    const model = new MockLanguageModelV3({ modelId: 'mock-1', doStream: textResponse('quiet') })
+    const h = makeRunner({ languageModel: model, includePartialMessages: false })
+    h.runner.sendMessage('go')
+    await h.waitFor(() => h.eventsOf('turn_result').length === 1)
+    expect(h.eventsOf('stream_delta')).toHaveLength(0)
+    expect(h.eventsOf('turn_result')[0]).toMatchObject({ result: 'quiet' })
+  })
+
   it('parks on an execute-less tool call and resumes via resolveToolCall (message-state replay)', async () => {
     const model = new MockLanguageModelV3({
       modelId: 'mock-1',
-      doGenerate: [
+      doStream: [
         toolCallResponse('call-9', 'eval_script', { script: '1+1' }),
         textResponse('the answer is 2'),
       ],
@@ -141,7 +194,7 @@ describe('AiSdkRunner', () => {
     // and reporting only the last one silently drops the parked legs' tokens.
     const model = new MockLanguageModelV3({
       modelId: 'mock-1',
-      doGenerate: [
+      doStream: [
         toolCallResponse('call-1', 'eval_script', { script: 'x' }),
         toolCallResponse('call-2', 'eval_script', { script: 'y' }),
         textResponse('done'),
@@ -165,8 +218,86 @@ describe('AiSdkRunner', () => {
     })
   })
 
+  it('treats an errored local tool execution as settled, never as a park', async () => {
+    // Regression: the SDK reports a thrown `execute` as a `tool-error` part,
+    // which is absent from result.toolResults — deriving "settled" from that
+    // list parked the session forever on a call the SDK had already answered
+    // (hit live: a deepwiki MCP call failing at transport level hung the turn).
+    const model = new MockLanguageModelV3({
+      modelId: 'mock-1',
+      doStream: [
+        toolCallResponse('c1', 'flaky', {}),
+        textResponse('recovered from the tool failure'),
+      ],
+    })
+    const { runner, eventsOf, waitFor } = makeRunner({
+      languageModel: model,
+      tools: {
+        flaky: tool({
+          inputSchema: z.object({}),
+          execute: async (): Promise<{ ok: boolean }> => {
+            throw new Error('fetch failed')
+          },
+        }),
+      },
+    })
+    runner.sendMessage('go')
+
+    await waitFor(() => eventsOf('turn_result').length === 1)
+    expect(runner.pendingToolCalls).toHaveLength(0)
+    expect(eventsOf('turn_result')[0]).toMatchObject({
+      subtype: 'success',
+      result: 'recovered from the tool failure',
+    })
+    expect(runner.status).toBe('idle')
+  })
+
+  it('interrupt() rescues a parked turn: parked calls fail, the turn ends, input works again', async () => {
+    const model = new MockLanguageModelV3({
+      modelId: 'mock-1',
+      doStream: [toolCallResponse('c1', 'ask_human', { q: 'ok?' }), textResponse('hello again')],
+    })
+    const { runner, eventsOf, waitFor } = makeRunner({
+      languageModel: model,
+      tools: { ask_human: tool({ inputSchema: z.object({ q: z.string() }) }) },
+    })
+    runner.sendMessage('go')
+    await waitFor(() => runner.pendingToolCalls.length === 1)
+
+    await runner.interrupt()
+    expect(runner.pendingToolCalls).toHaveLength(0)
+    expect(eventsOf('turn_result')[0]).toMatchObject({ isError: true, errors: ['interrupted'] })
+    expect(runner.status).toBe('idle')
+    // The parked call was recorded as an error result, so the history stays
+    // replayable and the session accepts new input.
+    runner.sendMessage('are you still there?')
+    await waitFor(() => eventsOf('turn_result').length === 2)
+    expect(eventsOf('turn_result')[1]).toMatchObject({ subtype: 'success', result: 'hello again' })
+  })
+
+  it('keeps tool results adjacent to their call when the user typed during the park', async () => {
+    const model = new MockLanguageModelV3({
+      modelId: 'mock-1',
+      doStream: [toolCallResponse('c1', 'ask_human', { q: 'ok?' }), textResponse('done')],
+    })
+    const { runner, eventsOf, waitFor } = makeRunner({
+      languageModel: model,
+      tools: { ask_human: tool({ inputSchema: z.object({ q: z.string() }) }) },
+    })
+    runner.sendMessage('go')
+    await waitFor(() => runner.pendingToolCalls.length === 1)
+
+    // Arrives mid-park: must not wedge itself between the call and its result.
+    runner.sendMessage('also, one more thing')
+    runner.resolveToolCall('c1', { type: 'text', value: 'yes' })
+    await waitFor(() => eventsOf('turn_result').length === 1)
+
+    const roles = runner.messages.map((m) => m.role)
+    expect(roles).toEqual(['user', 'assistant', 'tool', 'user', 'assistant'])
+  })
+
   it('rejects unsupported permission modes at construction and via setPermissionMode', async () => {
-    const model = new MockLanguageModelV3({ modelId: 'mock-1', doGenerate: textResponse('x') })
+    const model = new MockLanguageModelV3({ modelId: 'mock-1', doStream: textResponse('x') })
     expect(() => new AiSdkRunner({ languageModel: model, permissionMode: 'plan' })).toThrow(
       /not supported/,
     )
@@ -179,7 +310,7 @@ describe('AiSdkRunner', () => {
   it('surfaces turn errors as error_during_execution without killing the session', async () => {
     const model = new MockLanguageModelV3({
       modelId: 'mock-1',
-      doGenerate: () => {
+      doStream: () => {
         throw new Error('provider exploded')
       },
     })
@@ -196,7 +327,7 @@ describe('AiSdkRunner', () => {
   })
 
   it('close() settles the session and refuses further input', async () => {
-    const model = new MockLanguageModelV3({ modelId: 'mock-1', doGenerate: textResponse('x') })
+    const model = new MockLanguageModelV3({ modelId: 'mock-1', doStream: textResponse('x') })
     const h = makeRunner({ languageModel: model })
     h.runner.close('server')
     expect(h.eventsOf('session_closed')).toHaveLength(1)

@@ -18,7 +18,10 @@ session from a host app. Key docs — read before changing scope or structure:
   goes through the `ToolExecutor` seam (`QuickJsExecutor` in-process, `BrowserBridgeExecutor` to a
   tab). `createToolContext` builds the capability-scoped tool set with the trust split
   (`sandboxed` = no `execute`, rides the seam; `authoritative` = server-side, never bridged);
-  `createEngineSession` + `connectMcpTools` assemble a provider session.
+  granted-or-absent backends: `search`, `download`, `webFetch` (`createWebFetch` in
+  `web-fetch.ts`: SSRF-guarded fetch → markdown → model digest), `onFileDelivered`
+  (`deliver_file` → `file_delivered` event). `createEngineSession` + `connectMcpTools`
+  assemble a provider session.
 - `packages/sandbox` — untrusted-code boundary: QuickJS-NG WASM guest + in-memory map VFS
   (deliberately not a node-fs emulation — the tab-side host runs it unpolyfilled, and memfs
   dragged `node:buffer` into the browser) + by-value host bridge, interpreter-enforced
@@ -34,6 +37,8 @@ session from a host app. Key docs — read before changing scope or structure:
   on the auth principal scopes create + `GET /profiles`. A profile with `engine: 'provider'`
   instead runs the model-agnostic engine, built by the `createEngineRunner` hook (so this package
   imports no model SDK and never resolves provider credentials itself).
+  `GET /sessions/:id/files[/<path>]` serves session deliverables straight from `Runner.vfs`
+  (attachment disposition; 404 for engines without a VFS).
 - `packages/client` — REST + WS client on platform `fetch`/`WebSocket`. Zero runtime deps. Owns
   the WS frame surface, so new frames need `SessionHandle` methods/events here. Tests run against
   a real server; `tsconfig.test.json` keeps them out of the main typecheck so `src` stays
@@ -153,6 +158,18 @@ in tampering with the credential chain. Compliance/legal review is in progress �
   it. Continuation is therefore message-state replay (persist `responseMessages`, append a
   `ToolResultPart`, re-invoke), not resuming a suspended loop. Approvals map to v7's separate
   `toolApproval` mechanism, not to execute-less tools. v7 is ESM-only and needs Node ≥ 22.
+  `AiSdkRunner` STREAMS every leg (`agent.stream`, never `generate`): `stream_delta` per token
+  (suppressed by `includePartialMessages: false`) and assistant/tool messages flushed per step —
+  so tests must mock `doStream` (model-level parts incl. a `finish` with usage), not
+  `doGenerate`; only `generateDigest` still consumes `doGenerate`.
+- A third v7 trap (hit live: a deepwiki MCP transport failure hung a session): a thrown
+  `execute` yields a `tool-error` part that is **absent from `result.toolResults`** even though
+  the SDK already fed the error back and kept looping. Deriving "which calls parked" from
+  `toolResults` parks forever on an already-answered call — `AiSdkRunner` derives settled ids
+  from `responseMessages` tool parts instead. Related invariants: tool results are spliced
+  BEFORE user messages typed mid-park (providers reject non-adjacent results), `interrupt()`
+  rescues a parked turn by failing its calls, and a turn whose history already ends with the
+  assistant is skipped (double-scheduled turns must not double-generate).
 - `PermissionMode`'s vocabulary is Claude Code's; `AiSdkRunner` supports only
   `default`/`bypassPermissions`/`dontAsk` and throws otherwise (surfacing as `protocol_error`).
 - Sandbox guest limits are interpreter-enforced, but the interrupt deadline **cannot preempt time
@@ -170,6 +187,19 @@ in tampering with the credential chain. Compliance/legal review is in progress �
 - AI SDK MCP lives in `@ai-sdk/mcp` (not `ai`) as of v7, is imported lazily, and supports
   **http/sse only** — stdio is local-only upstream and is rejected explicitly. Claude-engine
   sessions still do stdio, since the CLI spawns those itself.
+- `web_fetch` is layered: `createWebFetch` (core) does the SSRF-guarded fetch (DNS-resolved,
+  private/link-local denied per redirect hop; cross-host redirects surface a notice instead of
+  following; 15-min page cache by URL) and the digest pass runs on the **session's own model**
+  via `AiSdkRunner.generateDigest`, which adds its tokens into `#turnAccum` — any extra model
+  call made outside that method loses tokens from the turn's accounting. The digest is never
+  cached (it's per-prompt).
+- `deliver_file` exists only when `onFileDelivered` is wired; `createEngineSession` grants it by
+  default (`capabilities.deliverFiles: false` withholds it). Delivered files are downloadable
+  only while the session lives — in-memory VFS; durability is the persistence tier (M5).
+- `createEngineRunner` is synchronous, so a per-session MCP connect can't be awaited there —
+  the example connects ONE process-wide MCP client at startup and shares its tools across
+  sessions (sessions must not close it). Per-session connections belong in an async assembly
+  path with `AiSdkRunnerConfig.onClose` as the disposer.
 - Bridged tool calls: the server asks the **first attached** client and fails dispatch fast when
   none is attached (which is why autonomous jobs simply never bridge). Results are idempotent by
   `executionId` — a late answer racing a timeout is expected and must not error the client or

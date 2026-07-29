@@ -7,6 +7,7 @@ Things `pnpm test` deliberately cannot check. Run these by hand.
 | Sandbox boundary | `pnpm smoke:sandbox` | No |
 | Live model loop | `<KEY>=... pnpm smoke:live [provider] [model]` | **Yes — real tokens** |
 | Full SDK-client stack | `<KEY>=... pnpm smoke:sdk [provider] [model]` | **Yes — real tokens** |
+| Live MCP | `pnpm smoke:mcp --probe` / `<KEY>=... pnpm smoke:mcp [provider] [model]` | Probe: no. Full: **yes** |
 
 ## `smoke:sandbox` — the untrusted-code boundary
 
@@ -66,3 +67,19 @@ Hard failures: turn doesn't complete or errors, no bridged client execution, an 
 non-browser backend, wrong answer (348), or empty turn usage. The server-side
 `/out/report.json` written by `fs_write` is reported but only warned on — providers vary in
 following that instruction. Verified against `claude-sonnet-5` and `gpt-5`.
+
+## `smoke:mcp` — live MCP tools from a real remote server
+
+The unit tests drive `connectMcpTools` against a stub; this connects to **DeepWiki**
+(`https://mcp.deepwiki.com/mcp`, free, no auth) for real: streamable-http transport, tools
+namespaced `deepwiki__*`, granted to a provider session as authoritative (server-side execute,
+never bridged), with a prompt only answerable through them.
+
+```bash
+pnpm smoke:mcp --probe                    # connect + list tools + clean close — FREE
+ANTHROPIC_API_KEY=... pnpm smoke:mcp anthropic   # full loop — costs tokens
+```
+
+Hard failures: no tools (server unreachable or protocol drift), tools not namespaced, turn
+doesn't complete, or the model answered without a single `deepwiki__*` call. Verified against
+`claude-sonnet-5`.

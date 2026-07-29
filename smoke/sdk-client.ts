@@ -105,7 +105,8 @@ const server = createWorkerServer({
         'You evaluate sales leads. Use the eval_script tool to compute answers from files in the ' +
         'scratch filesystem — never guess numbers. Inside eval_script the sandbox exposes ' +
         'vfs.read(path), vfs.write(path, text), and vfs.list(dir); the value of the last ' +
-        'expression is returned to you. To persist files for the operator, use the fs_write tool.',
+        'expression is returned to you. To hand a file to the user, write it with fs_write, ' +
+        'then call deliver_file with its path.',
       executionLimits: { timeoutMs: 15_000 },
     })
     serverVfs.set(runner.id, vfs)
@@ -175,13 +176,16 @@ handle.on('event', (event) => {
     )
     if (event.errors?.length) console.log('   errors:', event.errors.join('; '))
   }
+  if (event.type === 'file_delivered') {
+    console.log(`\n📦 file_delivered: ${event.path} (${event.bytes} bytes)`)
+  }
   if (event.type === 'session_error') console.error('\n❗ session_error:', event.message)
 })
 
 handle.send(
   'Read /leads/acme.txt and tell me the revenue per employee, rounded to the nearest whole ' +
     'number. Compute it with eval_script. Then save {"revenuePerEmployee": <the number>} to ' +
-    '/out/report.json using the fs_write tool.',
+    '/out/report.json using the fs_write tool and hand it to me with deliver_file.',
 )
 
 const deadline = Date.now() + 180_000
@@ -242,6 +246,23 @@ if (report?.includes('348')) {
     `\n⚠️  /out/report.json not found on the server VFS (model skipped fs_write). ` +
       `VFS: ${JSON.stringify(vfs.snapshot())}`,
   )
+}
+
+// File delivery, end to end: the deliver_file tool emitted file_delivered over
+// the WS, and the file is downloadable through the client SDK's REST surface.
+const deliveredEvent = events.find((e) => e.type === 'file_delivered')
+if (deliveredEvent?.type === 'file_delivered') {
+  const files = await client.listSessionFiles(session.id)
+  const downloaded = await client.fetchSessionFile(session.id, deliveredEvent.path)
+  if (!files.some((f) => f.path === deliveredEvent.path)) {
+    fail(`Delivered path ${deliveredEvent.path} missing from GET /files: ${JSON.stringify(files)}`)
+  }
+  if (!downloaded.includes('348')) {
+    fail(`Downloaded ${deliveredEvent.path} does not contain 348 — got: ${downloaded}`)
+  }
+  console.log(`✅ file_delivered + REST download round-tripped: ${deliveredEvent.path}`)
+} else if (report) {
+  console.log('⚠️  Model wrote the report but never called deliver_file — no download card.')
 }
 
 console.log(`\nSession ${session.id}`)

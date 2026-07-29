@@ -63,6 +63,10 @@ export type TranscriptItem =
       errors?: string[]
     }
   | { kind: 'notice'; id: string; level: 'info' | 'error'; text: string }
+  /** The agent handed over a session file (`file_delivered`). Render a download
+   * card; the file is served by GET /sessions/:id/files/<path> while the
+   * session lives. */
+  | { kind: 'file_delivered'; id: string; path: string; bytes: number; description?: string }
 
 export type TranscriptState = {
   status: SessionStatus
@@ -394,6 +398,21 @@ export function applyEvent(state: TranscriptState, event: SessionEvent): Transcr
               }
             : item,
         ),
+      }
+
+    case 'file_delivered':
+      return {
+        ...base,
+        items: [
+          ...base.items,
+          {
+            kind: 'file_delivered',
+            id: `file-${event.seq}`,
+            path: event.path,
+            bytes: event.bytes,
+            description: event.description,
+          },
+        ],
       }
 
     case 'session_error':

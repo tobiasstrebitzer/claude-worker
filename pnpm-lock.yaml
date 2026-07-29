@@ -364,6 +364,9 @@ importers:
       '@anthropic-ai/claude-agent-sdk':
         specifier: ^0.3.217
         version: 0.3.217(@anthropic-ai/sdk@0.93.0(zod@4.4.3))(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(zod@4.4.3)
+      '@claude-worker/sandbox':
+        specifier: workspace:*
+        version: link:../sandbox
       '@swc-node/register':
         specifier: ^1.11.1
         version: 1.12.1(@swc/core@1.15.46)(@swc/types@0.1.27)(typescript@6.0.3)
