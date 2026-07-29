@@ -146,10 +146,16 @@ importers:
       '@claude-worker/protocol':
         specifier: workspace:*
         version: link:../protocol
+      '@claude-worker/sandbox':
+        specifier: workspace:*
+        version: link:../sandbox
       ai:
         specifier: ^7.0.38
         version: 7.0.38(zod@4.4.3)
     devDependencies:
+      '@jitl/quickjs-ng-wasmfile-release-asyncify':
+        specifier: ^0.31.0
+        version: 0.31.0
       '@types/node':
         specifier: ^22.10.0
         version: 22.20.1
