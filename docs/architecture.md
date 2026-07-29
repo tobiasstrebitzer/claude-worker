@@ -42,7 +42,14 @@ boundary: anything a client needs must be expressible as protocol events and com
   `resolveToolCall()` appends the result and re-invokes. Tool execution goes through the
   `ToolExecutor` seam, whose dispatch either settles inline or returns `pending` keyed by
   `executionId`, so a deferred or remote backend drops in without touching the runner or the
-  protocol. `QuickJsExecutor` is the in-process backend over `packages/sandbox`.
+  protocol. `QuickJsExecutor` is the in-process backend over `packages/sandbox`;
+  `BrowserBridgeExecutor` relays to an attached tab. `createToolContext` builds a session's
+  capability-scoped tools — the agent's authority is exactly what is granted, there are no
+  built-in fs/shell tools, and `fs_*` operate on an in-memory scratch VFS rather than the host
+  disk. Each tool carries a trust level: `sandboxed` (no ambient authority, safe to execute
+  anywhere, results untrusted) or `authoritative` (server-side with server credentials — MCP and
+  secret-bearing APIs, never bridged, since bridging would let a browser forge authoritative
+  results). `createEngineSession` assembles provider model + tools + executor into a session.
 - **`packages/sandbox`** — the untrusted-code boundary: a QuickJS-NG WASM guest for
   LLM-generated scripts, an in-memory `memfs` scratch VFS, and a by-value host bridge (values
   cross as strings/JSON; a host object is never handed over by reference — the bridge, not the

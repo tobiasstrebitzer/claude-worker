@@ -185,6 +185,9 @@ importers:
       '@ai-sdk/anthropic':
         specifier: ^4.0.22
         version: 4.0.22(zod@4.4.3)
+      '@ai-sdk/mcp':
+        specifier: ^2.0.17
+        version: 2.0.17(zod@4.4.3)
       '@ai-sdk/moonshotai':
         specifier: ^3.0.18
         version: 3.0.18(zod@4.4.3)
@@ -427,6 +430,12 @@ packages:
 
   '@ai-sdk/gateway@4.0.29':
     resolution: {integrity: sha512-x63ILOnzMjbavVb55ckuoQLZB8KTdrJFzk3nSt1QbecokLac4FGEYQDUKQSvRV93lFWol+8tr0ZR+IHWhGtmJw==}
+    engines: {node: '>=22'}
+    peerDependencies:
+      zod: ^3.25.76 || ^4.1.8
+
+  '@ai-sdk/mcp@2.0.17':
+    resolution: {integrity: sha512-EZYMsjk22wx0RyZV7OyLSjcjaJdUQsuRLOG2SgrfBR7wcOSJDqOpK0OaUhEAnpZXBbnizJaBeLW8u6eboyelhg==}
     engines: {node: '>=22'}
     peerDependencies:
       zod: ^3.25.76 || ^4.1.8
@@ -4551,6 +4560,13 @@ snapshots:
       '@ai-sdk/provider': 4.0.4
       '@ai-sdk/provider-utils': 5.0.13(zod@4.4.3)
       '@vercel/oidc': 3.2.0
+      zod: 4.4.3
+
+  '@ai-sdk/mcp@2.0.17(zod@4.4.3)':
+    dependencies:
+      '@ai-sdk/provider': 4.0.4
+      '@ai-sdk/provider-utils': 5.0.13(zod@4.4.3)
+      pkce-challenge: 5.0.1
       zod: 4.4.3
 
   '@ai-sdk/moonshotai@3.0.18(zod@4.4.3)':

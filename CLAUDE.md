@@ -15,7 +15,10 @@ session from a host app. Key docs — read before changing scope or structure:
   approvals (`canUseTool`), SDKMessage→event normalization, seq-numbered event log. No transport.
   Both engines implement `Runner` (`src/runner-interface.ts`) — the interface server/queue type
   against. `AiSdkRunner` is the model-agnostic engine (AI SDK v7 `ToolLoopAgent`); tool execution
-  goes through the `ToolExecutor` seam (`QuickJsExecutor` is the in-process backend).
+  goes through the `ToolExecutor` seam (`QuickJsExecutor` in-process, `BrowserBridgeExecutor` to a
+  tab). `createToolContext` builds the capability-scoped tool set with the trust split
+  (`sandboxed` = no `execute`, rides the seam; `authoritative` = server-side, never bridged);
+  `createEngineSession` + `connectMcpTools` assemble a provider session.
 - `packages/sandbox` — untrusted-code boundary: QuickJS-NG WASM guest + memfs VFS + by-value host
   bridge, interpreter-enforced memory/time limits. Leaf like `protocol` (no core/server/model-SDK
   imports); engine variant is injected so server and browser share one guest.
@@ -26,7 +29,9 @@ session from a host app. Key docs — read before changing scope or structure:
   `queue` option mounts `/jobs` + `/queue` routes and a `/queue/ws` JobEvents+stats stream.
   `profiles` option binds names to Claude Code config dirs (session env gets CLAUDE_CONFIG_DIR):
   required-unless-single on create, auto-default from ~/.claude when unset, `allowedProfiles`
-  on the auth principal scopes create + `GET /profiles`.
+  on the auth principal scopes create + `GET /profiles`. A profile with `engine: 'provider'`
+  instead runs the model-agnostic engine, built by the `createEngineRunner` hook (so this package
+  imports no model SDK and never resolves provider credentials itself).
 - `packages/client` — REST + WS client on platform `fetch`/`WebSocket`. Zero runtime deps. Owns
   the WS frame surface, so new frames need `SessionHandle` methods/events here. Tests run against
   a real server; `tsconfig.test.json` keeps them out of the main typecheck so `src` stays
@@ -144,6 +149,13 @@ in tampering with the credential chain. Compliance/legal review is in progress �
 - A package that imports a workspace sibling needs the vitest workspace-source alias (see
   `packages/core/vitest.config.ts`) — the `@claude-worker/source` condition alone isn't enough,
   vite-node externalizes siblings to their unbuilt `build/` entries.
+- Tool trust is load-bearing, not decorative: only `sandboxed` tools may leave the server, and
+  they're the ones declared WITHOUT `execute` (the AI SDK halting on those IS the seam). MCP and
+  any secret-bearing tool is `authoritative` — bridging one would let a browser forge
+  authoritative results. `withMcpTools` throws on a name collision for that reason.
+- AI SDK MCP lives in `@ai-sdk/mcp` (not `ai`) as of v7, is imported lazily, and supports
+  **http/sse only** — stdio is local-only upstream and is rejected explicitly. Claude-engine
+  sessions still do stdio, since the CLI spawns those itself.
 - Bridged tool calls: the server asks the **first attached** client and fails dispatch fast when
   none is attached (which is why autonomous jobs simply never bridge). Results are idempotent by
   `executionId` — a late answer racing a timeout is expected and must not error the client or
