@@ -1,4 +1,6 @@
 export { SessionRunner } from './runner.ts'
+export { AiSdkRunner } from './ai-sdk-runner.ts'
+export type { AiSdkRunnerConfig, PendingToolCall, ToolCallOutput } from './ai-sdk-runner.ts'
 export type { HistoryFn, QueryFn, SessionRunnerConfig } from './runner.ts'
 export type { PermissionDecision, Runner, SessionEventListener } from './runner-interface.ts'
 export { InputQueue } from './input-queue.ts'

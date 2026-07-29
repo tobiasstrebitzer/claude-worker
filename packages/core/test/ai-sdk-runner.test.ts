@@ -1,0 +1,177 @@
+import { describe, expect, it } from 'vitest'
+import { tool } from 'ai'
+import { MockLanguageModelV3 } from 'ai/test'
+import { z } from 'zod'
+import type { SessionEvent } from '@claude-worker/protocol'
+import { AiSdkRunner, type AiSdkRunnerConfig } from '../src/index.ts'
+
+const USAGE = {
+  inputTokens: { total: 10, noCache: 10, cacheRead: undefined, cacheWrite: undefined },
+  outputTokens: { total: 5, text: 5, reasoning: undefined },
+  raw: undefined,
+}
+
+function textResponse(text: string) {
+  return {
+    content: [{ type: 'text' as const, text }],
+    finishReason: { unified: 'stop' as const, raw: undefined },
+    usage: USAGE,
+    warnings: [],
+  }
+}
+
+function toolCallResponse(toolCallId: string, toolName: string, input: unknown) {
+  return {
+    content: [{ type: 'tool-call' as const, toolCallId, toolName, input: JSON.stringify(input) }],
+    finishReason: { unified: 'tool-calls' as const, raw: undefined },
+    usage: USAGE,
+    warnings: [],
+  }
+}
+
+function makeRunner(config: Partial<AiSdkRunnerConfig> & { languageModel: AiSdkRunnerConfig['languageModel'] }) {
+  const runner = new AiSdkRunner({ ...config })
+  const events: SessionEvent[] = []
+  runner.subscribe((e) => events.push(e))
+  void runner.start()
+  const eventsOf = (type: string) => events.filter((e) => e.type === type)
+  const waitFor = async (predicate: () => boolean, ms = 2000) => {
+    const deadline = Date.now() + ms
+    while (!predicate()) {
+      if (Date.now() > deadline) throw new Error('timed out waiting for condition')
+      await new Promise((r) => setTimeout(r, 5))
+    }
+  }
+  return { runner, events, eventsOf, waitFor }
+}
+
+describe('AiSdkRunner', () => {
+  it('runs a plain text turn: user_message, assistant_message, turn_result, idle', async () => {
+    const model = new MockLanguageModelV3({ modelId: 'mock-1', doGenerate: textResponse('hello there') })
+    const { runner, eventsOf, waitFor } = makeRunner({ languageModel: model })
+
+    runner.sendMessage('hi')
+    await waitFor(() => eventsOf('turn_result').length === 1)
+
+    expect(eventsOf('user_message')).toHaveLength(1)
+    const assistant = eventsOf('assistant_message')
+    expect(assistant).toHaveLength(1)
+    expect(assistant[0]).toMatchObject({
+      message: { role: 'assistant', content: [{ type: 'text', text: 'hello there' }], model: 'mock-1' },
+    })
+    expect(eventsOf('turn_result')[0]).toMatchObject({
+      subtype: 'success',
+      isError: false,
+      numTurns: 1,
+      result: 'hello there',
+      usage: { input_tokens: 10, output_tokens: 5 },
+    })
+    expect(runner.info().status).toBe('idle')
+    expect(runner.info().model).toBe('mock-1')
+  })
+
+  it('executes local tools inside the loop and emits tool_use + synthetic tool_result', async () => {
+    const model = new MockLanguageModelV3({
+      modelId: 'mock-1',
+      doGenerate: [
+        toolCallResponse('call-1', 'lookup', { key: 'k' }),
+        textResponse('found it'),
+      ],
+    })
+    const tools = {
+      lookup: tool({
+        inputSchema: z.object({ key: z.string() }),
+        execute: async ({ key }) => ({ value: `${key}-value` }),
+      }),
+    }
+    const harness = makeRunner({ languageModel: model, tools })
+    harness.runner.sendMessage('look up k')
+    await harness.waitFor(() => harness.eventsOf('turn_result').length === 1)
+
+    const assistantEvents = harness.eventsOf('assistant_message')
+    const toolUse = assistantEvents
+      .flatMap((e) => ((e as { message: { content: unknown } }).message.content as Array<{ type: string }>))
+      .find((b) => b.type === 'tool_use')
+    expect(toolUse).toMatchObject({ type: 'tool_use', name: 'lookup' })
+    const synthetic = harness.eventsOf('user_message').filter((e) => (e as { synthetic?: boolean }).synthetic)
+    expect(synthetic.length).toBeGreaterThan(0)
+    expect(harness.eventsOf('turn_result')[0]).toMatchObject({ subtype: 'success', result: 'found it' })
+    // v7 result.usage is cumulative across steps: two steps of 10/5 each.
+    expect(harness.eventsOf('turn_result')[0]).toMatchObject({
+      usage: { input_tokens: 20, output_tokens: 10 },
+    })
+  })
+
+  it('parks on an execute-less tool call and resumes via resolveToolCall (message-state replay)', async () => {
+    const model = new MockLanguageModelV3({
+      modelId: 'mock-1',
+      doGenerate: [
+        toolCallResponse('call-9', 'eval_script', { script: '1+1' }),
+        textResponse('the answer is 2'),
+      ],
+    })
+    const tools = {
+      // No execute: the loop halts and the call surfaces as a pending execution.
+      eval_script: tool({ inputSchema: z.object({ script: z.string() }) }),
+    }
+    const h = makeRunner({ languageModel: model, tools })
+    h.runner.sendMessage('evaluate 1+1')
+
+    await h.waitFor(() => h.runner.pendingToolCalls.length === 1)
+    // Parked: no turn_result yet, session still mid-turn.
+    expect(h.eventsOf('turn_result')).toHaveLength(0)
+    expect(h.runner.pendingToolCalls[0]).toMatchObject({ toolCallId: 'call-9', toolName: 'eval_script' })
+    expect(h.runner.info().status).toBe('running')
+
+    // Unknown ids are rejected; the real one is accepted exactly once.
+    expect(h.runner.resolveToolCall('nope', { type: 'text', value: 'x' })).toBe(false)
+    expect(h.runner.resolveToolCall('call-9', { type: 'json', value: { result: 2 } })).toBe(true)
+    expect(h.runner.resolveToolCall('call-9', { type: 'json', value: { result: 2 } })).toBe(false)
+
+    await h.waitFor(() => h.eventsOf('turn_result').length === 1)
+    expect(h.eventsOf('turn_result')[0]).toMatchObject({ subtype: 'success', result: 'the answer is 2' })
+    expect(h.runner.info().status).toBe('idle')
+    // The tool result was appended to the durable message state for the replay.
+    const toolMessage = h.runner.messages.find((m) => m.role === 'tool')
+    expect(toolMessage).toBeDefined()
+  })
+
+  it('rejects unsupported permission modes at construction and via setPermissionMode', async () => {
+    const model = new MockLanguageModelV3({ modelId: 'mock-1', doGenerate: textResponse('x') })
+    expect(() => new AiSdkRunner({ languageModel: model, permissionMode: 'plan' })).toThrow(
+      /not supported/,
+    )
+    const h = makeRunner({ languageModel: model })
+    await expect(h.runner.setPermissionMode('acceptEdits')).rejects.toThrow(/not supported/)
+    await expect(h.runner.setPermissionMode('dontAsk')).resolves.toBeUndefined()
+    expect(h.eventsOf('permission_mode_changed')).toHaveLength(1)
+  })
+
+  it('surfaces turn errors as error_during_execution without killing the session', async () => {
+    const model = new MockLanguageModelV3({
+      modelId: 'mock-1',
+      doGenerate: () => {
+        throw new Error('provider exploded')
+      },
+    })
+    const h = makeRunner({ languageModel: model })
+    h.runner.sendMessage('hi')
+    await h.waitFor(() => h.eventsOf('turn_result').length === 1)
+    expect(h.eventsOf('turn_result')[0]).toMatchObject({
+      subtype: 'error_during_execution',
+      isError: true,
+      errors: ['provider exploded'],
+    })
+    expect(h.runner.info().status).toBe('idle')
+    expect(() => h.runner.sendMessage('still alive?')).not.toThrow()
+  })
+
+  it('close() settles the session and refuses further input', async () => {
+    const model = new MockLanguageModelV3({ modelId: 'mock-1', doGenerate: textResponse('x') })
+    const h = makeRunner({ languageModel: model })
+    h.runner.close('server')
+    expect(h.eventsOf('session_closed')).toHaveLength(1)
+    expect(h.runner.info().status).toBe('closed')
+    expect(() => h.runner.sendMessage('hi')).toThrow(/closed/)
+  })
+})
