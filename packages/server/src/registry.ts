@@ -6,7 +6,11 @@ export class SessionRegistry {
   #sessions = new Map<string, Runner>()
 
   create(config: SessionRunnerConfig): Runner {
-    const runner = new SessionRunner(config)
+    return this.adopt(new SessionRunner(config))
+  }
+
+  /** Register an already-built runner (a non-Claude engine) and start it. */
+  adopt(runner: Runner): Runner {
     this.#sessions.set(runner.id, runner)
     void runner.start()
     return runner

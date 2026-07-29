@@ -106,6 +106,26 @@ export type WorkerServerOptions = {
    * before it fails (default 60000), and where terminal results are delivered.
    * The hub is always available on the returned server as `bridge`. */
   bridge?: BridgeHubOptions
+  /**
+   * Build a runner for a `provider` profile (the model-agnostic engine).
+   * Required if any such profile is declared — the server refuses to start
+   * otherwise, rather than failing at create time.
+   *
+   * Kept as a host hook so the server package neither imports a model SDK nor
+   * decides how provider credentials are resolved: the factory reads them from
+   * the operator's environment, exactly like the Claude credential chain.
+   */
+  createEngineRunner?: (context: EngineRunnerContext) => Runner
+}
+
+export type EngineRunnerContext = {
+  /** The session config, with profile defaults already applied. */
+  config: SessionRunnerConfig
+  /** The profile that selected this engine. */
+  profile: ProfileInfo
+  /** Bridge hub, for handing the runner a browser-backed ToolExecutor
+   * (`bridge.executorFor(sessionId)`). */
+  bridge: BridgeHub
 }
 
 export type QueueServerOptions = {
@@ -172,9 +192,13 @@ async function readJsonBody(
  * Curated, view-only snapshot of a profile's config dir for GET /profiles/:name.
  * Best-effort: a missing or unparseable settings.json just omits the settings block.
  * Env var VALUES are never read into the response — names only.
+ *
+ * Provider profiles have no config dir, so the snapshot is empty for them: their
+ * configuration is the `provider` block already on ProfileInfo.
  */
 function readProfileConfig(profile: ProfileInfo): ProfileConfigSnapshot {
   const dir = profile.configDir
+  if (!dir) return { hasUserMemory: false, skills: [], agents: [], commands: [] }
   const listDirs = (path: string): string[] => {
     try {
       return readdirSync(path, { withFileTypes: true })
@@ -228,6 +252,12 @@ function readProfileConfig(profile: ProfileInfo): ProfileConfigSnapshot {
   return snapshot
 }
 
+/** A profile runs the model-agnostic engine rather than Claude Code. `engine` is
+ * optional so profiles written before provider support keep meaning 'claude'. */
+function isProviderProfile(profile: ProfileInfo): boolean {
+  return profile.engine === 'provider'
+}
+
 /** Auto-created profile when none are declared: the operator's own config dir. */
 function detectDefaultProfiles(): ProfileInfo[] {
   const dir = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude')
@@ -263,7 +293,19 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
     throw new Error('createWorkerServer: duplicate profile names in `profiles`')
   }
   for (const p of options.profiles ?? []) {
-    if (!existsSync(p.configDir)) {
+    if (isProviderProfile(p)) {
+      // Provider profiles have no config dir; they need an engine factory to
+      // build a runner at all, so refuse at startup rather than at create time.
+      if (!p.provider?.id) {
+        throw new Error(`createWorkerServer: provider profile '${p.name}' is missing provider.id`)
+      }
+      if (!options.createEngineRunner) {
+        throw new Error(
+          `createWorkerServer: profile '${p.name}' uses engine 'provider' but no ` +
+            '`createEngineRunner` was provided to build one',
+        )
+      }
+    } else if (!p.configDir || !existsSync(p.configDir)) {
       throw new Error(
         `createWorkerServer: profile '${p.name}' configDir does not exist: ${p.configDir}`,
       )
@@ -296,13 +338,26 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
     if (!profile) return hostBuildRunnerConfig(req)
     const config = hostBuildRunnerConfig({
       ...req,
-      model: req.model ?? profile.defaults?.model,
+      model: req.model ?? profile.defaults?.model ?? profile.provider?.model,
       permissionMode: req.permissionMode ?? profile.defaults?.permissionMode,
     })
+    // Provider profiles have no config dir to pin: their credentials come from
+    // the operator's environment through the engine factory.
+    if (isProviderProfile(profile)) return config
     return {
       ...config,
-      env: { ...(config.env ?? process.env), CLAUDE_CONFIG_DIR: profile.configDir },
+      env: { ...(config.env ?? process.env), CLAUDE_CONFIG_DIR: profile.configDir! },
     }
+  }
+
+  /** Build a runner for a session, choosing the engine from its profile. */
+  const createRunner = (config: SessionRunnerConfig): Runner => {
+    const profile = config.profile !== undefined ? profileByName.get(config.profile) : undefined
+    if (profile && isProviderProfile(profile)) {
+      // Guaranteed present: startup refuses provider profiles without a factory.
+      return registry.adopt(options.createEngineRunner!({ config, profile, bridge }))
+    }
+    return registry.create(config)
   }
 
   /** Resolve a request's profile: required when several are declared, implicit with
@@ -369,9 +424,10 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
           }
         },
         // Job sessions are ordinary registry sessions (attachable/watchable) and go
-        // through the same config hook and auth-provenance watcher as client sessions.
+        // through the same config hook, engine selection, and auth-provenance
+        // watcher as client sessions.
         createRunner: (config) => {
-          const runner = registry.create(config)
+          const runner = createRunner(config)
           watchAuthSource(runner)
           return runner
         },
@@ -649,7 +705,7 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
         }
         // Resolved name (even when implicit) so SessionInfo.profile is always set.
         body.profile = resolved.profile?.name
-        const runner = registry.create(buildRunnerConfig(body))
+        const runner = createRunner(buildRunnerConfig(body))
         watchAuthSource(runner)
         json(res, 201, { session: runner.info() })
         return

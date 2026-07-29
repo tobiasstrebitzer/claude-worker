@@ -464,11 +464,42 @@ export type ProfileDefaults = {
  * Profiles are declared in server options at startup (or a 'default' one is
  * auto-created from the operator's own config dir) — the API only reads them.
  */
+/**
+ * Which engine a profile runs on.
+ * - `claude` (default) — Claude Code via the Agent SDK, configured by a config dir.
+ * - `provider` — a model-agnostic provider (OpenAI-compatible, Anthropic, Moonshot),
+ *   configured by provider id and credentials from the operator's environment.
+ */
+export type ProfileEngine = 'claude' | 'provider'
+
+/**
+ * A model provider a `provider` profile can run on. Credentials are ALWAYS
+ * resolved from the operator's environment — never carried on the wire, never
+ * stored here. `apiKeyEnv` names the variable to read, it does not hold a key.
+ */
+export type ProviderConfig = {
+  /** Provider adapter to use, e.g. 'anthropic' | 'openai' | 'moonshotai' |
+   * 'openai-compatible'. Kept as a string: the set is host-extensible. */
+  id: string
+  /** Model id, e.g. 'kimi-k3'. Overridable per session. */
+  model?: string
+  /** Base URL for OpenAI-compatible providers. */
+  baseUrl?: string
+  /** Environment variable the operator put the key in. Never the key itself. */
+  apiKeyEnv?: string
+}
+
 export type ProfileInfo = {
   /** Unique name, used as {@link CreateSessionRequest.profile}. */
   name: string
-  /** Absolute path set as CLAUDE_CONFIG_DIR for the session's CLI process. */
-  configDir: string
+  /** Engine this profile runs on. Defaults to 'claude' when absent, so profiles
+   * written before provider support keep working unchanged. */
+  engine?: ProfileEngine
+  /** Absolute path set as CLAUDE_CONFIG_DIR for the session's CLI process.
+   * Required for 'claude' profiles; meaningless for 'provider' ones. */
+  configDir?: string
+  /** Provider wiring for 'provider' profiles. */
+  provider?: ProviderConfig
   description?: string
   defaults?: ProfileDefaults
 }
