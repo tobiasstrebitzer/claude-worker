@@ -9,6 +9,8 @@ import type {
   SessionInfo,
   SessionStatus,
   SlashCommandInfo,
+  ToolExecutionBackend,
+  ToolExecutionOutput,
   ToolResultBlock,
 } from '@claude-worker/protocol'
 
@@ -33,7 +35,23 @@ export type TranscriptItem =
       name: string
       input: unknown
       parentToolUseId: string | null
+      /**
+       * - `running` — the model called it; execution has not been reported
+       * - `pending` — dispatched to an executor (bridged to this client, queued)
+       * - `deferred` — parked beyond this turn; may outlive the session's liveness
+       * - `settled` / `failed` — terminal
+       *
+       * Derive UI from this, not from `result` being present: a pending or
+       * deferred call has no result yet and is not the same as a running one.
+       */
+      status: 'running' | 'pending' | 'deferred' | 'settled' | 'failed'
       result?: { text: string; isError: boolean }
+      /** Correlation id when this call is executed outside the model loop. */
+      executionId?: string
+      /** Which backend is executing it, when known. */
+      backend?: ToolExecutionBackend
+      /** Logs captured by the executor (guest console output). */
+      logs?: string[]
     }
   | {
       kind: 'turn_result'
@@ -91,6 +109,16 @@ function blockText(content: ToolResultBlock['content']): string {
 
 function contentToBlocks(content: string | ContentBlock[]): ContentBlock[] {
   return typeof content === 'string' ? [{ type: 'text', text: content }] : content
+}
+
+/** Render an execution's by-value output for the transcript. */
+function outputText(output: ToolExecutionOutput): string {
+  if (output.type === 'text') return output.value
+  try {
+    return JSON.stringify(output.value)
+  } catch {
+    return String(output.value)
+  }
 }
 
 /** CLI-side command output arrives as user text wrapped in local-command tags. */
@@ -164,14 +192,13 @@ export function applyEvent(state: TranscriptState, event: SessionEvent): Transcr
       for (const block of contentToBlocks(event.message.content)) {
         if (block.type === 'tool_result') {
           const toolResult = block as ToolResultBlock
+          const isError = toolResult.is_error === true
           items = items.map((item) =>
             item.kind === 'tool_call' && item.id === toolResult.tool_use_id
               ? {
                   ...item,
-                  result: {
-                    text: blockText(toolResult.content),
-                    isError: toolResult.is_error === true,
-                  },
+                  status: isError ? 'failed' : 'settled',
+                  result: { text: blockText(toolResult.content), isError },
                 }
               : item,
           )
@@ -246,6 +273,7 @@ export function applyEvent(state: TranscriptState, event: SessionEvent): Transcr
             name: toolUse.name,
             input: toolUse.input,
             parentToolUseId: event.parentToolUseId,
+            status: 'running',
           })
         }
       })
@@ -314,6 +342,58 @@ export function applyEvent(state: TranscriptState, event: SessionEvent): Transcr
       return {
         ...base,
         pendingApprovals: base.pendingApprovals.filter((r) => r.id !== event.requestId),
+      }
+
+    // Execution lifecycle for tool calls that run outside the model loop
+    // (bridged to this client, queued, or deferred). Keyed by executionId, which
+    // equals the tool_use id for calls the model made. Events for an unknown id
+    // are ignored rather than fabricating an item: the tool_use that explains it
+    // may simply not have arrived (or belongs to another session).
+    case 'execution_dispatched':
+      return {
+        ...base,
+        items: base.items.map((item) =>
+          item.kind === 'tool_call' && item.id === event.executionId
+            ? {
+                ...item,
+                status: event.deferred ? 'deferred' : 'pending',
+                executionId: event.executionId,
+                backend: event.backend,
+              }
+            : item,
+        ),
+      }
+
+    case 'execution_result':
+      return {
+        ...base,
+        items: base.items.map((item) =>
+          item.kind === 'tool_call' && item.id === event.executionId
+            ? {
+                ...item,
+                status: 'settled',
+                executionId: event.executionId,
+                result: { text: outputText(event.output), isError: false },
+                logs: event.logs ?? item.logs,
+              }
+            : item,
+        ),
+      }
+
+    case 'execution_failed':
+      return {
+        ...base,
+        items: base.items.map((item) =>
+          item.kind === 'tool_call' && item.id === event.executionId
+            ? {
+                ...item,
+                status: 'failed',
+                executionId: event.executionId,
+                result: { text: `${event.reason}: ${event.error}`, isError: true },
+                logs: event.logs ?? item.logs,
+              }
+            : item,
+        ),
       }
 
     case 'session_error':
