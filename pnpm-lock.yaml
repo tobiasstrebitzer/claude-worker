@@ -8,15 +8,42 @@ importers:
 
   .:
     devDependencies:
+      '@ai-sdk/anthropic':
+        specifier: ^4.0.22
+        version: 4.0.22(zod@4.4.3)
+      '@ai-sdk/moonshotai':
+        specifier: ^3.0.18
+        version: 3.0.18(zod@4.4.3)
+      '@ai-sdk/openai':
+        specifier: ^4.0.21
+        version: 4.0.21(zod@4.4.3)
+      '@claude-worker/core':
+        specifier: workspace:*
+        version: link:packages/core
+      '@claude-worker/protocol':
+        specifier: workspace:*
+        version: link:packages/protocol
+      '@claude-worker/sandbox':
+        specifier: workspace:*
+        version: link:packages/sandbox
+      '@jitl/quickjs-ng-wasmfile-release-asyncify':
+        specifier: ^0.31.0
+        version: 0.31.0
       '@swc-node/register':
         specifier: ^1.11.1
         version: 1.12.1(@swc/core@1.15.46)(@swc/types@0.1.27)(typescript@6.0.3)
       '@swc/core':
         specifier: ^1.15.41
         version: 1.15.46
+      '@types/node':
+        specifier: ^22.20.1
+        version: 22.20.1
       '@typescript/native-preview':
         specifier: 7.0.0-dev.20260707.2
         version: 7.0.0-dev.20260707.2
+      ai:
+        specifier: ^7.0.38
+        version: 7.0.38(zod@4.4.3)
       oxlint:
         specifier: ^1.0.0
         version: 1.74.0
@@ -32,6 +59,9 @@ importers:
       vitest:
         specifier: ^3.2.0
         version: 3.2.7(@types/debug@4.1.13)(@types/node@22.20.1)(jiti@2.7.0)(lightningcss@1.32.0)
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
 
   apps/docs:
     dependencies:
