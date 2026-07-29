@@ -22,6 +22,12 @@ A session created here behaves like Claude Code launched in the same directory: 
 adds the missing hosting layer: a session server your web app can talk to, a typed wire protocol
 for the message stream, and embeddable panel components with approve/deny controls.
 
+Since 0.3 it also runs a **second, model-agnostic engine** on the same protocol, transport, and
+UI: any provider the [AI SDK](https://ai-sdk.dev) supports, with capability-scoped tools that
+execute in a QuickJS sandbox — server-side or in the user's own browser tab. A profile picks which
+engine a session runs on, so one worker can serve both. See
+[Two engines](#two-engines-claude-code-and-any-provider).
+
 **Documentation: [tobiasstrebitzer.github.io/claude-worker](https://tobiasstrebitzer.github.io/claude-worker/)** —
 quickstart, embedding guide, permissions, job queue, and the full reference. Design docs live in
 [`docs/`](docs/): [architecture](docs/architecture.md) and [roadmap](docs/roadmap.md).
@@ -33,8 +39,8 @@ Each package has its own README with install and usage details.
 | Package | What it is |
 | --- | --- |
 | [`@claude-worker/protocol`](packages/protocol) | The wire protocol: session events, commands, REST shapes. Dependency-free, browser-safe. **This is the product boundary** — versioned from day one. |
-| [`@claude-worker/core`](packages/core) | The session runner: wraps `query()`, owns the streaming input, promotes `canUseTool` calls into pending approvals, normalizes SDK messages into protocol events, keeps a seq-numbered event log for attach/replay. Pure library, no transport. |
-| [`@claude-worker/sandbox`](packages/sandbox) | The untrusted-code boundary: a QuickJS-NG WebAssembly guest with an in-memory scratch filesystem and a by-value host bridge. Deny-by-default — no filesystem, network, or timers unless granted — with interpreter-enforced memory and time limits. Leaf package; the same guest runs server-side and in a browser tab. *(In development on `feat/model-agnostic-runtime`; not yet published.)* |
+| [`@claude-worker/core`](packages/core) | The engines. `SessionRunner` wraps `query()`, owns the streaming input, promotes `canUseTool` calls into pending approvals, normalizes SDK messages into protocol events, keeps a seq-numbered event log for attach/replay. `AiSdkRunner` is the model-agnostic engine over the AI SDK's `ToolLoopAgent`, with tool execution behind a swappable `ToolExecutor` seam. Both implement one `Runner` interface. Pure library, no transport. |
+| [`@claude-worker/sandbox`](packages/sandbox) | The untrusted-code boundary: a QuickJS-NG WebAssembly guest with an in-memory scratch filesystem and a by-value host bridge. Deny-by-default — no filesystem, network, or timers unless granted — with interpreter-enforced memory and time limits. Leaf package; the same guest runs server-side and in a browser tab. |
 | [`@claude-worker/server`](packages/server) | The gateway: HTTP + WebSocket, session registry (create/list/attach/interrupt/kill), pluggable auth hook, optional job-queue routes. Runs anywhere Node ≥22 runs. |
 | [`@claude-worker/queue`](packages/queue) | The job queue: remote services schedule one-shot runs; jobs execute as ordinary sessions with bounded concurrency and token budgets, delivering progress + completion via webhooks. Pluggable `QueueAdapter` (in-memory bundled; redis/bullmq/pubsub can implement the same contract). |
 | [`@claude-worker/client`](packages/client) | Typed protocol client for browsers and Node: REST + WebSocket attach with auto-reconnect and replay-from-last-seq. Zero runtime deps. |
@@ -136,10 +142,10 @@ registry sessions, so the web dashboard can watch them stream in real time. The 
 is single-process and non-persistent — jobs and daily counters reset on restart; implement
 `QueueAdapter` against a shared store for anything beyond one trusted host.
 
-## Profiles: one worker, several config dirs
+## Profiles: what a session runs as
 
-A **profile** names a Claude Code config directory: sessions and jobs run under one, and the
-spawned CLI gets it as `CLAUDE_CONFIG_DIR` — that directory's settings, memory, skills, and
+A **profile** is what a session runs as. Most commonly it names a Claude Code config directory:
+sessions and jobs run under one, and the spawned CLI gets it as `CLAUDE_CONFIG_DIR` — that directory's settings, memory, skills, and
 whatever credentials the SDK resolves from it. The canonical case is a shared machine where
 several team members each keep their own config dir:
 
@@ -156,8 +162,8 @@ const worker = createWorkerServer({
 })
 ```
 
-Profiles are declared at startup and read-only over the API (`GET /v1/profiles`, the dashboard's
-Profiles view). With more than one declared, every session/job create must name its `profile`;
+Profiles are declared at startup, and read-only over the API unless you pass a `profileStore`
+(below). With more than one declared, every session/job create must name its `profile`;
 with exactly one it's implicit — and when the option is unset, a `default` profile is
 auto-created from `$CLAUDE_CONFIG_DIR`/`~/.claude`, so single-operator setups need nothing.
 `defaults` fill unset request fields (not enforced caps). **Scope profiles per caller** with
@@ -166,6 +172,58 @@ each person using their own account — a free-for-all picker over other people'
 account pooling (see the red lines below). Profiles never touch the credential chain: an
 `ANTHROPIC_API_KEY` in the server env still wins for every profile, and each session's
 `apiKeySource` shows what it actually used.
+
+**Managing them from the dashboard.** Pass a `profileStore` (a small seam; in-memory and
+JSON-file stores are bundled) to let the Profiles view create, edit, and delete profiles. It is
+doubly opt-in: the operator wires the store *and* the principal carries `canManageProfiles`.
+Profiles declared in server options stay immutable — they're code — and a managed Claude profile
+must point inside `allowedConfigDirRoots`, because naming a config directory is choosing which
+credential store a session runs on.
+
+## Two engines: Claude Code, and any provider
+
+A profile also picks the **engine**. The default is Claude Code via the Agent SDK, everything
+above. `engine: 'provider'` instead runs the model-agnostic engine — no CLI process, no config
+directory — against any provider the AI SDK supports:
+
+```ts
+createWorkerServer({
+  profiles: [
+    { name: 'toby', configDir: '/Users/atomic/toby/.claude' },      // Claude Code
+    {
+      name: 'kimi',
+      engine: 'provider',
+      // apiKeyEnv is a variable NAME. No credential is ever stored here or put on the wire.
+      provider: { id: 'moonshotai', model: 'kimi-k3', apiKeyEnv: 'MOONSHOT_API_KEY' },
+      session: { capabilities: ['web_fetch', 'deliver_file'], mcpServers: ['deepwiki'] },
+    },
+  ],
+  // The one place a model SDK and its credentials are resolved — the server package
+  // imports neither. May be async, e.g. for a per-session MCP connect.
+  createEngineRunner: ({ config, profile, bridge }) => createEngineSession({ /* ... */ }),
+})
+```
+
+What it gets you, and what it costs:
+
+- **Capability-scoped tools, no ambient authority.** There is no shell and no host filesystem.
+  `fs_*` operate on an in-memory scratch VFS; `web_search`, `download`, `web_fetch`, and
+  `deliver_file` exist only when the profile grants them, and a session request may narrow that
+  set but never widen it.
+- **Untrusted code runs in a sandbox — possibly not yours.** `eval_script` is the one *sandboxed*
+  tool, and it can execute in the **user's own browser tab** over the WS bridge, so client-held
+  documents never reach the server. Everything else is *authoritative*: server-side, with server
+  credentials, never bridged. That split is enforced in types, and it's why a client can't bring
+  its own MCP server to a provider session.
+- **Different vocabulary, honestly.** `permissionMode` is Claude Code's: a provider session runs
+  `default`, `bypassPermissions`, and `dontAsk`, and asking for `acceptEdits`/`plan`/`auto` under
+  one is a 400 rather than a silent coercion. There's no `supportedModels()`, so the model list is
+  whatever the operator declared. CLI-only affordances (resumable SDK sessions, context-usage and
+  rate-limit telemetry, setting sources) simply don't exist — and the dashboard hides them,
+  keying off `SessionInfo.engine`.
+
+Both engines implement one `Runner` interface and speak the same protocol, so the client, the
+React layer, the panel, and the job queue are unchanged either way.
 
 ## Permissions are the sharp edge
 
@@ -218,9 +276,13 @@ stays 100% Anthropic-owned code.
   container with min-instances, any Node ≥22 host with a real filesystem.
 - **Sessions are single-host in V1.** Transcripts live on the server's local disk (the SDK
   default); resume works across process restarts on the same host via `resume: sdkSessionId`.
-- **The server trusts its host app.** `CreateSessionRequest` accepts `mcpServers` and tool policy;
-  gate session creation behind your own auth and use `allowedCwdRoots` + `buildRunnerConfig` to
-  clamp what clients may request.
+- **The server trusts its host app.** For Claude sessions `CreateSessionRequest` accepts
+  `mcpServers` and tool policy; gate session creation behind your own auth and use
+  `allowedCwdRoots` + `buildRunnerConfig` to clamp what clients may request. (Provider sessions
+  are tighter by construction: MCP is declared on the profile, never by the caller.)
+- **Deferred execution is not built yet.** A tool call that can't answer within the turn — a
+  managed remote sandbox, a human-in-the-loop step — is the next milestone; the protocol frames
+  and the `parked` job state are reserved for it, but the behavior isn't there.
 
 ## Development
 
@@ -237,7 +299,9 @@ TS source via the `@claude-worker/source` export condition (`node --conditions=@
 
 ## Status
 
-0.1.x — early but real: runner, protocol, server, client, headless react layer, styled UI, web
-dashboard, and the job queue are all in and tested. Expect the protocol to evolve
-(`PROTOCOL_VERSION` guards breaking changes). See the [roadmap](docs/roadmap.md) for what's
-shipped, what's next, and the open questions (naming, compliance posture).
+0.3.x — early but real: both engines, protocol, server, client, headless react layer, styled UI,
+web dashboard, and the job queue are all in and tested. 0.3 adds the model-agnostic engine, the
+QuickJS sandbox (`@claude-worker/sandbox`, first release), browser-bridged tool execution, and
+profile management. Expect the protocol to evolve (`PROTOCOL_VERSION` guards breaking changes;
+it is at 3). See the [roadmap](docs/roadmap.md) for what's shipped, what's next, and the open
+questions (naming, compliance posture).
