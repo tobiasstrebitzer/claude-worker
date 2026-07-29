@@ -1,18 +1,18 @@
-import { SessionRunner, type SessionRunnerConfig } from '@claude-worker/core'
+import { SessionRunner, type Runner, type SessionRunnerConfig } from '@claude-worker/core'
 import type { SessionInfo } from '@claude-worker/protocol'
 
 /** In-memory session table. Terminal sessions stay listed until removed or the process exits. */
 export class SessionRegistry {
-  #sessions = new Map<string, SessionRunner>()
+  #sessions = new Map<string, Runner>()
 
-  create(config: SessionRunnerConfig): SessionRunner {
+  create(config: SessionRunnerConfig): Runner {
     const runner = new SessionRunner(config)
     this.#sessions.set(runner.id, runner)
     void runner.start()
     return runner
   }
 
-  get(id: string): SessionRunner | undefined {
+  get(id: string): Runner | undefined {
     return this.#sessions.get(id)
   }
 

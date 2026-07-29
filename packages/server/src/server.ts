@@ -5,7 +5,7 @@ import type { Duplex } from 'node:stream'
 import { join, resolve as resolvePath, sep } from 'node:path'
 import { WebSocketServer, type WebSocket } from 'ws'
 import { listSessions as sdkListSessions } from '@anthropic-ai/claude-agent-sdk'
-import type { SessionRunner, SessionRunnerConfig } from '@claude-worker/core'
+import type { Runner, SessionRunnerConfig } from '@claude-worker/core'
 import { JobQueue, type QueueAdapter } from '@claude-worker/queue'
 import {
   PROTOCOL_VERSION,
@@ -372,7 +372,7 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
 
   // Watch each session's init handshake for its auth provenance ('oauth' = claude.ai
   // subscription). The listener is a no-op after the first init; not worth unsubscribing.
-  const watchAuthSource = (runner: SessionRunner): void => {
+  const watchAuthSource = (runner: Runner): void => {
     let seen = false
     runner.subscribe((event) => {
       if (seen || event.type !== 'system_init') return
@@ -741,7 +741,7 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
     })().catch(() => socket.destroy())
   })
 
-  const attachClient = (ws: WebSocket, runner: SessionRunner, req: IncomingMessage): void => {
+  const attachClient = (ws: WebSocket, runner: Runner, req: IncomingMessage): void => {
     const url = new URL(req.url ?? '/', 'http://internal')
     const afterSeq = Number(url.searchParams.get('afterSeq') ?? '0') || 0
 
@@ -775,7 +775,7 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
     ws.on('close', unsubscribe)
   }
 
-  const handleCommand = async (frame: ClientFrame, runner: SessionRunner): Promise<void> => {
+  const handleCommand = async (frame: ClientFrame, runner: Runner): Promise<void> => {
     switch (frame.type) {
       case 'user_message':
         runner.sendMessage(frame.text)

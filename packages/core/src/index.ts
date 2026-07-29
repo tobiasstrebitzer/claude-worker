@@ -1,10 +1,5 @@
 export { SessionRunner } from './runner.ts'
-export type {
-  HistoryFn,
-  PermissionDecision,
-  QueryFn,
-  SessionEventListener,
-  SessionRunnerConfig,
-} from './runner.ts'
+export type { HistoryFn, QueryFn, SessionRunnerConfig } from './runner.ts'
+export type { PermissionDecision, Runner, SessionEventListener } from './runner-interface.ts'
 export { InputQueue } from './input-queue.ts'
 export { normalizeSdkMessage, toApiMessage } from './normalize.ts'

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import type { SessionRunner, SessionRunnerConfig } from '@claude-worker/core'
+import type { Runner, SessionRunnerConfig } from '@claude-worker/core'
 import type {
   ApiMessage,
   CreateJobRequest,
@@ -15,7 +15,7 @@ import { InMemoryQueueAdapter, type JobRecord, type QueueAdapter } from './adapt
 export type JobQueueOptions = {
   /** Turn a session config into a live runner — typically the server registry's create(),
    * so job sessions are ordinary sessions clients can attach to and watch. */
-  createRunner: (config: SessionRunnerConfig) => SessionRunner
+  createRunner: (config: SessionRunnerConfig) => Runner
   /** Storage/claiming backend. Defaults to the in-memory adapter (single process). */
   adapter?: QueueAdapter
   /** Concurrent job sessions. Default 1. */
@@ -50,7 +50,7 @@ export type JobQueueOptions = {
 
 type RunningJob = {
   record: JobRecord
-  runner: SessionRunner
+  runner: Runner
   unsubscribe: () => void
   /** Mid-run token estimate from assistant-message usage (enforcement + progress). */
   estimatedTokens: number
@@ -252,7 +252,7 @@ export class JobQueue {
   async #start(record: JobRecord): Promise<void> {
     const id = record.info.id
     const build = this.#options.buildRunnerConfig ?? ((req: CreateSessionRequest) => req)
-    let runner: SessionRunner
+    let runner: Runner
     try {
       runner = this.#options.createRunner(build(record.request.session))
     } catch (error) {
