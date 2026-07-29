@@ -1,0 +1,73 @@
+name: Publish
+
+# Publishes all 8 @claude-worker packages to npm via **trusted publishing**: the
+# npm CLI trades this workflow's GitHub OIDC token for a short-lived publish
+# credential, so there is no NPM_TOKEN in this repo and provenance attestations
+# are generated automatically.
+#
+# One-time setup, per package, at npmjs.com → package → Settings → Trusted
+# publisher (all fields are exact and case-sensitive):
+#   Organization or user: tobiasstrebitzer
+#   Repository:           claude-worker
+#   Workflow filename:    publish.yml     <- filename only, NOT .github/workflows/publish.yml
+#   Environment:          (leave blank)   <- if you set one here, add `environment:` to the job below
+#
+# Release flow: pnpm version:set <x.y.z> && pnpm install --lockfile-only, commit,
+# then `git tag v<x.y.z> && git push --tags`. The tag must match the version in
+# packages/*/package.json — the publish script refuses the run otherwise.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Pack and report without uploading'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  id-token: write # mints the OIDC token npm exchanges for publish rights
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          # >= 22.14 is a trusted-publishing requirement; `22` resolves to the
+          # latest 22.x and matches the engines field. No dependency cache: a
+          # release build should resolve everything from the lockfile alone.
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      # Node 22 ships npm 10; trusted publishing needs >= 11.5.1.
+      - run: npm install -g npm@latest
+      - run: npm --version
+
+      - run: pnpm install --frozen-lockfile
+      # Same gate as CI, because a tag push doesn't inherit CI's verdict and a
+      # bad publish can't be taken back. check:versions first for the reason
+      # given in ci.yml: a half-done bump makes everything below test the last
+      # published copy instead of this checkout.
+      - run: pnpm check:versions
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+
+      - name: Publish
+        run: |
+          node scripts/publish-workspace.mjs \
+            ${TAG:+--expect-version=${TAG#v}} \
+            ${DRY_RUN:+--dry-run}
+        env:
+          TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '' }}

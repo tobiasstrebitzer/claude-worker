@@ -125,11 +125,16 @@ stack) cost tokens.
   siblings that drift from the local version stop being symlinked and resolve from the registry
   instead, silently. `pnpm check:versions` is the guard (CI runs it first). 0.4.0 tagged;
   `sandbox` first published at 0.3.0.
-- publish: yes — npm `@claude-worker` org via keybridge Touch ID: `npx -y keybridge@latest
-  publish` from each package dir, dependency order (protocol/sandbox → core/client → queue →
-  react → server → ui). Versions are already pinned in the repo, so there is no pin/restore
-  dance — publish straight from a clean tree. Run the gatekeeper audit first. MIT (LICENSE per
-  package; ui intentionally ships `src/`, allowlisted in `.claude/gatekeeper.json`).
+- publish: yes — npm `@claude-worker` org. Default path is CI: push a `v<x.y.z>` tag and
+  `.github/workflows/publish.yml` publishes all 8 via npm **trusted publishing** (OIDC, no
+  NPM_TOKEN, automatic provenance). It re-runs the full CI gate, refuses a tag that disagrees
+  with `packages/*/package.json`, derives dependency order from the runtime dep graph, and skips
+  versions already on the registry — so a half-failed run is safe to re-run. Each package needs a
+  trusted publisher configured once on npmjs.com (workflow filename `publish.yml`, no path).
+  Manual fallback is keybridge Touch ID: `npx -y keybridge@latest publish` from each package dir
+  in that same order. Versions are already pinned in the repo, so there is no pin/restore dance —
+  publish straight from a clean tree. Run the gatekeeper audit first. MIT (LICENSE per package;
+  ui intentionally ships `src/`, allowlisted in `.claude/gatekeeper.json`).
 - docs: root CLAUDE.md + README.md + docs/ + apps/docs (keep site content in sync with README)
 - frontend_smoke: no (manual via `pnpm server` + `pnpm web`)
 - co_authored_by: no (global)
