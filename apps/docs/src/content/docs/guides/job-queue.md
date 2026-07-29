@@ -55,6 +55,7 @@ backoff (default 3 attempts, 500 ms base delay):
 
 ```text
 job_started → job_progress (per assistant message / permission request)
+            → job_parked / job_resumed (waiting on a deferred execution)
             → job_retrying (on a failed attempt with attempts left)
             → job_completed (always terminal)
 ```
@@ -77,6 +78,9 @@ unattended-run policies.
 - **Retries** — `attempts` on the request: failed (not canceled) runs re-queue until that many
   attempts have been made, delayed by `retryDelayMs` (default 5000 ms), doubled each retry.
   `JobInfo.nextRunAt` says when the next attempt may start.
+- **Parked cap** (`maxParkedDurationMs`) — the bound on waiting rather than running. Time spent
+  parked on a deferred execution is excluded from the duration watchdog: a run waiting on a
+  remote worker is not a stuck CLI.
 - **Retention** (`retention.maxAgeMs`) — a periodic sweep prunes terminal jobs; without it the
   in-memory adapter grows unboundedly.
 
@@ -109,3 +113,29 @@ The bundled `InMemoryQueueAdapter` is **single-process and non-persistent**: job
 counters reset on restart. Back the queue with a shared store for anything beyond one trusted
 host. Note that `JobQueue` currently assumes the claiming process runs the job — multi-worker
 deployments need a claim-lease/heartbeat, and webhook ordering is per-process.
+
+## Deferred execution
+
+A job whose run calls a tool nothing here can answer — a remote worker, a batch window, a human —
+does not sit and hold a slot. The session **parks**: its state is snapshotted, its runner is torn
+down, and the job goes `parked` (`job_parked`, with the `executionId` it waits on). It keeps no
+concurrency slot and burns no wall-clock budget, so the next queued job starts immediately.
+
+Whoever does the work calls back when it's done:
+
+```bash
+curl -X POST $SERVER/v1/executions/$EXECUTION_ID/result \
+  -H 'content-type: application/json' \
+  -d '{"status":"ok","output":{"type":"json","value":{"rows":128}}}'
+```
+
+The session is rebuilt under its own id — same transcript, same `seq` numbering, mid-turn — the
+result goes into the agent loop, and the job returns to `running` (`job_resumed`) until its turn
+result completes it. `QueueStats.parked` counts the waiting runs; `JobInfo.parkedAt` /
+`parkedExecutionId` say what each one is waiting for.
+
+`parked` is not terminal anywhere: `claimNext` never claims one, retention never prunes one, and
+cancelling a parked job discards its snapshot so nothing can wake it. A `failed` result — or the
+execution watchdog's timeout — reaches the agent as ordinary tool output, which it adapts to,
+rather than failing the run. Wiring the executor side is in
+[the server reference](/claude-worker/docs/reference/server/).

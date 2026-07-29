@@ -225,6 +225,38 @@ What it gets you, and what it costs:
 Both engines implement one `Runner` interface and speak the same protocol, so the client, the
 React layer, the panel, and the job queue are unchanged either way.
 
+## Work that outlives the turn
+
+Some tool calls can't answer in the next few seconds — a batch job, a remote worker, a human who
+has to approve something on Monday. Instead of holding a process open, the provider engine
+**parks**: it snapshots the session, the server tears the live runner down, and the run resumes
+when the result arrives.
+
+```ts
+// The executor that hands work off and doesn't wait for it.
+selectExecutor: () => new DeferredExecutor({
+  timeoutMs: 86_400_000,                        // the watchdog; a timeout reaches the agent as tool output
+  onDispatch: (call) => enqueueForYourWorkers(call), // call.executionId is the callback address
+})
+```
+
+```bash
+# Whenever the work is done — minutes or days later:
+curl -X POST $SERVER/v1/executions/$EXECUTION_ID/result \
+  -H 'content-type: application/json' \
+  -d '{"status":"ok","output":{"type":"json","value":{"rows":128}}}'
+```
+
+The session comes back **as itself** — same id, same transcript, same seq numbering, mid-turn —
+and the agent continues with that as the tool's output. A queued job parks the same way: it gives
+up its concurrency slot, stops its wall-clock budget, and emits `job_parked` / `job_resumed`, so
+one worker can have a hundred runs waiting on the world and still only run three at a time. A
+failed result (including the watchdog's timeout) is ordinary tool output the agent adapts to, not
+a crashed session, and results are applied idempotently by `executionId` — a delivery racing the
+timeout can't apply twice.
+
+Parked sessions still list, read, and serve their delivered files; attaching to one wakes it.
+
 ## Permissions are the sharp edge
 
 `canUseTool` promotes a tool call into a **pending approval** the panel renders; the runner blocks
@@ -280,9 +312,10 @@ stays 100% Anthropic-owned code.
   `mcpServers` and tool policy; gate session creation behind your own auth and use
   `allowedCwdRoots` + `buildRunnerConfig` to clamp what clients may request. (Provider sessions
   are tighter by construction: MCP is declared on the profile, never by the caller.)
-- **Deferred execution is not built yet.** A tool call that can't answer within the turn — a
-  managed remote sandbox, a human-in-the-loop step — is the next milestone; the protocol frames
-  and the `parked` job state are reserved for it, but the behavior isn't there.
+- **Parked sessions are only as durable as their store.** Deferred execution works (below), but
+  the bundled `SessionStore` is in-memory: a park survives a client disconnect, not a server
+  restart. The seam is there for a durable one; nothing durable ships, because the record holds
+  the session's whole transcript and its config.
 
 ## Development
 
@@ -301,7 +334,7 @@ TS source via the `@claude-worker/source` export condition (`node --conditions=@
 
 0.3.x — early but real: both engines, protocol, server, client, headless react layer, styled UI,
 web dashboard, and the job queue are all in and tested. 0.3 adds the model-agnostic engine, the
-QuickJS sandbox (`@claude-worker/sandbox`, first release), browser-bridged tool execution, and
-profile management. Expect the protocol to evolve (`PROTOCOL_VERSION` guards breaking changes;
-it is at 3). See the [roadmap](docs/roadmap.md) for what's shipped, what's next, and the open
+QuickJS sandbox (`@claude-worker/sandbox`, first release), browser-bridged tool execution,
+profile management, and deferred execution (parked sessions + `POST /executions/:id/result`).
+Expect the protocol to evolve (`PROTOCOL_VERSION` guards breaking changes; it is at 4). See the [roadmap](docs/roadmap.md) for what's shipped, what's next, and the open
 questions (naming, compliance posture).

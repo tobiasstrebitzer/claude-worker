@@ -10,7 +10,7 @@
  */
 
 /** Bumped on any breaking change to events, commands, or REST shapes. */
-export const PROTOCOL_VERSION = 3
+export const PROTOCOL_VERSION = 4
 
 // ---------------------------------------------------------------------------
 // Session lifecycle
@@ -21,6 +21,10 @@ export const PROTOCOL_VERSION = 3
  * - `running` — a turn is in progress
  * - `awaiting_approval` — blocked on at least one pending permission request
  * - `idle` — between turns; accepting user messages
+ * - `parked` — waiting on a deferred tool execution. The live runner has been torn
+ *   down and the session's state persisted; delivering the execution's result
+ *   (`POST {basePath}/executions/:executionId/result`) rehydrates it under the same
+ *   id and the run continues. Not terminal.
  * - `failed` — the underlying query errored; terminal
  * - `closed` — closed by a client or the host; terminal
  */
@@ -29,6 +33,7 @@ export type SessionStatus =
   | 'running'
   | 'awaiting_approval'
   | 'idle'
+  | 'parked'
   | 'failed'
   | 'closed'
 
@@ -718,6 +723,28 @@ export type ResolvePermissionRequest =
   | { behavior: 'allow'; updatedInput?: Record<string, unknown> }
   | { behavior: 'deny'; message?: string; interrupt?: boolean }
 export type ResolvePermissionResponse = { resolved: true }
+
+/**
+ * Body of `POST {basePath}/executions/:executionId/result` — the way a deferred
+ * executor (a remote worker, a batch job, a human) delivers the outcome of an
+ * execution the session parked on. The session is rehydrated if its runner was
+ * torn down, and the result is folded back into the agent loop; a `failed` result
+ * is ordinary tool output the agent adapts to, not a session error.
+ *
+ * Applied **idempotently by `executionId`**: a duplicate or late delivery (one
+ * racing the execution watchdog) answers 200 with `applied: false` rather than
+ * erroring or applying twice. 404 means no session is parked on that id.
+ */
+export type SubmitExecutionResultRequest =
+  | { status: 'ok'; output: ToolExecutionOutput; logs?: string[] }
+  | { status: 'failed'; reason: string; error: string; logs?: string[] }
+export type SubmitExecutionResultResponse = {
+  /** False when the id was already settled — the delivery was a no-op. */
+  applied: boolean
+  /** Session the execution belonged to. */
+  sessionId: string
+}
+
 export type ListSdkSessionsResponse = { sdkSessions: SdkSessionSummary[] }
 /** `GET {basePath}/profiles` — filtered to the profiles the caller may use. */
 export type ListProfilesResponse = {
@@ -828,6 +855,10 @@ export type JobInfo = {
   maxAttempts?: number
   /** For a job re-queued by retry backoff: earliest time the next attempt may start. */
   nextRunAt?: number
+  /** Set while `status` is 'parked': when the run parked, and the execution it is
+   * waiting on — the id to POST a result to. Cleared when it resumes. */
+  parkedAt?: number
+  parkedExecutionId?: string
   /** Cumulative across attempts. */
   usage: JobUsage
   result?: JobResult
@@ -854,7 +885,10 @@ export type JobEvent =
   | { type: 'job_submitted'; job: JobInfo; ts: number }
   | { type: 'job_started'; job: JobInfo; ts: number }
   | { type: 'job_progress'; job: JobInfo; progress: JobProgress; ts: number }
-  /** The run parked on a deferred execution; `executionId` says what it waits on. */
+  /** The run parked on a deferred execution; `executionId` says what it waits on —
+   * the id to POST a result to. The *work itself* (tool name, input, VFS seed) went
+   * to the executor's own dispatch hook, not over this channel: a webhook consumer
+   * learns that a run is waiting, the worker learns what to do. */
   | { type: 'job_parked'; job: JobInfo; executionId: string; ts: number }
   /** A parked run resumed because its execution result arrived. */
   | { type: 'job_resumed'; job: JobInfo; executionId: string; ts: number }
@@ -865,6 +899,9 @@ export type QueueStats = {
   maxConcurrency: number
   running: number
   queued: number
+  /** Jobs waiting on a deferred execution. They hold no concurrency slot and
+   * their wall-clock budget is not ticking. */
+  parked: number
   sessionTokenLimit?: number
   dailyTokenLimit?: number
   /** Tokens consumed by queue jobs in the current UTC day. */

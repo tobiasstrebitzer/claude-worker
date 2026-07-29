@@ -43,7 +43,15 @@ boundary: anything a client needs must be expressible as protocol events and com
   `ToolExecutor` seam, whose dispatch either settles inline or returns `pending` keyed by
   `executionId`, so a deferred or remote backend drops in without touching the runner or the
   protocol. `QuickJsExecutor` is the in-process backend over `packages/sandbox`;
-  `BrowserBridgeExecutor` relays to an attached tab. `createToolContext` builds a session's
+  `BrowserBridgeExecutor` relays to an attached tab; `DeferredExecutor` hands work to something
+  that will answer long after this process stopped waiting. Each executor `describe()`s a call
+  before dispatch (backend, deferredness, deadline), so a routing executor can keep one tool
+  in-process and defer another. Once a turn comes to rest on nothing but deferred calls — and
+  only once every one of them has been handed over — the runner announces `status_changed:
+  'parked'`. `park()` then returns a `RunnerSnapshot` (id, event log, seq, VFS, plus the engine's
+  own continuation state, opaque to everyone else) and the instance goes inert *without* emitting
+  `session_closed`. Feeding that snapshot back as `restore` rebuilds the session as itself: same
+  id, same seq numbering, mid-turn. `createToolContext` builds a session's
   capability-scoped tools — the agent's authority is exactly what is granted, there are no
   built-in fs/shell tools, and `fs_*` operate on an in-memory scratch VFS rather than the host
   disk. Each tool carries a trust level: `sandboxed` (no ambient authority, safe to execute
@@ -67,6 +75,12 @@ boundary: anything a client needs must be expressible as protocol events and com
   terminal-job retention pruning. The `QueueAdapter` contract is the seam for shared backends
   (redis/bullmq): `claimNext` must be atomic and must skip jobs whose `nextRunAt` is in the
   future; daily token counters are adapter-held. Only the in-memory adapter is bundled.
+  One-shot means "first `turn_result` completes it", not "one process residency": a run that
+  parks on a deferred execution goes `parked` at the same single finalize chokepoint —
+  surrendering its concurrency slot, stopping its wall-clock budget, emitting `job_parked` — and
+  resumes against the rebuilt runner (`onSessionParking` / `onSessionResumed`, called by whoever
+  owns the parking). Parked runs are bounded by `maxParkedDurationMs` rather than
+  `maxJobDurationMs`: waiting is not being stuck.
 - **`packages/server`** — the gateway: `node:http` + `ws`, a session registry
   (create/list/attach/interrupt/kill), resume from the SDK's on-disk sessions, a pluggable
   `authenticate` hook (refuses to start without one unless `allowUnauthenticated: true`), and —
@@ -91,7 +105,16 @@ boundary: anything a client needs must be expressible as protocol events and com
   `BridgeHub` (always on, exposed as `server.bridge`) routes tool executions
   between a session and the tabs attached to it: it asks the first attached client and fails
   dispatch immediately when none is attached, which is what makes autonomous jobs simply never
-  bridge.
+  bridge. `SessionParkManager` (`server.parking`) owns the other end of the timescale: when an
+  unwatched session parks it snapshots, evicts the runner from the registry, and persists to a
+  `SessionStore` (memory bundled; the record holds the whole transcript, which is why nothing
+  durable ships by default). Parked sessions still list, read, and serve their files — from the
+  snapshot, with no runner. `POST /executions/:executionId/result` rebuilds the session under the
+  same id and folds the result into its loop, idempotently by `executionId`; an execution
+  watchdog does the same with a `timeout` failure when no result ever comes, which the agent
+  adapts to like any other tool failure. A session someone is watching stays live and parks
+  shortly after the last client leaves; attaching to a parked one wakes it, so a reconnect after
+  a network blip finds its session rather than a 404.
 - **`packages/client`** — typed protocol client on platform `fetch`/`WebSocket`: REST session
   and job management, WS attach with auto-reconnect and replay-from-last-seq, `attachQueue()`
   for the live queue stream. Zero runtime deps; browser and Node.
@@ -147,6 +170,27 @@ frees and budgets allow → the job runs as an ordinary registry session → web
 `job_completed` in order → first turn result completes the job and closes the session. Token
 accounting sums per-turn `usage` (input + output + cache_creation + cache_read);
 `total_cost_usd`/`num_turns` are session-cumulative and rolled up last-seen, never summed.
+
+## Deferred execution
+
+A tool call whose backend can't answer within the turn — a remote worker, a batch window, a
+human — parks the session instead of blocking it:
+
+1. The runner dispatches every deferred call, then announces `status_changed: 'parked'`. Waiting
+   for the whole batch is what stops a park from stranding a call still being dispatched.
+2. `SessionParkManager` snapshots the session, evicts the runner (releasing its model client, MCP
+   connections, and memory), and persists the record. A job at this point surrenders its
+   concurrency slot and stops its wall-clock budget → `job_parked`.
+3. `POST /v1/executions/:executionId/result` (or `parking.submitResult` in-process, or the
+   watchdog's `timeout` failure) rebuilds the session under its own id from the snapshot,
+   re-subscribes the queue past the replayed log, and hands the result to the agent loop →
+   `job_resumed`. The turn continues as if it had never stopped; its `durationMs` excludes the
+   parked stretch.
+
+Results are applied idempotently by `executionId`: a duplicate, or one racing the watchdog,
+answers `applied: false` rather than applying twice. Because the park is only a persistence
+boundary, `parked` is not terminal anywhere — `claimNext` never claims one, retention never
+prunes one, and `DELETE /v1/sessions/:id` is what actually ends one.
 
 ## Tooling conventions
 

@@ -12,7 +12,8 @@
   "scripts": {
     "dev": "turbo run dev",
     "build": "turbo run build",
-    "typecheck": "turbo run typecheck",
+    "typecheck": "turbo run typecheck && pnpm typecheck:extras",
+    "typecheck:extras": "tsgo -p smoke/tsconfig.json && tsgo -p examples/tsconfig.json",
     "test": "turbo run test",
     "lint": "oxlint",
     "clean": "turbo run clean",

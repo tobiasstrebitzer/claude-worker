@@ -135,13 +135,17 @@ const { listen } = createWorkerServer({
   // A managed Claude profile may point anywhere under your home directory here;
   // a real deployment scopes this much more tightly.
   allowedConfigDirRoots: [homedir()],
-  createEngineRunner: ({ config, profile, bridge }) => {
+  createEngineRunner: ({ config, profile, bridge, restore }) => {
     const factory = factories.get(profile.provider!.id)!
     const modelId = config.model ?? profile.provider!.model!
-    // A document the model can only reason about by running code over it.
-    const vfs = createVfs({
-      '/leads/acme.txt': 'company: Acme Corp\nrevenue: 4173\nemployees: 12\n',
-    })
+    // A document the model can only reason about by running code over it. On a
+    // rehydrated session the snapshot's filesystem wins — seeding here would
+    // undo whatever the parked turn already wrote.
+    const vfs = restore
+      ? undefined
+      : createVfs({
+          '/leads/acme.txt': 'company: Acme Corp\nrevenue: 4173\nemployees: 12\n',
+        })
     // The runner's id does not exist yet at assembly time, so resolve the
     // session's bridge executor at dispatch time from the call's own sessionId.
     const toBrowser: ToolExecutor = {
@@ -150,7 +154,9 @@ const { listen } = createWorkerServer({
     // No permission-mode coercion here: the create form only offers what this
     // engine runs, and the gateway rejects the CLI-only modes with a 400.
     return createEngineSession({
-      config: { ...config, languageModel: factory(modelId), vfs },
+      // `restore` is what makes a parked session come back as itself: same id,
+      // same event log, same history, mid-task.
+      config: { ...config, languageModel: factory(modelId), vfs, restore },
       profile,
       resolveModel: (_profile, c) => factory(c.model ?? modelId),
       selectExecutor: () => toBrowser,

@@ -38,6 +38,12 @@ export class BridgeHub {
     return this.#bridge(sessionId).executor
   }
 
+  /** How many clients are watching this session. Parking consults it: a session
+   * someone is watching stays live. */
+  attachedCount(sessionId: string): number {
+    return this.#sessions.get(sessionId)?.sockets.length ?? 0
+  }
+
   /** Register an attached client. Returns a detach function. */
   attach(sessionId: string, send: (frame: ServerFrame) => void): () => void {
     const bridge = this.#bridge(sessionId)

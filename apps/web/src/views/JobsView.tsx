@@ -67,6 +67,13 @@ function QueueStatsStrip({ stats }: { stats: QueueStats }) {
       <span>
         Queued <span className='font-mono text-fg-1'>{stats.queued}</span>
       </span>
+      {/* Only worth the space once something is actually waiting on an external
+          execution — most deployments never defer at all. */}
+      {stats.parked > 0 ? (
+        <span>
+          Parked <span className='font-mono text-fg-1'>{stats.parked}</span>
+        </span>
+      ) : null}
       <span className='inline-flex items-center gap-1.5'>
         {dailyPct !== undefined ? (
           <ProgressRing

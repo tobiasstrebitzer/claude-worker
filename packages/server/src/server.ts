@@ -5,7 +5,12 @@ import type { Duplex } from 'node:stream'
 import { join, resolve as resolvePath, sep } from 'node:path'
 import { WebSocketServer, type WebSocket } from 'ws'
 import { listSessions as sdkListSessions } from '@anthropic-ai/claude-agent-sdk'
-import type { Runner, SessionRunnerConfig } from '@claude-worker/core'
+import type {
+  Runner,
+  RunnerSnapshot,
+  SessionRunnerConfig,
+  ToolExecutionResult,
+} from '@claude-worker/core'
 import { JobQueue, type QueueAdapter } from '@claude-worker/queue'
 import {
   PROTOCOL_VERSION,
@@ -22,10 +27,12 @@ import {
   type ResolvePermissionRequest,
   type SdkSessionSummary,
   type ServerFrame,
+  type SubmitExecutionResultRequest,
   type UpdateProfileRequest,
 } from '@claude-worker/protocol'
 import { SessionRegistry } from './registry.ts'
 import { BridgeHub, type BridgeHubOptions } from './bridge.ts'
+import { MemorySessionStore, SessionParkManager, type SessionStore } from './parking.ts'
 import type { ProfileStore } from './profile-store.ts'
 
 export type SdkSessionLister = (options: {
@@ -132,6 +139,22 @@ export type WorkerServerOptions = {
    * The hub is always available on the returned server as `bridge`. */
   bridge?: BridgeHubOptions
   /**
+   * Deferred execution: a session that parks on an execution nothing here is
+   * running has its state persisted and its runner torn down, and comes back when
+   * the result is POSTed to `{basePath}/executions/:executionId/result`.
+   *
+   * On by default with an in-memory store, so a park survives a disconnect but not
+   * a restart; pass a durable `store` to change that (read its doc first — the
+   * record holds the whole transcript).
+   */
+  parking?: {
+    store?: SessionStore
+    /** Grace after the last client detaches before parking. Default 2000. */
+    parkDelayMs?: number
+    /** Park/resume failures — storage or engine-assembly problems, not session errors. */
+    onError?: (error: unknown, context: { sessionId: string; phase: 'park' | 'resume' }) => void
+  }
+  /**
    * Build a runner for a `provider` profile (the model-agnostic engine).
    * Required if any such profile is declared — the server refuses to start
    * otherwise, rather than failing at create time.
@@ -156,6 +179,13 @@ export type EngineRunnerContext = {
   /** Bridge hub, for handing the runner a browser-backed ToolExecutor
    * (`bridge.executorFor(sessionId)`). */
   bridge: BridgeHub
+  /**
+   * Set when rebuilding a session that parked on a deferred execution. Forward it
+   * as `restore` on the engine config (`createEngineSession({ config: { ...config,
+   * restore } })`) — the engine then adopts the session's id, event log, seq
+   * numbering, history, and scratch filesystem instead of starting fresh.
+   */
+  restore?: RunnerSnapshot
 }
 
 export type QueueServerOptions = {
@@ -190,6 +220,10 @@ export type WorkerServer = {
   /** Routes tool executions to attached browser clients. `bridge.executorFor(id)`
    * is the `ToolExecutor` to hand a runner that should execute in the tab. */
   bridge: BridgeHub
+  /** Parked sessions: the store, the execution index, and the rehydration path.
+   * Deliver a deferred result with `parking.submitResult(...)` in-process, or POST
+   * it to `{basePath}/executions/:executionId/result`. */
+  parking: SessionParkManager
   listen: (port: number, host?: string) => Promise<{ port: number }>
   close: () => Promise<void>
 }
@@ -552,14 +586,37 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
 
   /** Build a runner for a session, choosing the engine from its profile. Async
    * because the engine factory may be: a provider session can need an awaited
-   * assembly step (per-session MCP connect) before it has a runner at all. */
-  const createRunner = async (config: SessionRunnerConfig): Promise<Runner> => {
-    const profile = config.profile !== undefined ? profileFor(config.profile) : undefined
+   * assembly step (per-session MCP connect) before it has a runner at all.
+   *
+   * `restore` rebuilds a parked session rather than creating a new one — same id,
+   * same log, mid-task. */
+  const buildRunner = async (
+    config: SessionRunnerConfig,
+    restore?: RunnerSnapshot,
+  ): Promise<Runner> => {
+    const name = config.profile
+    const profile = name !== undefined ? profileFor(name) : undefined
+    if (name !== undefined && !profile) {
+      // Only reachable on a resume: profiles can be deleted between park and
+      // wake-up, and the session cannot be rebuilt without the one it ran on.
+      throw new Error(`unknown profile: ${name}`)
+    }
     if (profile && isProviderProfile(profile)) {
       // Guaranteed present: startup refuses provider profiles without a factory.
-      return registry.adopt(await options.createEngineRunner!({ config, profile, bridge }))
+      return options.createEngineRunner!({ config, profile, bridge, restore })
     }
-    return registry.create(config)
+    if (restore) throw new Error('the Claude engine cannot rebuild a parked session')
+    return new Promise<Runner>((resolve) => resolve(registry.prepare(config)))
+  }
+
+  const createRunner = async (config: SessionRunnerConfig): Promise<Runner> => {
+    const runner = registry.register(await buildRunner(config))
+    // Watchers first, then start: a session must not emit anything before the
+    // things that persist and account for it are listening.
+    parking.remember(runner.id, config)
+    parking.watch(runner)
+    void runner.start()
+    return runner
   }
 
   /** Resolve a request's profile: required when several are declared, implicit with
@@ -603,6 +660,18 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
       options.bridge?.onResult?.(sessionId, executionId, result)
     },
   })
+  const parking = new SessionParkManager({
+    registry,
+    store: options.parking?.store ?? new MemorySessionStore(),
+    parkDelayMs: options.parking?.parkDelayMs,
+    onError: options.parking?.onError,
+    rebuild: (record) => buildRunner(record.config, record.snapshot),
+    attachedCount: (sessionId) => bridge.attachedCount(sessionId),
+    // Accounting is the queue's: it frees the run's slot and stops its clock, and
+    // refuses the park outright when the run is already finalizing.
+    onParking: (sessionId, executionId) => queue?.onSessionParking(sessionId, executionId) ?? true,
+    onResumed: (sessionId, runner) => queue?.onSessionResumed(sessionId, runner),
+  })
   const wss = new WebSocketServer({ noServer: true })
   /** Profiles (by name; '' = none) whose oauth notice has been logged. */
   const subscriptionNoticeShown = new Set<string>()
@@ -645,6 +714,9 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
           return runner
         },
         buildRunnerConfig,
+        // A run that ends while parked (canceled, killed) leaves a snapshot behind
+        // that nothing will ever wake.
+        discardSession: (sessionId) => parking.discard(sessionId),
       })
     : undefined
 
@@ -847,6 +919,71 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
     json(res, 405, { error: 'method not allowed' })
   }
 
+  /**
+   * `POST {basePath}/executions/:executionId/result` — a deferred executor
+   * delivering its outcome. Wakes the parked session, applies the result to its
+   * agent loop, and lets the run continue.
+   *
+   * Scoped like every other session route: a principal restricted to certain
+   * profiles cannot settle an execution belonging to a session outside them —
+   * a result is trusted tool input, and injecting one into another tenant's loop
+   * would be a way to steer it.
+   */
+  const handleExecutionResult = async (
+    req: IncomingMessage,
+    res: ServerResponse,
+    pathname: string,
+    auth: AuthContext,
+  ): Promise<void> => {
+    const rest = pathname.slice((basePath + '/executions/').length).split('/')
+    if (rest.length !== 2 || rest[1] !== 'result' || !rest[0]) {
+      json(res, 404, { error: 'not found' })
+      return
+    }
+    if (req.method !== 'POST') {
+      json(res, 405, { error: 'method not allowed' })
+      return
+    }
+    const executionId = decodeURIComponent(rest[0])
+    const body = (await readJsonBody(req, maxBodyBytes)) as SubmitExecutionResultRequest
+    let result: ToolExecutionResult
+    if (body?.status === 'ok') {
+      if (!body.output || typeof body.output !== 'object') {
+        json(res, 400, { error: "output is required for status 'ok'" })
+        return
+      }
+      result = { status: 'ok', output: body.output.value, logs: body.logs }
+    } else if (body?.status === 'failed') {
+      if (typeof body.reason !== 'string' || typeof body.error !== 'string') {
+        json(res, 400, { error: "reason and error are required for status 'failed'" })
+        return
+      }
+      result = { status: 'failed', reason: body.reason, error: body.error, logs: body.logs }
+    } else {
+      json(res, 400, { error: "status must be 'ok' or 'failed'" })
+      return
+    }
+    if (auth.allowedProfiles) {
+      const owner = parking.sessionFor(executionId)
+      const profile =
+        owner === undefined
+          ? undefined
+          : (registry.get(owner)?.info().profile ?? (await parking.get(owner))?.profile)
+      // Indistinguishable from an unknown id on purpose: whether an execution
+      // exists elsewhere is not this caller's business.
+      if (owner === undefined || (profile !== undefined && !auth.allowedProfiles.includes(profile))) {
+        json(res, 404, { error: 'execution not found' })
+        return
+      }
+    }
+    const applied = await parking.submitResult(executionId, result)
+    if (!applied) {
+      json(res, 404, { error: 'execution not found (unknown id, or its session has ended)' })
+      return
+    }
+    json(res, 200, applied)
+  }
+
   const handleRequest = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const pathname = new URL(req.url ?? '/', 'http://internal').pathname
     if (
@@ -936,6 +1073,15 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
       json(res, 405, { error: 'method not allowed' })
       return
     }
+    if (pathname.startsWith(basePath + '/executions/')) {
+      const auth = await authenticate(req)
+      if (!auth.ok) {
+        json(res, 401, { error: 'unauthorized' })
+        return
+      }
+      await handleExecutionResult(req, res, pathname, auth)
+      return
+    }
     if (pathname === basePath + '/sdk-sessions') {
       if (!(await authenticate(req)).ok) {
         json(res, 401, { error: 'unauthorized' })
@@ -957,7 +1103,9 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
 
     if (!route.id) {
       if (req.method === 'GET') {
-        json(res, 200, { sessions: registry.list() })
+        // Parked sessions are live sessions that happen to have no runner right
+        // now — leaving them out would read as "gone".
+        json(res, 200, { sessions: [...registry.list(), ...(await parking.listInfo())] })
         return
       }
       if (req.method === 'POST') {
@@ -999,7 +1147,10 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
     }
 
     const runner = registry.get(route.id)
-    if (!runner) {
+    // A parked session has no runner but is very much alive: it reads, lists, and
+    // serves its files from the snapshot, and only waking it needs a rebuild.
+    const parked = runner ? null : await parking.get(route.id)
+    if (!runner && !parked) {
       json(res, 404, { error: 'session not found' })
       return
     }
@@ -1010,7 +1161,11 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
         json(res, 405, { error: 'method not allowed' })
         return
       }
-      const vfs = runner.vfs
+      const snapshotFiles = parked?.snapshot.vfs
+      const vfs = runner?.vfs ?? (snapshotFiles && {
+        list: () => Object.keys(snapshotFiles).sort(),
+        read: (path: string) => snapshotFiles[path],
+      })
       if (!vfs) {
         json(res, 404, { error: 'session has no file store' })
         return
@@ -1049,6 +1204,10 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
         json(res, 400, { error: "behavior must be 'allow' or 'deny'" })
         return
       }
+      if (!runner) {
+        json(res, 409, { error: 'session is parked (it has no pending permission requests)' })
+        return
+      }
       if (!runner.resolvePermission(route.permissionId, body)) {
         json(res, 404, { error: 'permission request not found (already resolved or expired)' })
         return
@@ -1057,14 +1216,19 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
       return
     }
     if (req.method === 'GET') {
-      json(res, 200, { session: runner.info() })
+      json(res, 200, { session: runner?.info() ?? parked!.info })
       return
     }
     if (req.method === 'DELETE') {
       registry.remove(route.id)
       // Fail anything still bridged: the session is gone, so no answer can land.
       bridge.remove(route.id)
-      json(res, 200, { session: runner.info() })
+      // And drop any parked state, so a late execution result can't wake a session
+      // the client just ended.
+      await parking.discard(route.id)
+      json(res, 200, {
+        session: runner?.info() ?? { ...parked!.info, status: 'closed' as const },
+      })
       return
     }
     json(res, 405, { error: 'method not allowed' })
@@ -1114,7 +1278,9 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
         socket.destroy()
         return
       }
-      const runner = registry.get(route.id)
+      // Attaching to a parked session wakes it: the client wants to drive it, and
+      // its whole event log comes back with it, so `afterSeq` still lines up.
+      const runner = await parking.ensureLive(route.id).catch(() => undefined)
       if (!runner) {
         socket.write('HTTP/1.1 404 Not Found\r\n\r\n')
         socket.destroy()
@@ -1163,6 +1329,9 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
     ws.on('close', () => {
       unsubscribe()
       detachBridge()
+      // Nobody watching any more: a session waiting on a deferred execution can
+      // give its runner back (after a grace period, so a reconnect costs nothing).
+      parking.onDetach(runner.id)
     })
   }
 
@@ -1224,10 +1393,13 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
     registry,
     queue,
     bridge,
+    parking,
     listen: async (port, host) => {
       // Before the first request: every lookup on the request path reads the
       // in-memory mirror, so it has to be populated before anything can hit it.
       await refreshStored()
+      // Re-index and re-arm anything a durable store carried across a restart.
+      await parking.hydrate()
       return new Promise((resolve, reject) => {
         server.once('error', reject)
         server.listen(port, host, () => {
@@ -1239,6 +1411,7 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
     close: () =>
       new Promise((resolve) => {
         queue?.close()
+        parking.close()
         registry.closeAll()
         for (const ws of queueSockets) ws.close()
         queueSockets.clear()

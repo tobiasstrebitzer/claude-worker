@@ -19,8 +19,14 @@ import type {
   ToolExecutionBackend,
 } from '@claude-worker/protocol'
 import type { SandboxVfs } from '@claude-worker/sandbox'
-import type { PermissionDecision, Runner, SessionEventListener } from './runner-interface.ts'
-import type { ToolExecutionResult, ToolExecutor } from './tool-executor.ts'
+import type {
+  ParkedExecution,
+  PermissionDecision,
+  Runner,
+  RunnerSnapshot,
+  SessionEventListener,
+} from './runner-interface.ts'
+import type { ToolExecutionCall, ToolExecutionResult, ToolExecutor } from './tool-executor.ts'
 
 /** Permission modes this engine can honor. The rest of the protocol vocabulary
  * (acceptEdits/plan/auto) is Claude Code CLI semantics with no meaning here —
@@ -61,8 +67,17 @@ export type AiSdkRunnerConfig = Omit<CreateSessionRequest, 'cwd'> & {
   /** Swap models mid-session (`set_model`). Unset = setModel() is rejected. */
   resolveModel?: (modelId: string | undefined) => LanguageModel
   /** Called once when the session closes — release per-session resources the
-   * host attached (an MCP connection, a watcher). Errors are swallowed. */
+   * host attached (an MCP connection, a watcher). Errors are swallowed. Also
+   * runs when the session parks: parking releases the same resources. */
   onClose?: () => void | Promise<void>
+  /**
+   * Rebuild a parked session from {@link AiSdkRunner.park}'s snapshot instead of
+   * starting a fresh one: the id, event log, seq counter, message history, and
+   * the executions it parked on are all adopted. The rest of the config is the
+   * live wiring (model, tools, executor, VFS) and is taken as given — a
+   * rehydrated session may legitimately come up against a re-created tool set.
+   */
+  restore?: RunnerSnapshot
 }
 
 /** An external (execute-less) tool call the loop is parked on. */
@@ -70,6 +85,33 @@ export type PendingToolCall = {
   toolCallId: string
   toolName: string
   input: unknown
+  /** True when the executor declared the execution deferred — the session may
+   * park on it, and only a host-delivered result can settle it. */
+  deferred?: boolean
+  /** Epoch ms the host's execution watchdog should fire at. */
+  expiresAt?: number
+}
+
+/** The provider engine's half of a {@link RunnerSnapshot} — its continuation
+ * state. Opaque to the host; only this class reads it. */
+export type AiSdkSessionState = {
+  messages: ModelMessage[]
+  pendingToolCalls: PendingToolCall[]
+  /** Calls already handed to an executor, so rehydration never re-dispatches them. */
+  dispatched: string[]
+  numTurns: number
+  totalUsage: { input: number; output: number; cacheWrite: number; cacheRead: number }
+  /** The in-progress turn's accumulator: a parked turn's earlier legs still owe
+   * their tokens and elapsed time to the turn_result that eventually lands. */
+  turnAccum?: { startedAt: number; input: number; output: number; cacheWrite: number; cacheRead: number }
+  permissionMode: PermissionMode
+  /** Model alias last requested (config.model or a set_model), NOT the resolved
+   * provider model id — re-resolution goes back through `resolveModel`. */
+  model?: string
+  lastActivityAt?: number
+  /** When the snapshot was taken, so a rehydrated turn can discount the time it
+   * spent parked instead of billing it as elapsed turn duration. */
+  parkedAt?: number
 }
 
 export type ToolCallOutput =
@@ -112,6 +154,12 @@ export class AiSdkRunner implements Runner {
   #lastActivityAt: number | undefined
   #started = false
   #closed = false
+  /** Parked: state has been snapshotted and this instance is inert. Not closed —
+   * the session lives on in the snapshot and resumes as a new instance. */
+  #parked = false
+  /** Model alias as requested (not the resolved provider id) — what set_model was
+   * given, so a rehydrated session can re-resolve the same choice. */
+  #modelAlias: string | undefined
 
   constructor(config: AiSdkRunnerConfig, id: string = randomUUID()) {
     const mode = config.permissionMode ?? 'default'
@@ -121,8 +169,46 @@ export class AiSdkRunner implements Runner {
     this.#config = config
     this.#model = config.languageModel
     this.#permissionMode = mode
-    this.id = id
-    this.createdAt = Date.now()
+    this.#modelAlias = config.model
+    // A rehydrated session keeps its identity: same id, same age, same event log.
+    this.id = config.restore?.id ?? id
+    this.createdAt = config.restore?.createdAt ?? Date.now()
+    if (config.restore) this.#restore(config.restore)
+  }
+
+  /** Adopt a parked session's state. The event log and seq counter come back
+   * verbatim: a client reattaching with `afterSeq` must see one unbroken stream
+   * across the teardown, not a second session that restarts at 1. */
+  #restore(snapshot: RunnerSnapshot): void {
+    if (snapshot.engine !== 'provider') {
+      throw new Error(`cannot restore a '${snapshot.engine}' snapshot into the AI SDK engine`)
+    }
+    const state = snapshot.state as AiSdkSessionState | undefined
+    if (!state || !Array.isArray(state.messages)) {
+      throw new Error('session snapshot is missing its provider-engine state')
+    }
+    this.#seq = snapshot.seq
+    this.#events = [...snapshot.events]
+    this.#messages = [...state.messages]
+    for (const call of state.pendingToolCalls) this.#pendingToolCalls.set(call.toolCallId, call)
+    // Already handed to a backend before the teardown: re-dispatching would run
+    // the work twice (and a deferred backend can only ever answer once).
+    this.#dispatched = new Set(state.dispatched)
+    this.#numTurns = state.numTurns
+    this.#totalUsage = { ...state.totalUsage }
+    this.#turnAccum = state.turnAccum ? { ...state.turnAccum } : undefined
+    if (this.#turnAccum && state.parkedAt !== undefined) {
+      // The turn's clock stops while parked: a run that waited two days for a
+      // remote result did not take two days of turn time.
+      this.#turnAccum.startedAt += Date.now() - state.parkedAt
+    }
+    this.#permissionMode = state.permissionMode
+    this.#lastActivityAt = state.lastActivityAt
+    this.#status = this.#pendingToolCalls.size > 0 ? 'parked' : 'idle'
+    if (state.model !== undefined && state.model !== this.#modelAlias && this.#config.resolveModel) {
+      this.#modelAlias = state.model
+      this.#model = this.#config.resolveModel(state.model)
+    }
   }
 
   get status(): SessionStatus {
@@ -175,12 +261,72 @@ export class AiSdkRunner implements Runner {
   start(): Promise<void> {
     if (this.#started) return this.#turnChain
     this.#started = true
+    if (this.#config.restore) {
+      // Rehydrated mid-task: the prompt was consumed by the original run, and the
+      // history is already a turn in progress. Waiting on its parked executions is
+      // the whole point — the loop re-enters when one is settled.
+      if (this.#pendingToolCalls.size === 0) this.#scheduleTurn()
+      return this.#turnChain
+    }
     this.#setStatus('idle')
     if (this.#config.prompt) this.sendMessage(this.#config.prompt)
     return this.#turnChain
   }
 
+  /**
+   * Snapshot durable state, release engine resources, and go inert — the session
+   * continues in the snapshot, not in this object. Returns undefined when parking
+   * would lose work or has nothing to wait for: a turn in flight, no parked call,
+   * or an already-closed/parked runner.
+   */
+  park(): RunnerSnapshot | undefined {
+    if (this.#closed || this.#parked) return undefined
+    // A generate() in flight cannot be snapshotted — its messages are not in the
+    // history yet. Parking is only ever correct once the loop has come to rest on
+    // external calls, which is exactly when #abort has been cleared.
+    if (this.#abort || !this.#restingOnDeferred()) return undefined
+    // Emitted before the snapshot so the persisted log carries the transition and
+    // still-attached listeners see it.
+    this.#setStatus('parked')
+    const parked: ParkedExecution[] = [...this.#pendingToolCalls.values()].map((call) => ({
+      executionId: call.toolCallId,
+      toolName: call.toolName,
+      expiresAt: call.expiresAt,
+    }))
+    const state: AiSdkSessionState = {
+      messages: this.#messages,
+      pendingToolCalls: [...this.#pendingToolCalls.values()],
+      dispatched: [...this.#dispatched],
+      numTurns: this.#numTurns,
+      totalUsage: { ...this.#totalUsage },
+      turnAccum: this.#turnAccum ? { ...this.#turnAccum } : undefined,
+      permissionMode: this.#permissionMode,
+      model: this.#modelAlias,
+      lastActivityAt: this.#lastActivityAt,
+      parkedAt: Date.now(),
+    }
+    const snapshot: RunnerSnapshot = {
+      engine: 'provider',
+      id: this.id,
+      createdAt: this.createdAt,
+      seq: this.#seq,
+      events: [...this.#events],
+      vfs: this.#config.vfs?.snapshot(),
+      parked,
+      state,
+    }
+    this.#parked = true
+    this.#listeners.clear()
+    try {
+      void Promise.resolve(this.#config.onClose?.()).catch(() => {})
+    } catch {
+      // Disposer errors must not break the park — the snapshot is already taken.
+    }
+    return snapshot
+  }
+
   sendMessage(text: string): void {
+    if (this.#parked) throw new Error('session is parked')
     if (this.#closed) throw new Error('session is closed')
     this.#messages.push({ role: 'user', content: text })
     this.#emit({
@@ -208,7 +354,7 @@ export class AiSdkRunner implements Runner {
    * providers) and the event log. Does NOT re-enter the loop. */
   #settlePendingCall(toolCallId: string, output: ToolCallOutput, isError: boolean): boolean {
     const pending = this.#pendingToolCalls.get(toolCallId)
-    if (!pending || this.#closed) return false
+    if (!pending || this.#closed || this.#parked) return false
     this.#pendingToolCalls.delete(toolCallId)
     // Keep the result adjacent to the assistant message that made the call:
     // user messages typed while the turn was parked must sort AFTER the tool
@@ -254,7 +400,7 @@ export class AiSdkRunner implements Runner {
   /** Emit `file_delivered` — the deliver_file tool's hand-over event (wired by
    * createEngineSession via ToolContextOptions.onFileDelivered). */
   emitFileDelivered(file: { path: string; bytes: number; description?: string }): void {
-    if (this.#closed) return
+    if (this.#closed || this.#parked) return
     this.#emit({ type: 'file_delivered', ...file })
   }
 
@@ -321,6 +467,7 @@ export class AiSdkRunner implements Runner {
     const resolve = this.#config.resolveModel
     if (!resolve) throw new Error('set_model is not supported by this session')
     this.#model = resolve(model)
+    this.#modelAlias = model
     this.#emit({ type: 'model_changed', model })
   }
 
@@ -332,7 +479,9 @@ export class AiSdkRunner implements Runner {
   }
 
   close(reason: 'client' | 'server' | 'error' = 'client'): void {
-    if (this.#closed) return
+    // Parked instances are already handed off — the host drops them from its
+    // registry, and that must not read as the session ending.
+    if (this.#closed || this.#parked) return
     this.#closed = true
     this.#abort?.abort()
     this.#pendingToolCalls.clear()
@@ -364,6 +513,7 @@ export class AiSdkRunner implements Runner {
    * deferred executor). Idempotent by executionId.
    */
   settleExecution(executionId: string, result: ToolExecutionResult): boolean {
+    if (this.#closed || this.#parked) return false
     if (!this.#pendingToolCalls.has(executionId)) return false
     this.#applyExecutionResult(executionId, result)
     return true
@@ -374,46 +524,88 @@ export class AiSdkRunner implements Runner {
     const executor = this.#config.executor
     if (!executor) return
     const executable = this.#config.executableTools
+    const inFlight: Array<Promise<unknown>> = []
+    let anyDeferred = false
     // Snapshot first: applying a result mutates the map we are iterating.
     for (const call of Array.from(this.#pendingToolCalls.values())) {
       if (executable && !executable.includes(call.toolName)) continue
       if (this.#dispatched.has(call.toolCallId)) continue
       this.#dispatched.add(call.toolCallId)
+      const toolCall: ToolExecutionCall = {
+        executionId: call.toolCallId,
+        sessionId: this.id,
+        tool: call.toolName,
+        input: call.input,
+        vfs: this.#config.vfs,
+        limits: this.#config.executionLimits,
+        signal: this.#abort?.signal,
+      }
+      // Per call, not per executor: a routing executor may keep one tool in
+      // process and defer another, and only the deferred one may park us.
+      const profile = executor.describe?.(toolCall) ?? {}
+      call.deferred = profile.deferred === true ? true : undefined
+      call.expiresAt = profile.timeoutMs === undefined ? undefined : Date.now() + profile.timeoutMs
+      anyDeferred ||= call.deferred === true
       this.#emit({
         type: 'execution_dispatched',
         executionId: call.toolCallId,
         toolName: call.toolName,
-        backend: this.#config.executionBackend ?? 'server',
+        backend: profile.backend ?? this.#config.executionBackend ?? 'server',
+        deferred: call.deferred,
+        expiresAt: call.expiresAt,
       })
-      void executor
-        .dispatch({
-          executionId: call.toolCallId,
-          sessionId: this.id,
-          tool: call.toolName,
-          input: call.input,
-          vfs: this.#config.vfs,
-          limits: this.#config.executionLimits,
-          signal: this.#abort?.signal,
-        })
-        .then((dispatch) => {
-          // 'pending' means the result arrives later via settleExecution().
-          if (dispatch.status === 'settled') {
-            this.#applyExecutionResult(call.toolCallId, dispatch.result)
-          }
-        })
-        .catch((error: unknown) => {
-          this.#applyExecutionResult(call.toolCallId, {
-            status: 'failed',
-            reason: 'dispatch_error',
-            error: error instanceof Error ? error.message : String(error),
+      inFlight.push(
+        executor
+          .dispatch(toolCall)
+          .then((dispatch) => {
+            // 'pending' means the result arrives later via settleExecution().
+            if (dispatch.status === 'settled') {
+              this.#applyExecutionResult(call.toolCallId, dispatch.result)
+            }
           })
-        })
+          .catch((error: unknown) => {
+            this.#applyExecutionResult(call.toolCallId, {
+              status: 'failed',
+              reason: 'dispatch_error',
+              error: error instanceof Error ? error.message : String(error),
+            })
+          }),
+      )
     }
+    // Announce the park only once every dispatch of this batch has been handed
+    // over: a host that parks on the first announcement would snapshot a session
+    // whose remaining calls are still being dispatched — and dispatch them into a
+    // runner it had already discarded.
+    if (anyDeferred) void Promise.allSettled(inFlight).then(() => this.#announceParked())
+  }
+
+  /**
+   * The turn has come to rest on deferred executions: nothing is in flight, and
+   * only a host-delivered result can move it. `status_changed: 'parked'` is the
+   * host's cue to snapshot via {@link park} — a single, correctly-timed signal
+   * rather than an inference from individual dispatch events.
+   */
+  #announceParked(): void {
+    if (this.#closed || this.#parked || this.#abort) return
+    if (this.#restingOnDeferred()) this.#setStatus('parked')
+  }
+
+  /** The loop is waiting, and everything it waits on can only be answered from
+   * outside this process. One still-live in-process execution means a result is
+   * coming back to THIS runner, and tearing it down would strand it. */
+  #restingOnDeferred(): boolean {
+    if (this.#pendingToolCalls.size === 0) return false
+    for (const call of this.#pendingToolCalls.values()) {
+      if (call.deferred !== true) return false
+    }
+    return true
   }
 
   /** Fold an execution's outcome back into the loop, whichever way it went. */
   #applyExecutionResult(executionId: string, result: ToolExecutionResult): void {
-    if (this.#closed) return
+    // A parked instance is not the session any more: its rehydrated successor owns
+    // the pending call, and applying here would write into a discarded history.
+    if (this.#closed || this.#parked) return
     this.#dispatched.delete(executionId)
     if (result.status === 'ok') {
       this.#emit({
@@ -441,7 +633,7 @@ export class AiSdkRunner implements Runner {
   }
 
   async #runTurn(): Promise<void> {
-    if (this.#closed || this.#pendingToolCalls.size > 0) return
+    if (this.#closed || this.#parked || this.#pendingToolCalls.size > 0) return
     // Nothing to respond to: the history already ends with the assistant.
     // Happens when several triggers queued turns for the same input (a message
     // typed mid-park + the park resolving) — one turn answers all of it, the

@@ -74,7 +74,9 @@ const CAPABILITY_TOOLS = {
  * the host wired, which is what a host that ignores profiles gets.
  */
 export function createEngineSession(options: EngineSessionOptions): AiSdkRunner {
-  const vfs = options.config.vfs ?? createVfs()
+  // A rehydrated session brings its scratch filesystem back with it — the
+  // deliverables and working files the parked turn already produced.
+  const vfs = options.config.vfs ?? createVfs(options.config.restore?.vfs)
   const executor = options.selectExecutor()
   // Narrowing only: the gateway has already refused a request naming a capability
   // its profile doesn't grant, so the request value wins when present.

@@ -1,3 +1,4 @@
+import type { ToolExecutionBackend } from '@claude-worker/protocol'
 import type { SandboxVfs } from '@claude-worker/sandbox'
 
 /**
@@ -36,6 +37,32 @@ export type ToolExecutionDispatch =
  * QuickJS, a browser tab over the WS bridge, or a managed sandbox. Backends are
  * interchangeable and selected by context.
  */
+/**
+ * How an executor will handle one specific call, asked before dispatch so the
+ * runner can announce it on `execution_dispatched` (which is emitted before the
+ * call goes out, so a bridged request never precedes its own record).
+ *
+ * Per **call**, not per executor: an executor that routes by tool name can send
+ * `eval_script` to the in-process sandbox and a long-running tool to a remote
+ * worker, and only the latter should park the session.
+ */
+export type ToolExecutionProfile = {
+  /** Reported on `execution_dispatched`; falls back to the runner's configured default. */
+  backend?: ToolExecutionBackend
+  /**
+   * True when this execution may outlive not just the turn but the live runner:
+   * the session parks (state persisted, runner torn down) and the result arrives
+   * out of band, keyed by `executionId`.
+   */
+  deferred?: boolean
+  /** Advisory deadline, published as `expiresAt`. For a deferred execution the
+   * timer itself belongs to the host — the runner may be gone when it fires. */
+  timeoutMs?: number
+}
+
 export interface ToolExecutor {
+  /** Describe what this call will be: backend, deferredness, deadline. Omitted =
+   * an in-band execution on the runner's configured backend. */
+  describe?(call: ToolExecutionCall): ToolExecutionProfile
   dispatch(call: ToolExecutionCall): Promise<ToolExecutionDispatch>
 }

@@ -14,6 +14,8 @@ import type {
   QueueServerFrame,
   QueueStats,
   ResolvePermissionRequest,
+  SubmitExecutionResultRequest,
+  SubmitExecutionResultResponse,
   SaveProfileResponse,
   SdkSessionSummary,
   ServerFrame,
@@ -386,6 +388,27 @@ export class ClaudeWorkerClient {
       `/sessions/${encodeURIComponent(sessionId)}/permissions/${encodeURIComponent(requestId)}`,
       decision,
     )
+  }
+
+  /**
+   * Deliver the result of a deferred tool execution — the callback a remote
+   * worker (or a human) makes when the work a session parked on is done. The
+   * session is rehydrated if its runner was torn down, and the agent loop
+   * continues with this as the tool's output.
+   *
+   * Applied idempotently by `executionId`: a duplicate, or one racing the
+   * execution watchdog, resolves with `applied: false` instead of applying twice.
+   * Throws (404) when no session is waiting on that id.
+   */
+  async submitExecutionResult(
+    executionId: string,
+    result: SubmitExecutionResultRequest,
+  ): Promise<SubmitExecutionResultResponse> {
+    return (await this.#call(
+      'POST',
+      `/executions/${encodeURIComponent(executionId)}/result`,
+      result,
+    )) as SubmitExecutionResultResponse
   }
 
   /** List the profiles (named Claude Code config dirs) this server declares, filtered

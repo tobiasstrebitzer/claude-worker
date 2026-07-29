@@ -38,6 +38,15 @@ What's shipped, what's next, and what's still undecided. Status as of 2026-07-29
   digest, `deliver_file` → `file_delivered` + `GET /sessions/:id/files` routes + download card);
   live MCP over http/sse (`connectMcpTools`, DeepWiki-verified `smoke:mcp`). Protocol v3.
 
+- **Deferred execution** (2026-07-29) — a session can now park on work nothing here is doing:
+  `DeferredExecutor` + per-call `describe()` on the executor seam, `Runner.park()` →
+  `RunnerSnapshot` → `restore` (same id, same event log, same seq numbering, mid-turn),
+  `SessionParkManager` + the `SessionStore` seam in the server, `POST /executions/:id/result`
+  with idempotent-by-`executionId` application, an execution watchdog whose timeout reaches the
+  agent as ordinary tool output, and `parked` job runs that free their concurrency slot and stop
+  their wall-clock budget (`job_parked` / `job_resumed`, `maxParkedDurationMs`). Parked sessions
+  stay readable and downloadable from their snapshot; attaching wakes them. Protocol v4.
+
 ## Next
 
 1. **Dual-engine as the product shape.** The model-agnostic runner is the new direction — not a
@@ -65,8 +74,13 @@ What's shipped, what's next, and what's still undecided. Status as of 2026-07-29
    is per-process.
 3. **Promote remaining `sdk_event` passthroughs** UIs care about: tool progress, task/subagent
    events, todo lists.
-4. **Custom `SessionStore` / multi-host sessions** — V1 is single-host by design (SDK on-disk
-   transcripts); a store adapter for cross-host resume is designed but unimplemented.
+4. **Managed sandbox tier-2** — a hosted execution backend (Vercel/E2B) behind the existing
+   `ToolExecutor` seam. Deliberately after deferred execution: if a third backend needs no
+   runner-loop or protocol change, the seam held.
+5. **Durable `SessionStore` / multi-host sessions** — the seam exists and parked sessions round-
+   trip through it, but only the in-memory store is bundled, so a park survives a disconnect and
+   not a restart. A durable store (and, for Claude-engine sessions, cross-host resume over the
+   SDK's on-disk transcripts) is the remaining half.
 
 ## Open questions
 

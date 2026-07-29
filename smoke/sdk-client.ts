@@ -85,10 +85,13 @@ const server = createWorkerServer({
   bridge: { timeoutMs: 30_000 },
   // Bridged results flow back into the runner via the server itself: the hub's
   // onResult calls the adopted runner's settleExecution. Nothing to wire here.
-  createEngineRunner: ({ config, profile, bridge }) => {
-    const vfs = createVfs({
-      '/leads/acme.txt': 'company: Acme Corp\nrevenue: 4173\nemployees: 12\n',
-    })
+  createEngineRunner: ({ config, profile, bridge, restore }) => {
+    // A rehydrated session brings its own filesystem back in the snapshot.
+    const vfs = restore
+      ? createVfs(restore.vfs)
+      : createVfs({
+          '/leads/acme.txt': 'company: Acme Corp\nrevenue: 4173\nemployees: 12\n',
+        })
     // The runner's id does not exist yet, so the executor is a delegate that
     // resolves the session's bridge executor at dispatch time — every dispatch
     // carries the runner's own id as `sessionId`.
@@ -96,7 +99,7 @@ const server = createWorkerServer({
       dispatch: (call) => bridge.executorFor(call.sessionId).dispatch(call),
     }
     const runner = createEngineSession({
-      config: { ...config, languageModel: model, vfs },
+      config: { ...config, languageModel: model, vfs, restore },
       profile,
       resolveModel: () => model,
       selectExecutor: () => toBrowser,

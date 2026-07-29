@@ -1,6 +1,7 @@
 import type {
   PermissionMode,
   PermissionRequest,
+  ProfileEngine,
   SessionEvent,
   SessionInfo,
 } from '@claude-worker/protocol'
@@ -8,6 +9,43 @@ import type { SandboxVfs } from '@claude-worker/sandbox'
 import type { ToolExecutionResult } from './tool-executor.ts'
 
 export type SessionEventListener = (event: SessionEvent) => void
+
+/** One deferred execution a parked session is waiting on. */
+export type ParkedExecution = {
+  executionId: string
+  toolName: string
+  /** Epoch ms the host's execution watchdog should fire at, when the backend set one. */
+  expiresAt?: number
+}
+
+/**
+ * Everything needed to rebuild a torn-down session under the same id — the durable
+ * half of deferred execution. The engine-neutral fields are what the host persists,
+ * indexes, and replays; `state` is the engine's own continuation state (for the
+ * provider engine, its ModelMessage history) and is **opaque** outside it. Keeping
+ * it opaque is what lets `packages/server` persist a provider session without ever
+ * importing a model SDK.
+ *
+ * Must stay JSON-serializable end to end: a durable store round-trips it verbatim.
+ */
+export type RunnerSnapshot = {
+  /** Engine that produced it. Rehydrating into a different one is refused. */
+  engine: ProfileEngine
+  /** Session id the rebuilt runner must adopt. */
+  id: string
+  createdAt: number
+  /** Last emitted seq — the rebuilt runner continues numbering from here, so a
+   * client reattaching with `afterSeq` sees one unbroken stream. */
+  seq: number
+  /** The seq-numbered event log, replayed to clients on rehydration. */
+  events: SessionEvent[]
+  /** Scratch filesystem contents, for engines that have one. */
+  vfs?: Record<string, string>
+  /** The deferred executions this session parked on. */
+  parked: ParkedExecution[]
+  /** Engine-private continuation state. Never inspected by the host. */
+  state: unknown
+}
 
 export type PermissionDecision =
   | { behavior: 'allow'; updatedInput?: Record<string, unknown> }
@@ -45,6 +83,17 @@ export interface Runner {
    * out-of-band simply don't expose it. Idempotent by executionId — unknown or
    * already-settled ids return false. */
   settleExecution?(executionId: string, result: ToolExecutionResult): boolean
+  /**
+   * Park: capture durable state, release engine resources, and go inert — without
+   * ending the session (no `session_closed`; the status becomes `parked`). The host
+   * persists the snapshot, drops the runner, and rebuilds it under the same id when
+   * a deferred execution's result arrives.
+   *
+   * Returns undefined when parking is not possible right now — a turn is in flight,
+   * nothing is actually parked, or the engine doesn't support it (the Claude engine
+   * doesn't: the CLI owns its own process state).
+   */
+  park?(): RunnerSnapshot | undefined
   /** Emit a session_error and terminate. For host-enforced policy (e.g. requireApiKey). */
   fail(message: string): void
   /** Terminate the session and any underlying engine process. */

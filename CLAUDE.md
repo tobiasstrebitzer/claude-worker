@@ -20,7 +20,9 @@ session from a host app. Key docs — read before changing scope or structure:
   (`sandboxed` = no `execute`, rides the seam; `authoritative` = server-side, never bridged);
   granted-or-absent backends: `search`, `download`, `webFetch` (`createWebFetch` in
   `web-fetch.ts`: SSRF-guarded fetch → markdown → model digest), `onFileDelivered`
-  (`deliver_file` → `file_delivered` event). `createEngineSession` + `connectMcpTools`
+  (`deliver_file` → `file_delivered` event). `DeferredExecutor` is the third backend: work that
+  outlives the runner. `park()` → `RunnerSnapshot` (engine-neutral fields + opaque `state`) and
+  `AiSdkRunnerConfig.restore` are the two halves of rehydration. `createEngineSession` + `connectMcpTools`
   assemble a provider session: the host wires the *backends*, the profile's `session` block and
   the request's `capabilities` decide which are granted (ungranted = not built into the tool set).
 - `packages/sandbox` — untrusted-code boundary: QuickJS-NG WASM guest + in-memory map VFS
@@ -30,7 +32,10 @@ session from a host app. Key docs — read before changing scope or structure:
   imports); engine variant is injected so server and browser share one guest.
 - `packages/queue` — `JobQueue` + `QueueAdapter` (in-memory bundled; `claimNext` must stay
   atomic and skip future `nextRunAt`). Concurrency, token budgets, webhooks, retries, watchdog,
-  retention. Jobs are one-shot: first turn_result completes them and closes the session.
+  retention. Jobs are one-shot: first turn_result completes them and closes the session — but a
+  run that parks on a deferred execution goes `parked` at that same finalize chokepoint, frees
+  its slot, and stops its duration clock (`onSessionParking`/`onSessionResumed` are host-called;
+  `maxParkedDurationMs` bounds the wait).
 - `packages/server` — HTTP + WS gateway (`node:http` + `ws`), session registry, auth hook;
   `queue` option mounts `/jobs` + `/queue` routes and a `/queue/ws` JobEvents+stats stream.
   `profiles` option binds names to Claude Code config dirs (session env gets CLAUDE_CONFIG_DIR):
@@ -42,7 +47,11 @@ session from a host app. Key docs — read before changing scope or structure:
   instead runs the model-agnostic engine, built by the `createEngineRunner` hook (so this package
   imports no model SDK and never resolves provider credentials itself).
   `GET /sessions/:id/files[/<path>]` serves session deliverables straight from `Runner.vfs`
-  (attachment disposition; 404 for engines without a VFS).
+  (attachment disposition; 404 for engines without a VFS — or from the snapshot when parked).
+  `SessionParkManager` (`parking.ts`, exposed as `server.parking`) owns deferred execution:
+  snapshot + evict on park, the `SessionStore` seam (memory bundled), the executionId→session
+  index and its watchdog, and `POST /executions/:id/result`. Unwatched sessions park; watched
+  ones stay live and park after the last detach; attaching to a parked one rehydrates it.
 - `packages/client` — REST + WS client on platform `fetch`/`WebSocket`. Zero runtime deps. Owns
   the WS frame surface, so new frames need `SessionHandle` methods/events here. Tests run against
   a real server; `tsconfig.test.json` keeps them out of the main typecheck so `src` stays
@@ -79,7 +88,9 @@ import core/server, the Agent SDK, or any model SDK.
 
 ## Tooling
 
-pnpm workspace + turbo (`pnpm typecheck|test|build|lint`); typecheck is `tsgo` (TS 7 preview),
+pnpm workspace + turbo (`pnpm typecheck|test|build|lint`); typecheck is `tsgo` (TS 7 preview)
+and covers `smoke/` + `examples/` too via `typecheck:extras` (they have tsconfigs but are not
+packages, so turbo never ran them, and swc-node strips their types unchecked),
 lint oxlint, `build/` via tsdown only on `prepack`/CI — dev never builds: the
 `@claude-worker/source` export condition resolves packages to `src/index.ts` (Node runs with
 `--conditions=@claude-worker/source` + swc-node; Vite/vitest set `resolve.conditions`, vitest
@@ -236,6 +247,18 @@ in tampering with the credential chain. Compliance/legal review is in progress �
   fails the create (session POST 500s with the message, a job goes straight to `failed`). The
   example and the SDK smoke still share ONE process-wide MCP client (sessions must not close it)
   — right for one public endpoint, not a constraint any more.
+- Parking is a persistence boundary, not an ending, and its invariants are load-bearing:
+  `park()` emits `status_changed: 'parked'` and NEVER `session_closed`, snapshots *after* that
+  emit and keeps the seq counter (a rehydrated runner continuing at a reused seq is silently
+  dropped by the reducer's and client's `seq <= lastSeq` dedupe), and refuses while a leg is in
+  flight or any pending call is non-deferred. The runner announces the park only once **every**
+  call of the batch has been dispatched — parking on the first `execution_dispatched` would
+  snapshot a session whose remaining calls then dispatch into a discarded runner. The engine's
+  `state` inside a snapshot is opaque on purpose: typing it would drag `ai`'s `ModelMessage` into
+  `packages/server`, which must not resolve a model SDK at all. `registry.evict()` (not
+  `remove()`) drops a parked runner — `remove()` closes it. A rebuild that ignores
+  `EngineRunnerContext.restore` produces a fresh id and is refused with a loud error, because the
+  silent version is a session that quietly forgot its task.
 - Bridged tool calls: the server asks the **first attached** client and fails dispatch fast when
   none is attached (which is why autonomous jobs simply never bridge). Results are idempotent by
   `executionId` — a late answer racing a timeout is expected and must not error the client or

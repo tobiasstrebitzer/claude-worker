@@ -1,8 +1,19 @@
 export { SessionRunner } from './runner.ts'
 export { AiSdkRunner } from './ai-sdk-runner.ts'
-export type { AiSdkRunnerConfig, PendingToolCall, ToolCallOutput } from './ai-sdk-runner.ts'
+export type {
+  AiSdkRunnerConfig,
+  AiSdkSessionState,
+  PendingToolCall,
+  ToolCallOutput,
+} from './ai-sdk-runner.ts'
 export type { HistoryFn, QueryFn, SessionRunnerConfig } from './runner.ts'
-export type { PermissionDecision, Runner, SessionEventListener } from './runner-interface.ts'
+export type {
+  ParkedExecution,
+  PermissionDecision,
+  Runner,
+  RunnerSnapshot,
+  SessionEventListener,
+} from './runner-interface.ts'
 export type {
   ToolExecutionCall,
   ToolExecutionDispatch,
@@ -13,6 +24,8 @@ export { QuickJsExecutor, isHostAllowed } from './quickjs-executor.ts'
 export type { HostFetch, QuickJsExecutorOptions } from './quickjs-executor.ts'
 export { BrowserBridgeExecutor, toExecutionResult } from './browser-bridge-executor.ts'
 export type { BridgeAnswer, BrowserBridgeExecutorOptions } from './browser-bridge-executor.ts'
+export { DeferredExecutor } from './deferred-executor.ts'
+export type { DeferredDispatch, DeferredExecutorOptions } from './deferred-executor.ts'
 export { connectMcpTools, createEngineSession } from './engine.ts'
 export type { EngineSessionOptions, McpConnection } from './engine.ts'
 export { createToolContext, withMcpTools } from './tools.ts'
