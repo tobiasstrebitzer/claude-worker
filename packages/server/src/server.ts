@@ -21,6 +21,7 @@ import {
   type ServerFrame,
 } from '@claude-worker/protocol'
 import { SessionRegistry } from './registry.ts'
+import { BridgeHub, type BridgeHubOptions } from './bridge.ts'
 
 export type SdkSessionLister = (options: {
   dir?: string
@@ -101,6 +102,10 @@ export type WorkerServerOptions = {
   /** Enable the job queue (`/jobs` + `/queue` routes). Jobs run as ordinary registry
    * sessions — attachable over the sessions WS — governed by these limits. */
   queue?: QueueServerOptions
+  /** Browser-bridged tool execution: how long a bridged call may go unanswered
+   * before it fails (default 60000), and where terminal results are delivered.
+   * The hub is always available on the returned server as `bridge`. */
+  bridge?: BridgeHubOptions
 }
 
 export type QueueServerOptions = {
@@ -132,6 +137,9 @@ export type WorkerServer = {
   registry: SessionRegistry
   /** The job queue, when `queue` options were provided. */
   queue?: JobQueue
+  /** Routes tool executions to attached browser clients. `bridge.executorFor(id)`
+   * is the `ToolExecutor` to hand a runner that should execute in the tab. */
+  bridge: BridgeHub
   listen: (port: number, host?: string) => Promise<{ port: number }>
   close: () => Promise<void>
 }
@@ -326,6 +334,7 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
   }
 
   const registry = new SessionRegistry()
+  const bridge = new BridgeHub(options.bridge)
   const wss = new WebSocketServer({ noServer: true })
   /** Profiles (by name; '' = none) whose oauth notice has been logged. */
   const subscriptionNoticeShown = new Set<string>()
@@ -679,6 +688,8 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
     }
     if (req.method === 'DELETE') {
       registry.remove(route.id)
+      // Fail anything still bridged: the session is gone, so no answer can land.
+      bridge.remove(route.id)
       json(res, 200, { session: runner.info() })
       return
     }
@@ -756,6 +767,9 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
       replayingFrom: afterSeq,
     })
     const unsubscribe = runner.subscribe((event) => send({ type: 'event', event }), afterSeq)
+    // Register for bridged tool calls: this client can be asked to execute them
+    // in its own sandbox (see BridgeHub).
+    const detachBridge = bridge.attach(runner.id, send)
 
     ws.on('message', (data: Buffer) => {
       let frame: ClientFrame
@@ -772,7 +786,10 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
         })
       })
     })
-    ws.on('close', unsubscribe)
+    ws.on('close', () => {
+      unsubscribe()
+      detachBridge()
+    })
   }
 
   const handleCommand = async (frame: ClientFrame, runner: Runner): Promise<void> => {
@@ -806,6 +823,20 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
       case 'set_model':
         await runner.setModel(frame.model)
         return
+      case 'tool_call_result':
+        // Untrusted client input by contract — fine for the user's own data,
+        // never a source for server-authoritative state. Unknown or already
+        // settled ids are ignored rather than erroring: a late answer racing a
+        // timeout is expected, not a client bug.
+        bridge.resolve(runner.id, frame.executionId, { output: frame.output, logs: frame.logs })
+        return
+      case 'tool_call_error':
+        bridge.resolve(runner.id, frame.executionId, {
+          reason: frame.reason,
+          error: frame.error,
+          logs: frame.logs,
+        })
+        return
       case 'close':
         runner.close('client')
         return
@@ -818,6 +849,7 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
     server,
     registry,
     queue,
+    bridge,
     listen: (port, host) =>
       new Promise((resolve, reject) => {
         server.once('error', reject)

@@ -7,3 +7,5 @@ export type {
   WorkerServerOptions,
 } from './server.ts'
 export { SessionRegistry } from './registry.ts'
+export { BridgeHub } from './bridge.ts'
+export type { BridgeHubOptions } from './bridge.ts'
