@@ -1,6 +1,6 @@
 {
   "name": "@claude-worker/queue",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "type": "module",
   "description": "Job queue over the claude-worker session runner: remote services schedule one-shot runs; the queue executes them as sessions with bounded concurrency and token budgets, delivering progress and completion via webhooks. Pluggable adapter interface (in-memory bundled; redis/bullmq/pubsub adapters can implement the same contract).",
   "license": "MIT",
@@ -24,8 +24,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@claude-worker/core": "0.4.0",
-    "@claude-worker/protocol": "0.4.0"
+    "@claude-worker/core": "0.4.1",
+    "@claude-worker/protocol": "0.4.1"
   },
   "devDependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.217",

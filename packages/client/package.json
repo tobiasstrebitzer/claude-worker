@@ -1,6 +1,6 @@
 {
   "name": "@claude-worker/client",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "type": "module",
   "description": "Typed claude-worker protocol client for browsers and Node: REST session management plus a WebSocket attach with auto-reconnect and replay-from-last-seq. Uses the platform's fetch and WebSocket; zero runtime deps.",
   "license": "MIT",
@@ -24,11 +24,11 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@claude-worker/protocol": "0.4.0"
+    "@claude-worker/protocol": "0.4.1"
   },
   "devDependencies": {
-    "@claude-worker/core": "0.4.0",
-    "@claude-worker/server": "0.4.0",
+    "@claude-worker/core": "0.4.1",
+    "@claude-worker/server": "0.4.1",
     "@types/node": "^22.10.0",
     "@types/ws": "^8.18.1",
     "rimraf": "^6.1.3",

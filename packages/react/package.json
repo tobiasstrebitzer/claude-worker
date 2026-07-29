@@ -1,6 +1,6 @@
 {
   "name": "@claude-worker/react",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "type": "module",
   "description": "Headless React layer for claude-worker: useClaudeSession hook + pure transcript reducer. No styling opinion — @claude-worker/ui is the styled layer on top.",
   "license": "MIT",
@@ -24,9 +24,9 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@claude-worker/client": "0.4.0",
-    "@claude-worker/protocol": "0.4.0",
-    "@claude-worker/sandbox": "0.4.0"
+    "@claude-worker/client": "0.4.1",
+    "@claude-worker/protocol": "0.4.1",
+    "@claude-worker/sandbox": "0.4.1"
   },
   "peerDependencies": {
     "react": "^18.0.0 || ^19.0.0",
@@ -38,8 +38,8 @@
     }
   },
   "devDependencies": {
-    "@claude-worker/core": "0.4.0",
-    "@claude-worker/server": "0.4.0",
+    "@claude-worker/core": "0.4.1",
+    "@claude-worker/server": "0.4.1",
     "@jitl/quickjs-ng-wasmfile-release-asyncify": "^0.31.0",
     "@jitl/quickjs-singlefile-browser-release-asyncify": "^0.31.0",
     "@types/node": "^22.10.0",

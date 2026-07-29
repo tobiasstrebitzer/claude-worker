@@ -1,6 +1,6 @@
 {
   "name": "@claude-worker/server",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "type": "module",
   "description": "The claude-worker gateway: HTTP + WebSocket session server over @claude-worker/core. Session registry (create/list/attach/interrupt/kill), pluggable auth hook, replay-from-seq attach. Runs anywhere Node runs — needs a real filesystem (no serverless).",
   "license": "MIT",
@@ -25,14 +25,14 @@
     "dev": "node --conditions=@claude-worker/source --import @swc-node/register/esm-register src/dev.ts"
   },
   "dependencies": {
-    "@claude-worker/core": "0.4.0",
-    "@claude-worker/protocol": "0.4.0",
-    "@claude-worker/queue": "0.4.0",
+    "@claude-worker/core": "0.4.1",
+    "@claude-worker/protocol": "0.4.1",
+    "@claude-worker/queue": "0.4.1",
     "ws": "^8.18.0"
   },
   "devDependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.217",
-    "@claude-worker/sandbox": "0.4.0",
+    "@claude-worker/sandbox": "0.4.1",
     "@swc-node/register": "^1.11.1",
     "@swc/core": "^1.15.41",
     "@types/node": "^22.10.0",
