@@ -119,7 +119,8 @@ export class PendingRequestRegistry {
   /** Fail everything (optionally of one kind) — session close, turn interrupt. */
   cancelAll(reason: string, error: string, kind?: PendingKind): number {
     let canceled = 0
-    for (const slot of [...this.#slots.values()]) {
+    // Snapshot ids first: settling mutates the map we would be iterating.
+    for (const slot of Array.from(this.#slots.values())) {
       if (kind && slot.kind !== kind) continue
       if (this.#settle(slot.id, { ok: false, reason, error, settledBy: 'server' })) canceled += 1
     }

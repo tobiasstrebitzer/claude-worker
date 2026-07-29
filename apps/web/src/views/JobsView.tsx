@@ -46,6 +46,8 @@ const CWD_KEY = 'claude-worker.last-cwd'
 const JOB_STATUS_META: Record<JobStatus, { label: string; variant: BadgeProps['variant']; busy?: boolean }> = {
   queued: { label: 'Queued', variant: 'neutral' },
   running: { label: 'Running', variant: 'info', busy: true },
+  // Waiting on an external execution: still live, but nothing is burning here.
+  parked: { label: 'Parked', variant: 'accent' },
   succeeded: { label: 'Succeeded', variant: 'success' },
   failed: { label: 'Failed', variant: 'danger' },
   canceled: { label: 'Canceled', variant: 'warning' },
@@ -278,7 +280,8 @@ function JobRow({
 }) {
   const navigate = useNavigate()
   const meta = JOB_STATUS_META[job.status]
-  const cancellable = job.status === 'queued' || job.status === 'running'
+  // Parked jobs are live too — cancelling one is how you abandon a wait.
+  const cancellable = job.status === 'queued' || job.status === 'running' || job.status === 'parked'
   const cancel = async () => {
     try {
       await client.cancelJob(job.id)
