@@ -3,7 +3,6 @@ import {
   ToolLoopAgent,
   isStepCount,
   type LanguageModel,
-  type LanguageModelUsage,
   type ModelMessage,
   type ToolSet,
 } from 'ai'
@@ -87,6 +86,10 @@ export class AiSdkRunner implements Runner {
   #pendingToolCalls = new Map<string, PendingToolCall>()
   #turnChain: Promise<void> = Promise.resolve()
   #abort: AbortController | undefined
+  /** Accumulates across every leg of one turn. A turn that parks on external
+   * tool calls spans several generate() calls; usage and elapsed time must
+   * cover all of them, not just the leg that happens to finish. */
+  #turnAccum: { startedAt: number; input: number; output: number; cacheWrite: number; cacheRead: number } | undefined
   #numTurns = 0
   #totalUsage = { input: 0, output: 0, cacheWrite: 0, cacheRead: 0 }
   #lastActivityAt: number | undefined
@@ -271,13 +274,25 @@ export class AiSdkRunner implements Runner {
     })
     const abort = new AbortController()
     this.#abort = abort
-    const startedAt = Date.now()
+    const accum = (this.#turnAccum ??= {
+      startedAt: Date.now(),
+      input: 0,
+      output: 0,
+      cacheWrite: 0,
+      cacheRead: 0,
+    })
     try {
       const result = await agent.generate({
         messages: [...this.#messages],
         abortSignal: abort.signal,
       })
       if (this.#closed) return
+      // v7's result.usage is already cumulative across THIS call's steps — add it
+      // once per leg, never per step.
+      accum.input += result.usage.inputTokens ?? 0
+      accum.output += result.usage.outputTokens ?? 0
+      accum.cacheWrite += result.usage.inputTokenDetails?.cacheWriteTokens ?? 0
+      accum.cacheRead += result.usage.inputTokenDetails?.cacheReadTokens ?? 0
       this.#messages.push(...(result.responseMessages as ModelMessage[]))
       for (const message of result.responseMessages) {
         this.#emitResponseMessage(message as { role: string; content: unknown })
@@ -293,7 +308,7 @@ export class AiSdkRunner implements Runner {
         })
       }
       if (this.#pendingToolCalls.size > 0) return // parked: no turn_result yet
-      this.#finishTurn(startedAt, result.text, result.usage)
+      this.#finishTurn(result.text)
     } catch (error) {
       if (this.#closed) return
       const message = error instanceof Error ? error.message : String(error)
@@ -302,41 +317,40 @@ export class AiSdkRunner implements Runner {
         type: 'turn_result',
         subtype: 'error_during_execution',
         isError: true,
-        durationMs: Date.now() - startedAt,
+        durationMs: Date.now() - accum.startedAt,
         numTurns: this.#numTurns,
         totalCostUsd: 0,
         errors: [abort.signal.aborted ? 'interrupted' : message],
+        usage: turnUsage(accum),
       })
+      this.#turnAccum = undefined
       this.#setStatus('idle')
     } finally {
       if (this.#abort === abort) this.#abort = undefined
     }
   }
 
-  /** v7's result.usage is already cumulative across the call's steps — one call
-   * is one turn here, so it maps to per-turn usage directly (never sum steps on
-   * top of it, or accounting double-counts). */
-  #finishTurn(startedAt: number, text: string, usage: LanguageModelUsage): void {
+  /** Emit the turn's result from the whole-turn accumulator, so a turn that
+   * parked on external tool calls reports every leg's tokens and the full
+   * elapsed time (including the time spent executing those tools). */
+  #finishTurn(text: string): void {
+    const accum = this.#turnAccum ?? { startedAt: Date.now(), input: 0, output: 0, cacheWrite: 0, cacheRead: 0 }
     this.#numTurns += 1
-    this.#totalUsage.input += usage.inputTokens ?? 0
-    this.#totalUsage.output += usage.outputTokens ?? 0
-    this.#totalUsage.cacheWrite += usage.inputTokenDetails?.cacheWriteTokens ?? 0
-    this.#totalUsage.cacheRead += usage.inputTokenDetails?.cacheReadTokens ?? 0
+    this.#totalUsage.input += accum.input
+    this.#totalUsage.output += accum.output
+    this.#totalUsage.cacheWrite += accum.cacheWrite
+    this.#totalUsage.cacheRead += accum.cacheRead
     this.#emit({
       type: 'turn_result',
       subtype: 'success',
       isError: false,
-      durationMs: Date.now() - startedAt,
+      durationMs: Date.now() - accum.startedAt,
       numTurns: this.#numTurns,
       totalCostUsd: 0,
       result: text,
-      usage: {
-        input_tokens: usage.inputTokens,
-        output_tokens: usage.outputTokens,
-        cache_creation_input_tokens: usage.inputTokenDetails?.cacheWriteTokens,
-        cache_read_input_tokens: usage.inputTokenDetails?.cacheReadTokens,
-      },
+      usage: turnUsage(accum),
     })
+    this.#turnAccum = undefined
     this.#setStatus('idle')
   }
 
@@ -408,6 +422,15 @@ export class AiSdkRunner implements Runner {
         // Listener errors must not break the runner loop.
       }
     }
+  }
+}
+
+function turnUsage(accum: { input: number; output: number; cacheWrite: number; cacheRead: number }) {
+  return {
+    input_tokens: accum.input,
+    output_tokens: accum.output,
+    cache_creation_input_tokens: accum.cacheWrite,
+    cache_read_input_tokens: accum.cacheRead,
   }
 }
 

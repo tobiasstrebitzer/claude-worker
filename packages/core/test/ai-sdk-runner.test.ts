@@ -136,6 +136,35 @@ describe('AiSdkRunner', () => {
     expect(toolMessage).toBeDefined()
   })
 
+  it('accounts usage across every leg of a parked turn, not just the final one', async () => {
+    // Found by the live smoke: a turn that parks spans several generate() calls,
+    // and reporting only the last one silently drops the parked legs' tokens.
+    const model = new MockLanguageModelV3({
+      modelId: 'mock-1',
+      doGenerate: [
+        toolCallResponse('call-1', 'eval_script', { script: 'x' }),
+        toolCallResponse('call-2', 'eval_script', { script: 'y' }),
+        textResponse('done'),
+      ],
+    })
+    const tools = { eval_script: tool({ inputSchema: z.object({ script: z.string() }) }) }
+    const h = makeRunner({ languageModel: model, tools })
+
+    h.runner.sendMessage('go')
+    await h.waitFor(() => h.runner.pendingToolCalls.length === 1)
+    h.runner.resolveToolCall('call-1', { type: 'text', value: 'first' })
+    await h.waitFor(() => h.runner.pendingToolCalls.some((c) => c.toolCallId === 'call-2'))
+    h.runner.resolveToolCall('call-2', { type: 'text', value: 'second' })
+    await h.waitFor(() => h.eventsOf('turn_result').length === 1)
+
+    // Three legs of 10 in / 5 out each — the two parked legs must not vanish.
+    expect(h.eventsOf('turn_result')[0]).toMatchObject({
+      subtype: 'success',
+      numTurns: 1,
+      usage: { input_tokens: 30, output_tokens: 15 },
+    })
+  })
+
   it('rejects unsupported permission modes at construction and via setPermissionMode', async () => {
     const model = new MockLanguageModelV3({ modelId: 'mock-1', doGenerate: textResponse('x') })
     expect(() => new AiSdkRunner({ languageModel: model, permissionMode: 'plan' })).toThrow(
