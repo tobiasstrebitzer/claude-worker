@@ -27,9 +27,14 @@ session from a host app. Key docs — read before changing scope or structure:
   `profiles` option binds names to Claude Code config dirs (session env gets CLAUDE_CONFIG_DIR):
   required-unless-single on create, auto-default from ~/.claude when unset, `allowedProfiles`
   on the auth principal scopes create + `GET /profiles`.
-- `packages/client` — REST + WS client on platform `fetch`/`WebSocket`. Zero runtime deps.
+- `packages/client` — REST + WS client on platform `fetch`/`WebSocket`. Zero runtime deps. Owns
+  the WS frame surface, so new frames need `SessionHandle` methods/events here. Tests run against
+  a real server; `tsconfig.test.json` keeps them out of the main typecheck so `src` stays
+  `types: []` (a Node-only API reaching the browser client must stay a type error).
 - `packages/react` — headless: `useClaudeSession` + pure transcript reducer (`src/transcript.ts`,
-  framework-free, unit-tested; keep rendering logic out).
+  framework-free, unit-tested; keep rendering logic out) + the browser tool host
+  (`src/tool-host.ts` framework-free, `use-tool-host.ts` the thin hook) that executes
+  server-bridged tool calls in the tab against a lazily-loaded QuickJS guest.
 - `packages/ui` — styled layer (Tailwind v4 + `@base-ui/react` + cva): primitives in
   `src/components/ui`, agent components in `src/components/agent`. Composer input is vendored
   prompt-area (`src/components/prompt-area`, MIT) — re-vendor + re-apply token-classname edits
@@ -139,3 +144,8 @@ in tampering with the credential chain. Compliance/legal review is in progress �
 - A package that imports a workspace sibling needs the vitest workspace-source alias (see
   `packages/core/vitest.config.ts`) — the `@claude-worker/source` condition alone isn't enough,
   vite-node externalizes siblings to their unbuilt `build/` entries.
+- Bridged tool calls: the server asks the **first attached** client and fails dispatch fast when
+  none is attached (which is why autonomous jobs simply never bridge). Results are idempotent by
+  `executionId` — a late answer racing a timeout is expected and must not error the client or
+  re-open a settled call. The browser guest engine is loaded on first bridged call, never at
+  import; keep it that way (it is ~2 MB) and keep the variant an optional peer dep.

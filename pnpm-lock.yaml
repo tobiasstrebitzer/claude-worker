@@ -149,9 +149,18 @@ importers:
         specifier: workspace:*
         version: link:../protocol
     devDependencies:
+      '@claude-worker/react':
+        specifier: workspace:*
+        version: link:../react
+      '@claude-worker/sandbox':
+        specifier: workspace:*
+        version: link:../sandbox
       '@claude-worker/server':
         specifier: workspace:*
         version: link:../server
+      '@jitl/quickjs-ng-wasmfile-release-asyncify':
+        specifier: ^0.31.0
+        version: 0.31.0
       '@types/node':
         specifier: ^22.10.0
         version: 22.20.1

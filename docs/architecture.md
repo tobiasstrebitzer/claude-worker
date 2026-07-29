@@ -68,13 +68,22 @@ boundary: anything a client needs must be expressible as protocol events and com
   request's profile (required when several are declared, implicit with one, auto-detected from
   `~/.claude` when unset), applies its defaults, and pins `CLAUDE_CONFIG_DIR` after the
   `buildRunnerConfig` hook; the principal's `allowedProfiles` scopes creation and
-  `GET /profiles`.
+  `GET /profiles`. `BridgeHub` (always on, exposed as `server.bridge`) routes tool executions
+  between a session and the tabs attached to it: it asks the first attached client and fails
+  dispatch immediately when none is attached, which is what makes autonomous jobs simply never
+  bridge.
 - **`packages/client`** — typed protocol client on platform `fetch`/`WebSocket`: REST session
   and job management, WS attach with auto-reconnect and replay-from-last-seq, `attachQueue()`
   for the live queue stream. Zero runtime deps; browser and Node.
 - **`packages/react`** — the headless React layer: `useClaudeSession` plus `src/transcript.ts`,
   a pure framework-free reducer folding protocol events into transcript state (messages, tool
   calls, approvals, session meta). Rendering logic stays out of it; it is the unit-test surface.
+  Also the browser tool host (`createToolCallHost`, wrapped by `useToolCallHost`): it answers
+  server-bridged tool calls by running them in the tab's own QuickJS guest, seeded from the
+  request's VFS snapshot, so client-held documents can be evaluated without reaching the server.
+  The guest engine loads on the first bridged call rather than at import, and the client refuses
+  any tool it wasn't configured for — a server cannot talk a tab into running something it never
+  opted into.
 - **`packages/ui`** — the styled layer: shadcn-style primitives (`src/components/ui`) and agent
   components (`src/components/agent`: SessionPanel, Transcript, ToolCallCard, PermissionPrompt,
   QuestionPrompt, Composer, SessionList, StatusBar, ModelSelect). Tailwind v4 + Base UI + cva;
