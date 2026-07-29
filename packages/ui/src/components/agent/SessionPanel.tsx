@@ -1,6 +1,6 @@
 import { useMemo, type ReactNode } from 'react'
 import type { ClaudeWorkerClient } from '@claude-worker/client'
-import { useClaudeSession } from '@claude-worker/react'
+import { useClaudeSession, useToolCallHost } from '@claude-worker/react'
 import { cn } from '../../lib/utils.ts'
 import { toast } from '../ui/Sonner.tsx'
 import { Composer } from './Composer.tsx'
@@ -25,12 +25,17 @@ export interface SessionPanelProps {
  * sessions.
  */
 export function SessionPanel({ client, sessionId, header, className }: SessionPanelProps) {
-  const { state, connected, send, approve, deny, interrupt, setModel, setPermissionMode } =
+  const { state, connected, handle, send, approve, deny, interrupt, setModel, setPermissionMode } =
     useClaudeSession(client, sessionId, {
       // Surface rejected commands (e.g. the CLI refusing a permission-mode switch)
       // instead of dropping them — otherwise the select just "doesn't stick".
       onProtocolError: (message) => toast.error(message),
     })
+  // Host server-bridged tool calls (provider-engine sessions) in this tab, on the
+  // SAME handle the panel attached with — the bridge asks the first attached
+  // client. Free for Claude sessions: the guest loads lazily on the first call,
+  // which for them never comes.
+  useToolCallHost(handle)
   const busy = state.status === 'running' || state.status === 'awaiting_approval'
   const ended = state.status === 'failed' || state.status === 'closed'
 

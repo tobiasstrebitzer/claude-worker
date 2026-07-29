@@ -17,6 +17,7 @@
     "@claude-worker/ui": "workspace:*",
     "@fontsource/inter": "^5.2.8",
     "@fontsource/jetbrains-mono": "^5.2.8",
+    "@jitl/quickjs-singlefile-browser-release-asyncify": "^0.31.0",
     "@tanstack/react-router": "^1.170.16",
     "lucide-react": "^1.21.0",
     "react": "^19.2.0",
