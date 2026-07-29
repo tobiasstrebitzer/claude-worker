@@ -1,9 +1,11 @@
-import { Volume } from 'memfs'
-
 /**
  * Per-call in-memory scratch filesystem. Seeded from the task's documents,
  * discarded after the call — never backed by host paths. The guest only ever
  * touches it through the by-value host bridge (vfs_read/vfs_write/vfs_list).
+ *
+ * A plain path→content map on purpose: this package must run unpolyfilled in
+ * the browser (the tab-side tool host seeds a VFS per bridged call), and a
+ * node-flavored fs emulation drags `node:buffer` in with it.
  */
 export type SandboxVfs = {
   read(path: string): string | undefined
@@ -30,37 +32,24 @@ export function normalizeVfsPath(path: string): string {
 }
 
 export function createVfs(seed?: Record<string, string>): SandboxVfs {
-  const volume = new Volume()
+  const files = new Map<string, string>()
   const write = (path: string, content: string): void => {
-    const normalized = normalizeVfsPath(path)
-    const dir = normalized.slice(0, normalized.lastIndexOf('/')) || '/'
-    volume.mkdirSync(dir, { recursive: true })
-    volume.writeFileSync(normalized, content)
+    files.set(normalizeVfsPath(path), content)
   }
   for (const [path, content] of Object.entries(seed ?? {})) write(path, content)
   return {
     read(path) {
-      try {
-        return volume.readFileSync(normalizeVfsPath(path), 'utf8') as string
-      } catch {
-        return undefined
-      }
+      return files.get(normalizeVfsPath(path))
     },
     write,
     list(dir = '/') {
       const prefix = normalizeVfsPath(dir)
-      const files = Object.keys(volume.toJSON()).filter(
-        (file) => prefix === '/' || file === prefix || file.startsWith(prefix + '/'),
-      )
-      return files.sort()
+      return [...files.keys()]
+        .filter((file) => prefix === '/' || file === prefix || file.startsWith(prefix + '/'))
+        .sort()
     },
     snapshot() {
-      const json = volume.toJSON()
-      const out: Record<string, string> = {}
-      for (const [path, content] of Object.entries(json)) {
-        if (typeof content === 'string') out[path] = content
-      }
-      return out
+      return Object.fromEntries(files)
     },
   }
 }

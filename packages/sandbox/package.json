@@ -24,7 +24,6 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "memfs": "^4.17.0",
     "quickjs-emscripten-core": "^0.31.0"
   },
   "devDependencies": {

@@ -51,7 +51,8 @@ boundary: anything a client needs must be expressible as protocol events and com
   secret-bearing APIs, never bridged, since bridging would let a browser forge authoritative
   results). `createEngineSession` assembles provider model + tools + executor into a session.
 - **`packages/sandbox`** — the untrusted-code boundary: a QuickJS-NG WASM guest for
-  LLM-generated scripts, an in-memory `memfs` scratch VFS, and a by-value host bridge (values
+  LLM-generated scripts, an in-memory map-backed scratch VFS (browser-safe by construction —
+  no node-fs emulation, no `Buffer`), and a by-value host bridge (values
   cross as strings/JSON; a host object is never handed over by reference — the bridge, not the
   WASM boundary, is where sandboxes like Terrarium/CVE-2026-5752 actually failed). Limits are
   interpreter-enforced: `setMemoryLimit` for the allocator, an interrupt handler between
