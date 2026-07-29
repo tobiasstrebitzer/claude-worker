@@ -1,4 +1,8 @@
 export { useClaudeSession } from './use-session.ts'
 export type { UseClaudeSessionResult } from './use-session.ts'
+export { useToolCallHost } from './use-tool-host.ts'
+export type { UseToolCallHostOptions } from './use-tool-host.ts'
+export { createToolCallHost } from './tool-host.ts'
+export type { ToolCallHostOptions, ToolHostExecution, ToolHostRunner } from './tool-host.ts'
 export { applyEvent, initialTranscriptState, seedFromSessionInfo } from './transcript.ts'
 export type { TranscriptItem, TranscriptState } from './transcript.ts'

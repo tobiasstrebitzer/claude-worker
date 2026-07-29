@@ -259,7 +259,13 @@ importers:
       '@claude-worker/protocol':
         specifier: workspace:*
         version: link:../protocol
+      '@claude-worker/sandbox':
+        specifier: workspace:*
+        version: link:../sandbox
     devDependencies:
+      '@jitl/quickjs-singlefile-browser-release-asyncify':
+        specifier: ^0.31.0
+        version: 0.31.0
       '@types/node':
         specifier: ^22.10.0
         version: 22.20.1
@@ -1138,6 +1144,9 @@ packages:
 
   '@jitl/quickjs-ng-wasmfile-release-asyncify@0.31.0':
     resolution: {integrity: sha512-g/yFBenancWcbDqMMlJJljZBXzFBoqxQhvDoElwTfLNbfLSn+dYXUzHzs36DkX/OEWRWnnu0lS0KSfQ8/wl+QQ==}
+
+  '@jitl/quickjs-singlefile-browser-release-asyncify@0.31.0':
+    resolution: {integrity: sha512-w0Ov2rmoGSsSrSosLQMEKpzgVfz2TcNSlJcjMDSqns6YuXpBMFYcAEHklQ6p5xwK2o70RbVf+pietG3K/ZAwow==}
 
   '@jridgewell/gen-mapping@0.3.13':
     resolution: {integrity: sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==}
@@ -5062,6 +5071,10 @@ snapshots:
   '@jitl/quickjs-ffi-types@0.31.0': {}
 
   '@jitl/quickjs-ng-wasmfile-release-asyncify@0.31.0':
+    dependencies:
+      '@jitl/quickjs-ffi-types': 0.31.0
+
+  '@jitl/quickjs-singlefile-browser-release-asyncify@0.31.0':
     dependencies:
       '@jitl/quickjs-ffi-types': 0.31.0
 
