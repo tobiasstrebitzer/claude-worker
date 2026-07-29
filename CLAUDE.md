@@ -112,7 +112,7 @@ stack) cost tokens.
 - test: `pnpm test`
 - push: yes (github.com/tobiasstrebitzer/claude-worker, branch `master`; repo private pending
   review — re-enable the docs.yml push trigger once Pages is on)
-- version_bump: yes (aligned across all 8 packages; 0.3.0 tagged — `sandbox` first published at
+- version_bump: yes (aligned across all 8 packages; 0.4.0 tagged — `sandbox` first published at
   0.3.0)
 - publish: yes — npm `@claude-worker` org via keybridge Touch ID: `npx -y keybridge@latest
   publish` from each package dir, dependency order (protocol/sandbox → core/client → queue →
