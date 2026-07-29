@@ -2,7 +2,8 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { Runner, SessionRunnerConfig } from '@claude-worker/core'
+import WebSocket from 'ws'
+import type { Runner, SessionRunnerConfig, ToolExecutionResult } from '@claude-worker/core'
 import type { ProfileInfo, SessionInfo } from '@claude-worker/protocol'
 import { createWorkerServer, type EngineRunnerContext, type WorkerServer } from '../src/index.ts'
 
@@ -130,6 +131,69 @@ describe('provider profiles and engine selection', () => {
     })
     expect(res.status).toBe(201)
     expect(createEngineRunner).not.toHaveBeenCalled()
+  })
+
+  it("feeds bridged execution results back into the runner's settleExecution", async () => {
+    const settled: Array<{ executionId: string; result: ToolExecutionResult }> = []
+    const hostResults: string[] = []
+    running = createWorkerServer({
+      allowUnauthenticated: true,
+      allowedCwdRoots: ['/tmp'],
+      profiles: [providerProfile()],
+      bridge: { onResult: (_s, executionId) => hostResults.push(executionId) },
+      createEngineRunner: ({ config }) => ({
+        ...fakeRunner('engine-1', config),
+        settleExecution: (executionId, result) => {
+          settled.push({ executionId, result })
+          return true
+        },
+      }),
+    })
+    const { port } = await running.listen(0, '127.0.0.1')
+    const res = await fetch(`http://127.0.0.1:${port}/v1/sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ cwd: '/tmp/project', profile: 'kimi' }),
+    })
+    const { session } = (await res.json()) as { session: SessionInfo }
+
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/v1/sessions/${session.id}/ws`)
+    const attached = new Promise<void>((resolve) => {
+      ws.on('message', (data) => {
+        if ((JSON.parse(String(data)) as { type: string }).type === 'attached') resolve()
+      })
+    })
+    ws.on('message', (data) => {
+      const frame = JSON.parse(String(data)) as { type: string; executionId?: string }
+      if (frame.type === 'tool_call_request') {
+        ws.send(
+          JSON.stringify({
+            type: 'tool_call_result',
+            executionId: frame.executionId,
+            output: { type: 'json', value: 42 },
+          }),
+        )
+      }
+    })
+    await attached
+
+    const pending = await running.bridge.executorFor(session.id).dispatch({
+      executionId: 'exec-1',
+      sessionId: session.id,
+      tool: 'eval_script',
+      input: { script: '6 * 7' },
+    })
+    expect(pending.status).toBe('pending')
+
+    // The server wires the answer into the runner itself — no host boilerplate —
+    // and the host's own onResult observer still fires.
+    await vi.waitFor(() => expect(settled).toHaveLength(1))
+    expect(settled[0]).toMatchObject({
+      executionId: 'exec-1',
+      result: { status: 'ok', output: 42 },
+    })
+    expect(hostResults).toEqual(['exec-1'])
+    ws.close()
   })
 
   it('serves provider profiles over the profiles API without a config snapshot', async () => {

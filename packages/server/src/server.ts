@@ -389,7 +389,17 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
   }
 
   const registry = new SessionRegistry()
-  const bridge = new BridgeHub(options.bridge)
+  const bridge = new BridgeHub({
+    ...options.bridge,
+    onResult: (sessionId, executionId, result) => {
+      // A runner that executes out-of-band (the model-agnostic engine bridging
+      // to a browser tab) gets the result fed straight back into its loop —
+      // operators don't wire this themselves. The host callback still fires,
+      // for observability.
+      registry.get(sessionId)?.settleExecution?.(executionId, result)
+      options.bridge?.onResult?.(sessionId, executionId, result)
+    },
+  })
   const wss = new WebSocketServer({ noServer: true })
   /** Profiles (by name; '' = none) whose oauth notice has been logged. */
   const subscriptionNoticeShown = new Set<string>()

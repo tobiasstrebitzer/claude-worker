@@ -4,6 +4,7 @@ import type {
   SessionEvent,
   SessionInfo,
 } from '@claude-worker/protocol'
+import type { ToolExecutionResult } from './tool-executor.ts'
 
 export type SessionEventListener = (event: SessionEvent) => void
 
@@ -34,6 +35,11 @@ export interface Runner {
   setPermissionMode(mode: PermissionMode): Promise<void>
   /** Switch the model for subsequent responses; undefined = back to the default. */
   setModel(model?: string): Promise<void>
+  /** Deliver the terminal result of an out-of-band tool execution (e.g. a bridged
+   * call answered by a browser client). Optional: engines that never execute
+   * out-of-band simply don't expose it. Idempotent by executionId — unknown or
+   * already-settled ids return false. */
+  settleExecution?(executionId: string, result: ToolExecutionResult): boolean
   /** Emit a session_error and terminate. For host-enforced policy (e.g. requireApiKey). */
   fail(message: string): void
   /** Terminate the session and any underlying engine process. */
