@@ -14,6 +14,8 @@
     "build": "turbo run build",
     "typecheck": "turbo run typecheck && pnpm typecheck:extras",
     "typecheck:extras": "tsgo -p smoke/tsconfig.json && tsgo -p examples/tsconfig.json",
+    "version:set": "node scripts/set-version.mjs",
+    "check:versions": "node scripts/set-version.mjs --check",
     "test": "turbo run test",
     "lint": "oxlint",
     "clean": "turbo run clean",

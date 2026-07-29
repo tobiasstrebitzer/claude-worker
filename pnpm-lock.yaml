@@ -164,14 +164,14 @@ importers:
   packages/client:
     dependencies:
       '@claude-worker/protocol':
-        specifier: workspace:*
+        specifier: 0.4.0
         version: link:../protocol
     devDependencies:
       '@claude-worker/core':
-        specifier: workspace:*
+        specifier: 0.4.0
         version: link:../core
       '@claude-worker/server':
-        specifier: workspace:*
+        specifier: 0.4.0
         version: link:../server
       '@types/node':
         specifier: ^22.10.0
@@ -210,10 +210,10 @@ importers:
         specifier: ^0.3.217
         version: 0.3.217(@anthropic-ai/sdk@0.93.0(zod@4.4.3))(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(zod@4.4.3)
       '@claude-worker/protocol':
-        specifier: workspace:*
+        specifier: 0.4.0
         version: link:../protocol
       '@claude-worker/sandbox':
-        specifier: workspace:*
+        specifier: 0.4.0
         version: link:../sandbox
       ai:
         specifier: ^7.0.38
@@ -253,10 +253,10 @@ importers:
   packages/queue:
     dependencies:
       '@claude-worker/core':
-        specifier: workspace:*
+        specifier: 0.4.0
         version: link:../core
       '@claude-worker/protocol':
-        specifier: workspace:*
+        specifier: 0.4.0
         version: link:../protocol
     devDependencies:
       '@anthropic-ai/claude-agent-sdk':
@@ -278,20 +278,20 @@ importers:
   packages/react:
     dependencies:
       '@claude-worker/client':
-        specifier: workspace:*
+        specifier: 0.4.0
         version: link:../client
       '@claude-worker/protocol':
-        specifier: workspace:*
+        specifier: 0.4.0
         version: link:../protocol
       '@claude-worker/sandbox':
-        specifier: workspace:*
+        specifier: 0.4.0
         version: link:../sandbox
     devDependencies:
       '@claude-worker/core':
-        specifier: workspace:*
+        specifier: 0.4.0
         version: link:../core
       '@claude-worker/server':
-        specifier: workspace:*
+        specifier: 0.4.0
         version: link:../server
       '@jitl/quickjs-ng-wasmfile-release-asyncify':
         specifier: ^0.31.0
@@ -349,13 +349,13 @@ importers:
   packages/server:
     dependencies:
       '@claude-worker/core':
-        specifier: workspace:*
+        specifier: 0.4.0
         version: link:../core
       '@claude-worker/protocol':
-        specifier: workspace:*
+        specifier: 0.4.0
         version: link:../protocol
       '@claude-worker/queue':
-        specifier: workspace:*
+        specifier: 0.4.0
         version: link:../queue
       ws:
         specifier: ^8.18.0
@@ -365,7 +365,7 @@ importers:
         specifier: ^0.3.217
         version: 0.3.217(@anthropic-ai/sdk@0.93.0(zod@4.4.3))(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(zod@4.4.3)
       '@claude-worker/sandbox':
-        specifier: workspace:*
+        specifier: 0.4.0
         version: link:../sandbox
       '@swc-node/register':
         specifier: ^1.11.1
@@ -395,13 +395,13 @@ importers:
         specifier: ^1.6.0
         version: 1.6.0(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       '@claude-worker/client':
-        specifier: workspace:*
+        specifier: 0.4.0
         version: link:../client
       '@claude-worker/protocol':
-        specifier: workspace:*
+        specifier: 0.4.0
         version: link:../protocol
       '@claude-worker/react':
-        specifier: workspace:*
+        specifier: 0.4.0
         version: link:../react
       class-variance-authority:
         specifier: ^0.7.1

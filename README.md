@@ -332,9 +332,11 @@ TS source via the `@claude-worker/source` export condition (`node --conditions=@
 
 ## Status
 
-0.3.x — early but real: both engines, protocol, server, client, headless react layer, styled UI,
-web dashboard, and the job queue are all in and tested. 0.3 adds the model-agnostic engine, the
-QuickJS sandbox (`@claude-worker/sandbox`, first release), browser-bridged tool execution,
-profile management, and deferred execution (parked sessions + `POST /executions/:id/result`).
-Expect the protocol to evolve (`PROTOCOL_VERSION` guards breaking changes; it is at 4). See the [roadmap](docs/roadmap.md) for what's shipped, what's next, and the open
-questions (naming, compliance posture).
+0.4.x — early but real: both engines, protocol, server, client, headless react layer, styled UI,
+web dashboard, and the job queue are all in and tested. 0.3 added the model-agnostic engine, the
+QuickJS sandbox (`@claude-worker/sandbox`, first release), browser-bridged tool execution, and
+profile management; 0.4 adds deferred execution — sessions that park on work nothing here is
+doing and wake on `POST /executions/:id/result`. Expect the protocol to evolve
+(`PROTOCOL_VERSION` guards breaking changes; it is at 4). See the
+[roadmap](docs/roadmap.md) for what's shipped, what's next, and the open questions (naming,
+compliance posture).

@@ -26,9 +26,9 @@
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",
-    "@claude-worker/client": "workspace:*",
-    "@claude-worker/protocol": "workspace:*",
-    "@claude-worker/react": "workspace:*",
+    "@claude-worker/client": "0.4.0",
+    "@claude-worker/protocol": "0.4.0",
+    "@claude-worker/react": "0.4.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^1.21.0",

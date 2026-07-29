@@ -24,9 +24,9 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@claude-worker/client": "workspace:*",
-    "@claude-worker/protocol": "workspace:*",
-    "@claude-worker/sandbox": "workspace:*"
+    "@claude-worker/client": "0.4.0",
+    "@claude-worker/protocol": "0.4.0",
+    "@claude-worker/sandbox": "0.4.0"
   },
   "peerDependencies": {
     "react": "^18.0.0 || ^19.0.0",
@@ -38,8 +38,8 @@
     }
   },
   "devDependencies": {
-    "@claude-worker/core": "workspace:*",
-    "@claude-worker/server": "workspace:*",
+    "@claude-worker/core": "0.4.0",
+    "@claude-worker/server": "0.4.0",
     "@jitl/quickjs-ng-wasmfile-release-asyncify": "^0.31.0",
     "@jitl/quickjs-singlefile-browser-release-asyncify": "^0.31.0",
     "@types/node": "^22.10.0",

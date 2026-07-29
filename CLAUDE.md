@@ -96,6 +96,13 @@ lint oxlint, `build/` via tsdown only on `prepack`/CI — dev never builds: the
 `--conditions=@claude-worker/source` + swc-node; Vite/vitest set `resolve.conditions`, vitest
 also aliases). In-package imports use explicit `.ts` extensions.
 
+Publishable packages pin their siblings to an exact version (`"@claude-worker/protocol": "0.4.0"`,
+never `workspace:*` — keybridge publishes with plain `npm publish`, which ships the workspace
+protocol verbatim and breaks every consumer). They still symlink locally because
+`linkWorkspacePackages` links whenever the range matches. `scripts/set-version.mjs` (`pnpm
+version:set` / `pnpm check:versions`) owns both halves; the apps keep `workspace:*` since they are
+private and never published.
+
 ## Testing
 
 `pnpm test` — core: fake `queryFn` harness (no CLI spawn); server: real HTTP+WS integration incl.
@@ -108,18 +115,21 @@ stack) cost tokens.
 
 ## Wrapup Config
 
-- check: `pnpm lint` + `pnpm typecheck`
+- check: `pnpm lint` + `pnpm typecheck` + `pnpm check:versions`
 - test: `pnpm test`
-- push: yes (github.com/tobiasstrebitzer/claude-worker, branch `master`; repo private pending
-  review — re-enable the docs.yml push trigger once Pages is on)
-- version_bump: yes (aligned across all 8 packages; 0.4.0 tagged — `sandbox` first published at
-  0.3.0)
+- push: yes (github.com/tobiasstrebitzer/claude-worker, branch `master`; repo is public, and
+  every push to master deploys the docs site to https://tobiasstrebitzer.github.io/claude-worker/
+  via `.github/workflows/docs.yml`)
+- version_bump: yes — `pnpm version:set <x.y.z> && pnpm install --lockfile-only`, which moves all
+  8 packages AND their pinned inter-dep specifiers together. Never hand-edit a version: pinned
+  siblings that drift from the local version stop being symlinked and resolve from the registry
+  instead, silently. `pnpm check:versions` is the guard (CI runs it first). 0.4.0 tagged;
+  `sandbox` first published at 0.3.0.
 - publish: yes — npm `@claude-worker` org via keybridge Touch ID: `npx -y keybridge@latest
   publish` from each package dir, dependency order (protocol/sandbox → core/client → queue →
-  react → server → ui). keybridge runs plain `npm publish`, so pin `workspace:*` inter-deps to the
-  release version first, publish, then `git checkout` the package.jsons. Run the gatekeeper
-  audit before publishing. MIT (LICENSE per package; ui intentionally ships `src/`,
-  allowlisted in `.claude/gatekeeper.json`).
+  react → server → ui). Versions are already pinned in the repo, so there is no pin/restore
+  dance — publish straight from a clean tree. Run the gatekeeper audit first. MIT (LICENSE per
+  package; ui intentionally ships `src/`, allowlisted in `.claude/gatekeeper.json`).
 - docs: root CLAUDE.md + README.md + docs/ + apps/docs (keep site content in sync with README)
 - frontend_smoke: no (manual via `pnpm server` + `pnpm web`)
 - co_authored_by: no (global)

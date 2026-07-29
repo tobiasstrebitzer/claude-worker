@@ -1,7 +1,13 @@
-# claude-worker pnpm workspace. packages/ + apps/ with `workspace:*` deps SYMLINKED
-# (linkWorkspacePackages), and each publishable package exposes a `@claude-worker/source`
+# claude-worker pnpm workspace. packages/ + apps/, all inter-package deps SYMLINKED
+# (linkWorkspacePackages below), and each publishable package exposes a `@claude-worker/source`
 # export condition so apps resolve straight to TS source (packages/*/src) in dev with no build
 # step. Packages build to build/ via tsdown only on prepack/CI (never in dev). Turbo orchestrates.
+#
+# Publishable packages (packages/*) pin siblings to an EXACT version, not `workspace:*`:
+# publishing runs plain `npm publish`, which doesn't rewrite the workspace protocol. Linking
+# still happens because linkWorkspacePackages symlinks whenever the range matches the local
+# version — which is exactly why `pnpm version:set` moves versions and specifiers together and
+# `pnpm check:versions` guards it. The apps stay on `workspace:*`: private, never published.
 packages:
   - packages/*
   - apps/*
