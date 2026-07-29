@@ -10,7 +10,7 @@
  */
 
 /** Bumped on any breaking change to events, commands, or REST shapes. */
-export const PROTOCOL_VERSION = 1
+export const PROTOCOL_VERSION = 2
 
 // ---------------------------------------------------------------------------
 // Session lifecycle
@@ -200,6 +200,29 @@ export type RateLimitInfo = {
 }
 
 // ---------------------------------------------------------------------------
+// Tool execution (bridged, deferred, and remote)
+// ---------------------------------------------------------------------------
+
+/**
+ * Lifecycle of one tool execution, correlated by `executionId` end to end.
+ *
+ * - `pending` — dispatched, result not in yet (bridged to a client, or queued).
+ * - `deferred` — parked beyond this turn/process; may outlive the session's
+ *   liveness and be applied on rehydration.
+ * - `settled` / `failed` — terminal. Results are applied idempotently by id, so
+ *   a duplicate delivery is a no-op rather than a second application.
+ */
+export type ToolExecutionStatus = 'pending' | 'deferred' | 'settled' | 'failed'
+
+/** Where a tool execution ran (or is running). Advisory: for display and routing. */
+export type ToolExecutionBackend = 'server' | 'browser' | 'managed' | 'remote'
+
+/** Result payload of a tool execution, by value — never a live host reference. */
+export type ToolExecutionOutput =
+  | { type: 'text'; value: string }
+  | { type: 'json'; value: unknown }
+
+// ---------------------------------------------------------------------------
 // Session events (server -> client)
 // ---------------------------------------------------------------------------
 
@@ -286,6 +309,39 @@ export type SessionEventBody =
       /** Denial message, when denied. */
       message?: string
     }
+  /** A tool execution was dispatched to a backend. For bridged executions this
+   * precedes the `tool_call_request` frame; for deferred ones it is the record
+   * that survives a teardown. */
+  | {
+      type: 'execution_dispatched'
+      executionId: string
+      toolName: string
+      backend: ToolExecutionBackend
+      /** True when the execution may outlive this turn or process. */
+      deferred?: boolean
+      /** Epoch ms after which the server applies its timeout policy. */
+      expiresAt?: number
+    }
+  /** A dispatched execution produced a result. Applied idempotently by `executionId`. */
+  | {
+      type: 'execution_result'
+      executionId: string
+      output: ToolExecutionOutput
+      /** Guest/agent-visible logs, if the backend captured any. */
+      logs?: string[]
+      durationMs?: number
+    }
+  /** A dispatched execution failed, timed out, or was orphaned. The failure is fed
+   * back into the loop as tool output so the agent can adapt — it is not a session error. */
+  | {
+      type: 'execution_failed'
+      executionId: string
+      /** Machine-readable cause: 'timeout' | 'oom' | 'exception' | 'orphaned' | backend-specific. */
+      reason: string
+      error: string
+      logs?: string[]
+      durationMs?: number
+    }
   /** Any SDKMessage this protocol version doesn't model first-class (task progress,
    * compaction boundaries, auth status, ...). Payload is the raw SDK message. */
   | { type: 'sdk_event'; payload: { type: string; [key: string]: unknown } }
@@ -320,6 +376,30 @@ export type SessionCommand =
   | { type: 'set_permission_mode'; mode: PermissionMode }
   /** Switch the model for subsequent responses; omit `model` for the default. */
   | { type: 'set_model'; model?: string }
+  /**
+   * Result of a tool execution the server bridged to this client (see
+   * {@link ToolCallRequestFrame}). Unknown or already-settled `executionId`s are
+   * ignored — delivery is idempotent, and a late result after a timeout must not
+   * re-open a settled call.
+   *
+   * Browser-returned results are UNTRUSTED input: acceptable for the user's own
+   * data, never a source for server-authoritative state.
+   */
+  | {
+      type: 'tool_call_result'
+      executionId: string
+      output: ToolExecutionOutput
+      logs?: string[]
+    }
+  /** The client could not execute a bridged call (unsupported tool, guest error,
+   * tab closing). Fed back to the agent as tool output. */
+  | {
+      type: 'tool_call_error'
+      executionId: string
+      reason: string
+      error: string
+      logs?: string[]
+    }
   | { type: 'close' }
 
 // ---------------------------------------------------------------------------
@@ -335,9 +415,33 @@ export type AttachedFrame = {
   replayingFrom: number
 }
 
+/**
+ * Ask the attached client to execute a tool call in its own sandbox (browser
+ * bridge). The client answers with `tool_call_result` or `tool_call_error`
+ * carrying the same `executionId`.
+ *
+ * Only sandbox-benefiting tools are ever bridged. Authenticated/authoritative
+ * tools (MCP, secret-bearing APIs) execute server-side and never appear here.
+ */
+export type ToolCallRequestFrame = {
+  type: 'tool_call_request'
+  executionId: string
+  toolName: string
+  input: unknown
+  /** Files to seed the client's scratch VFS with, path → contents. */
+  vfsSeed?: Record<string, string>
+  limits?: { timeoutMs?: number; memoryLimitBytes?: number }
+  /** Epoch ms after which the server gives up and fails the execution. */
+  expiresAt?: number
+}
+
 export type ServerFrame =
   | AttachedFrame
   | { type: 'event'; event: SessionEvent }
+  | ToolCallRequestFrame
+  /** A bridged execution no longer needs an answer (turn interrupted, timed out,
+   * or the session closed) — the client should abandon it. */
+  | { type: 'tool_call_canceled'; executionId: string; reason: string }
   | { type: 'protocol_error'; message: string }
 
 export type ClientFrame = SessionCommand
@@ -517,10 +621,13 @@ export type ErrorResponse = { error: string }
 /**
  * - `queued` — accepted, waiting for a concurrency slot (or the daily token budget)
  * - `running` — a session is executing the prompt
+ * - `parked` — waiting on an external event (a deferred tool execution). Not
+ *   terminal and not consuming a concurrency slot; resumes to `running` when the
+ *   result arrives, or fails via the execution watchdog if it never does.
  * - `succeeded` / `failed` — terminal; `result` (and `error` on failure) are set
  * - `canceled` — terminal; canceled by a client before or during the run
  */
-export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled'
+export type JobStatus = 'queued' | 'running' | 'parked' | 'succeeded' | 'failed' | 'canceled'
 
 /** Where job progress/completion deliveries are POSTed (JSON body = {@link JobEvent}). */
 export type WebhookConfig = {
@@ -616,6 +723,10 @@ export type JobEvent =
   | { type: 'job_submitted'; job: JobInfo; ts: number }
   | { type: 'job_started'; job: JobInfo; ts: number }
   | { type: 'job_progress'; job: JobInfo; progress: JobProgress; ts: number }
+  /** The run parked on a deferred execution; `executionId` says what it waits on. */
+  | { type: 'job_parked'; job: JobInfo; executionId: string; ts: number }
+  /** A parked run resumed because its execution result arrived. */
+  | { type: 'job_resumed'; job: JobInfo; executionId: string; ts: number }
   | { type: 'job_retrying'; job: JobInfo; ts: number }
   | { type: 'job_completed'; job: JobInfo; ts: number }
 
