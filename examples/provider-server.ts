@@ -136,8 +136,31 @@ const { listen } = createWorkerServer({
   // a real deployment scopes this much more tightly.
   allowedConfigDirRoots: [homedir()],
   createEngineRunner: ({ config, profile, bridge, restore }) => {
-    const factory = factories.get(profile.provider!.id)!
-    const modelId = config.model ?? profile.provider!.model!
+    // Profiles created from the dashboard can name any provider; this example
+    // only built factories for the keys that were present at startup. Say which
+    // key is missing — the rejection surfaces as the create's 500 body (and as a
+    // job's failure reason), so a bare TypeError here would be all the operator
+    // ever sees.
+    const providerId = profile.provider!.id
+    const factory = factories.get(providerId)
+    if (!factory) {
+      const known = Object.keys(PROVIDERS)
+      throw new Error(
+        known.includes(providerId)
+          ? `profile '${profile.name}' needs ${PROVIDERS[providerId]!.env} in the environment ` +
+            '(or the repo .env) — this dev server started without it, so it has no model factory ' +
+            `for '${providerId}'. Add the key and restart.`
+          : `profile '${profile.name}' names provider '${providerId}', which this example does not ` +
+            `wire. Known here: ${known.join(', ')}.`,
+      )
+    }
+    const modelId = config.model ?? profile.provider!.model
+    if (!modelId) {
+      throw new Error(
+        `profile '${profile.name}' declares no provider.model and the request named none — ` +
+          'set a model on the profile (or pass one when creating the session).',
+      )
+    }
     // A document the model can only reason about by running code over it. On a
     // rehydrated session the snapshot's filesystem wins — seeding here would
     // undo whatever the parked turn already wrote.
