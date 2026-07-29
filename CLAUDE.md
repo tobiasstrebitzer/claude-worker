@@ -101,8 +101,8 @@ stack) cost tokens.
 - test: `pnpm test`
 - push: yes (github.com/tobiasstrebitzer/claude-worker, branch `master`; repo private pending
   review — re-enable the docs.yml push trigger once Pages is on)
-- version_bump: yes (aligned across all 8 packages; 0.2.0 on npm, tagged — `sandbox` is new and
-  not yet published)
+- version_bump: yes (aligned across all 8 packages; 0.3.0 tagged — `sandbox` first published at
+  0.3.0)
 - publish: yes — npm `@claude-worker` org via keybridge Touch ID: `npx -y keybridge@latest
   publish` from each package dir, dependency order (protocol/sandbox → core/client → queue →
   react → server → ui). keybridge runs plain `npm publish`, so pin `workspace:*` inter-deps to the
