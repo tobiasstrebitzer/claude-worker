@@ -10,3 +10,8 @@ export type {
 export { SessionRegistry } from './registry.ts'
 export { BridgeHub } from './bridge.ts'
 export type { BridgeHubOptions } from './bridge.ts'
+export {
+  createFileProfileStore,
+  createMemoryProfileStore,
+  type ProfileStore,
+} from './profile-store.ts'

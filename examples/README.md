@@ -40,7 +40,10 @@ On **Sessions**:
 - **Working directory:** anything, e.g. `/tmp` (provider sessions don't touch the host
   filesystem — tools operate on an in-memory scratch VFS).
 - **Profile:** pick `anthropic` / `openai` / `moonshot`.
-- **Permission mode:** leave *Default*. **Model:** leave empty (the profile's default fills in).
+- **Permission mode:** leave *Default* — with a provider profile picked, the form only offers the
+  three modes this engine runs (the CLI-only `acceptEdits` / `plan` / `auto` are gone, as is the
+  "Resume a previous session" section). **Model:** leave *Profile default*. Under `anthropic` the
+  picker also lists the models that profile declares in `provider.models`.
 - Leave the initial prompt empty (send from the panel instead), then **Create**.
 
 ## 5. Watch the bridge work
@@ -93,6 +96,11 @@ The `deepwiki__ask_question` call is a live remote MCP tool — authoritative, e
 server-side, never bridged to the tab.
 
 ## 6. Compare with the Claude engine
+
+On **Profiles** you can also create one yourself: this dev server wires a file-backed profile
+store at `.claude-worker/profiles.json` and marks every caller as able to manage profiles, so the
+New profile card is live. The three profiles above are declared in `provider-server.ts` and stay
+read-only — only the ones you create here can be edited or deleted.
 
 Create a second session under the `claude` profile with a real project directory — the full
 Agent SDK UI (permission prompts, model picker, slash commands) works as before. The two

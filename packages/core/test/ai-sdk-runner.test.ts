@@ -74,6 +74,9 @@ describe('AiSdkRunner', () => {
     })
     expect(runner.info().status).toBe('idle')
     expect(runner.info().model).toBe('mock-1')
+    // Session surfaces gate CLI-only affordances on this, so the runner reports
+    // its own engine rather than the profile being looked back up.
+    expect(runner.info().engine).toBe('provider')
   })
 
   it('executes local tools inside the loop and emits tool_use + synthetic tool_result', async () => {

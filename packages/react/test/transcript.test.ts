@@ -373,6 +373,7 @@ describe('transcript reducer', () => {
       id: 'srv-1',
       status: 'idle',
       cwd: '/tmp/p',
+      engine: 'provider',
       model: 'sonnet',
       permissionMode: 'acceptEdits',
       createdAt: 0,
@@ -386,6 +387,9 @@ describe('transcript reducer', () => {
       model: 'sonnet',
       permissionMode: 'acceptEdits',
       cwd: '/tmp/p',
+      // No event carries the engine — the snapshot is its only source, and
+      // surfaces gate CLI-only affordances on it.
+      engine: 'provider',
     })
 
     // after events have arrived, the event stream stays authoritative

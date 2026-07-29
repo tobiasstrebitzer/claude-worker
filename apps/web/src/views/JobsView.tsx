@@ -36,6 +36,7 @@ import { CalendarClock, Eye, ListChecks, Plus, RefreshCw, X } from 'lucide-react
 import { ModelPicker } from '@/components/ModelPicker.tsx'
 import { ProfileSelect } from '@/components/ProfileSelect.tsx'
 import { client } from '@/lib/client.ts'
+import { engineFormOptions } from '@/lib/engine.ts'
 import { getDefaultModel, getDefaultPermissionMode } from '@/lib/settings.ts'
 import { useJobs } from '@/lib/useJobs.ts'
 import { useProfileChoice } from '@/lib/useProfiles.ts'
@@ -99,7 +100,8 @@ function ScheduleJobCard({ onScheduled }: { onScheduled: () => void }) {
   const [mode, setMode] = useState<PermissionMode>(() => getDefaultPermissionMode('job'))
   const [questions, setQuestions] = useState<QuestionBehavior>('auto')
   const [model, setModel] = useState(() => getDefaultModel('job'))
-  const { profiles, profile, select: selectProfile } = useProfileChoice()
+  const { profiles, profile, selected, select: selectProfile } = useProfileChoice()
+  const engine = engineFormOptions(selected, mode, model)
   const [allowBypass, setAllowBypass] = useState(false)
   const [maxTokens, setMaxTokens] = useState('')
   const [attempts, setAttempts] = useState('')
@@ -129,13 +131,18 @@ function ScheduleJobCard({ onScheduled }: { onScheduled: () => void }) {
           cwd: cwd.trim(),
           profile: profile || undefined,
           prompt: prompt.trim(),
-          permissionMode: mode,
+          permissionMode: engine.mode,
           questionBehavior: questions,
-          model: model.trim() || undefined,
-          settingSources: ['user', 'project'],
-          // Opt-in per job: pre-authorize bypassPermissions so someone watching the
-          // run can switch it on mid-run. Off by default for unattended runs.
-          allowDangerouslySkipPermissions: allowBypass || undefined,
+          model: engine.model.trim() || undefined,
+          // CLI-only. Opt-in per job: pre-authorize bypassPermissions so someone
+          // watching the run can switch it on mid-run. Off by default for
+          // unattended runs.
+          ...(engine.isProvider
+            ? {}
+            : {
+                settingSources: ['user' as const, 'project' as const],
+                allowDangerouslySkipPermissions: allowBypass || undefined,
+              }),
         },
         maxTokens: tokens,
         attempts: attemptCount,
@@ -185,7 +192,13 @@ function ScheduleJobCard({ onScheduled }: { onScheduled: () => void }) {
           />
           <label className='flex min-w-0 flex-col gap-1'>
             <span className='text-label font-medium text-fg-3'>Permission mode</span>
-            <PermissionModeSelect variant='form' mode={mode} onModeChange={setMode} className='min-w-44' />
+            <PermissionModeSelect
+              variant='form'
+              mode={engine.mode}
+              onModeChange={setMode}
+              modes={engine.modes}
+              className='min-w-44'
+            />
           </label>
           <label className='flex min-w-0 flex-col gap-1'>
             <span className='text-label font-medium text-fg-3'>Questions</span>
@@ -207,7 +220,12 @@ function ScheduleJobCard({ onScheduled }: { onScheduled: () => void }) {
           </label>
           <label className='flex min-w-0 flex-col gap-1'>
             <span className='text-label font-medium text-fg-3'>Model</span>
-            <ModelPicker value={model} onChange={setModel} className='min-w-40' />
+            <ModelPicker
+              value={engine.model}
+              onChange={setModel}
+              models={engine.models}
+              className='min-w-40'
+            />
           </label>
           <label className='flex min-w-0 flex-col gap-1'>
             <span className='text-label font-medium text-fg-3'>Max tokens (optional)</span>
@@ -244,18 +262,21 @@ function ScheduleJobCard({ onScheduled }: { onScheduled: () => void }) {
             Schedule
           </Button>
         </div>
-        <label
-          className='flex w-fit cursor-pointer items-center gap-2 text-body-sm text-fg-2'
-          title='Spawns the CLI with --dangerously-skip-permissions available, so the mode can be switched on while watching the run. The job still starts in the mode selected above.'>
-          <input
-            type='checkbox'
-            checked={allowBypass}
-            onChange={(e) => setAllowBypass(e.target.checked)}
-            className='size-3.5 accent-(--color-fg-1)'
-          />
-          Allow switching to <code className='font-mono'>bypassPermissions</code> mid-run
-          <span className='text-label text-fg-4'>(dangerous)</span>
-        </label>
+        {/* The capability is a CLI spawn flag; a provider session has no equivalent. */}
+        {engine.isProvider ? null : (
+          <label
+            className='flex w-fit cursor-pointer items-center gap-2 text-body-sm text-fg-2'
+            title='Spawns the CLI with --dangerously-skip-permissions available, so the mode can be switched on while watching the run. The job still starts in the mode selected above.'>
+            <input
+              type='checkbox'
+              checked={allowBypass}
+              onChange={(e) => setAllowBypass(e.target.checked)}
+              className='size-3.5 accent-(--color-fg-1)'
+            />
+            Allow switching to <code className='font-mono'>bypassPermissions</code> mid-run
+            <span className='text-label text-fg-4'>(dangerous)</span>
+          </label>
+        )}
         <p className='text-label text-fg-4'>
           Unattended runs still surface permission prompts — watch the job&apos;s session to
           approve, or pick a mode that doesn&apos;t ask. Unanswered prompts deny after the

@@ -195,6 +195,95 @@ describe('createEngineSession', () => {
   }, 30_000)
 })
 
+/**
+ * What reaches the model is the only honest measure of a grant: a capability
+ * that is "withheld" but still in the tool set is not withheld at all.
+ */
+describe('createEngineSession grants', () => {
+  const assemble = async (options: Omit<Parameters<typeof createEngineSession>[0], 'resolveModel' | 'selectExecutor' | 'config'> & { config?: Partial<Parameters<typeof createEngineSession>[0]['config']> }) => {
+    let toolNames: string[] = []
+    let instructions: string | undefined
+    const model = new MockLanguageModelV3({
+      modelId: 'mock-1',
+      doStream: async (call) => {
+        toolNames = (call.tools ?? []).map((t) => t.name).sort()
+        instructions = call.prompt.find((m) => m.role === 'system')?.content
+        return say('ok')
+      },
+    })
+    const runner = createEngineSession({
+      ...options,
+      config: { cwd: '/tmp', ...options.config, languageModel: model },
+      resolveModel: () => model,
+      selectExecutor: () => new QuickJsExecutor({ engine }),
+    })
+    void runner.start()
+    runner.sendMessage('go')
+    await vi.waitFor(() => expect(toolNames.length).toBeGreaterThan(0), { timeout: 15_000 })
+    runner.close()
+    return { toolNames, instructions }
+  }
+
+  it('grants every wired backend when nothing declares otherwise', async () => {
+    const { toolNames } = await assemble({
+      capabilities: { webFetch: {}, search: async () => [], download: async () => ({ text: 'x' }) },
+    })
+    expect(toolNames).toContain('web_fetch')
+    expect(toolNames).toContain('web_search')
+    expect(toolNames).toContain('download')
+    expect(toolNames).toContain('deliver_file')
+  }, 30_000)
+
+  it("withholds backends the profile's grant list leaves out", async () => {
+    const { toolNames } = await assemble({
+      profile: { name: 'p', engine: 'provider', session: { capabilities: ['web_fetch'] } },
+      capabilities: { webFetch: {}, search: async () => [], download: async () => ({ text: 'x' }) },
+    })
+    expect(toolNames).toContain('web_fetch')
+    expect(toolNames).not.toContain('web_search')
+    expect(toolNames).not.toContain('download')
+    expect(toolNames).not.toContain('deliver_file')
+    // The scratch filesystem and the sandbox are the engine, not a grant.
+    expect(toolNames).toContain('eval_script')
+    expect(toolNames).toContain('fs_write')
+  }, 30_000)
+
+  it('lets a session request narrow below what the profile grants', async () => {
+    const { toolNames } = await assemble({
+      profile: {
+        name: 'p',
+        engine: 'provider',
+        session: { capabilities: ['web_fetch', 'deliver_file'] },
+      },
+      // Narrowing is the gateway's to police; core trusts the resolved request.
+      config: { capabilities: ['deliver_file'] },
+      capabilities: { webFetch: {} },
+    })
+    expect(toolNames).toContain('deliver_file')
+    expect(toolNames).not.toContain('web_fetch')
+  }, 30_000)
+
+  it('restricts MCP tools to the servers the profile names', async () => {
+    const mcpTool = () =>
+      tool({ inputSchema: z.object({}), execute: async () => ({ ok: true }) })
+    const { toolNames } = await assemble({
+      profile: { name: 'p', engine: 'provider', session: { mcpServers: ['wiki'] } },
+      mcpTools: { wiki__ask: mcpTool(), crm__push: mcpTool() },
+    })
+    expect(toolNames).toContain('wiki__ask')
+    // An authoritative tool this profile was never granted must not be reachable.
+    expect(toolNames).not.toContain('crm__push')
+  }, 30_000)
+
+  it("prefers the profile's instructions over the host's default", async () => {
+    const { instructions } = await assemble({
+      profile: { name: 'p', engine: 'provider', session: { instructions: 'You are terse.' } },
+      instructions: 'host default',
+    })
+    expect(instructions).toBe('You are terse.')
+  }, 30_000)
+})
+
 describe('connectMcpTools', () => {
   it('is a no-op with no servers, so MCP stays an optional dependency', async () => {
     const connection = await connectMcpTools({})

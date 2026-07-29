@@ -35,6 +35,10 @@ export interface PermissionModeSelectProps {
   /** The session's current mode (TranscriptState.permissionMode). */
   mode?: PermissionMode
   onModeChange: (mode: PermissionMode) => void
+  /** Restrict what is offered — most of {@link PERMISSION_MODES} is Claude Code
+   * vocabulary the provider engine has no meaning for. Defaults to all of them;
+   * pass `PROVIDER_PERMISSION_MODES` for a provider session. */
+  modes?: readonly PermissionMode[]
   /** 'toolbar' (default) is the composer's compact borderless trigger;
    * 'form' is a standard field-sized Select for create/settings forms. */
   variant?: 'toolbar' | 'form'
@@ -46,14 +50,16 @@ export interface PermissionModeSelectProps {
 export function PermissionModeSelect({
   mode,
   onModeChange,
+  modes,
   variant = 'toolbar',
   disabled,
   className,
 }: PermissionModeSelectProps) {
   const dangerous = mode === 'bypassPermissions'
+  const offered = modes ? PERMISSION_MODES.filter((m) => modes.includes(m.value)) : PERMISSION_MODES
   return (
     <Select
-      items={PERMISSION_MODES.map((m) => ({ value: m.value, label: m.label }))}
+      items={offered.map((m) => ({ value: m.value, label: m.label }))}
       value={mode ?? null}
       onValueChange={(value) => {
         if (typeof value === 'string' && value !== mode) onModeChange(value as PermissionMode)
@@ -72,7 +78,7 @@ export function PermissionModeSelect({
         </span>
       </SelectTrigger>
       <SelectContent className='min-w-56'>
-        {PERMISSION_MODES.map((m) => (
+        {offered.map((m) => (
           <SelectItem key={m.value} value={m.value}>
             <SelectItemText>
               <span className={cn('font-medium', m.dangerous && 'text-danger')}>{m.label}</span>

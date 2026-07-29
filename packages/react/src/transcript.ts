@@ -4,6 +4,7 @@ import type {
   ModelOption,
   PermissionMode,
   PermissionRequest,
+  ProfileEngine,
   RateLimitInfo,
   SessionEvent,
   SessionInfo,
@@ -74,6 +75,9 @@ export type TranscriptState = {
   model?: string
   cwd?: string
   sdkSessionId?: string
+  /** Engine running the session, from the attach snapshot. Gates CLI-only
+   * affordances; absent (an older server) reads as 'claude'. */
+  engine?: ProfileEngine
   /** Models the session can switch to (from the `capabilities` event). */
   models?: ModelOption[]
   /** Slash commands the CLI accepts (from the `capabilities` event). */
@@ -151,6 +155,9 @@ export function seedFromSessionInfo(state: TranscriptState, info: SessionInfo): 
     permissionMode: state.permissionMode ?? info.permissionMode,
     cwd: state.cwd ?? info.cwd,
     sdkSessionId: state.sdkSessionId ?? info.sdkSessionId,
+    // Never changes for a live session, and no event carries it — the snapshot is
+    // the only source, so take it whenever it is present.
+    engine: info.engine ?? state.engine,
   }
 }
 

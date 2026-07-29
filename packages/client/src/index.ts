@@ -2,16 +2,19 @@ import type {
   AttachedFrame,
   ClientFrame,
   CreateJobRequest,
+  CreateProfileRequest,
   CreateSessionRequest,
   JobEvent,
   JobInfo,
   GetProfileResponse,
+  ListProfilesResponse,
   ListSessionFilesResponse,
   PermissionMode,
   ProfileInfo,
   QueueServerFrame,
   QueueStats,
   ResolvePermissionRequest,
+  SaveProfileResponse,
   SdkSessionSummary,
   ServerFrame,
   SessionEvent,
@@ -19,6 +22,7 @@ import type {
   SessionInfo,
   ToolCallRequestFrame,
   ToolExecutionOutput,
+  UpdateProfileRequest,
 } from '@claude-worker/protocol'
 
 export type ClientOptions = {
@@ -387,15 +391,40 @@ export class ClaudeWorkerClient {
   /** List the profiles (named Claude Code config dirs) this server declares, filtered
    * to what the caller may use. Feed a result's `name` to createSession({ profile }).
    * Servers predating profiles 404 here — catch and treat as none declared. */
-  async listProfiles(): Promise<ProfileInfo[]> {
-    const body = await this.#call('GET', '/profiles')
-    return (body as { profiles: ProfileInfo[] }).profiles
+  /** The profiles this caller may use, plus whether it may create new ones.
+   * Each profile carries `managed: true` when it is store-backed and therefore
+   * editable; profiles declared in server options are not. */
+  async listProfiles(): Promise<ListProfilesResponse> {
+    return (await this.#call('GET', '/profiles')) as ListProfilesResponse
   }
 
   /** One profile plus a fresh, view-only snapshot of its config directory (settings,
    * skills, agents, commands — env var names only, never values). */
   async getProfile(name: string): Promise<GetProfileResponse> {
     return (await this.#call('GET', `/profiles/${encodeURIComponent(name)}`)) as GetProfileResponse
+  }
+
+  /**
+   * Create a managed profile. Requires a server with a profile store and a
+   * principal allowed to manage profiles; 409 if the name is already taken by a
+   * managed or a startup-declared profile.
+   */
+  async createProfile(profile: CreateProfileRequest): Promise<ProfileInfo> {
+    const body = await this.#call('POST', '/profiles', profile)
+    return (body as SaveProfileResponse).profile
+  }
+
+  /** Merge into a managed profile. The name is the route: profiles cannot be
+   * renamed, since sessions and jobs are already pinned to the old one. */
+  async updateProfile(name: string, patch: UpdateProfileRequest): Promise<ProfileInfo> {
+    const body = await this.#call('PATCH', `/profiles/${encodeURIComponent(name)}`, patch)
+    return (body as SaveProfileResponse).profile
+  }
+
+  /** Delete a managed profile. Startup-declared profiles are refused (403) —
+   * they live in the server's options. */
+  async deleteProfile(name: string): Promise<void> {
+    await this.#call('DELETE', `/profiles/${encodeURIComponent(name)}`)
   }
 
   /** List the Agent SDK's on-disk sessions (for resume across server restarts).

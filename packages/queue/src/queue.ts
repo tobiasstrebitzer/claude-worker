@@ -14,8 +14,10 @@ import { InMemoryQueueAdapter, type JobRecord, type QueueAdapter } from './adapt
 
 export type JobQueueOptions = {
   /** Turn a session config into a live runner — typically the server registry's create(),
-   * so job sessions are ordinary sessions clients can attach to and watch. */
-  createRunner: (config: SessionRunnerConfig) => Runner
+   * so job sessions are ordinary sessions clients can attach to and watch. May be
+   * async: engines whose assembly awaits (a provider session's MCP connect) resolve
+   * here, and a rejection fails the job like any other start error. */
+  createRunner: (config: SessionRunnerConfig) => Runner | Promise<Runner>
   /** Storage/claiming backend. Defaults to the in-memory adapter (single process). */
   adapter?: QueueAdapter
   /** Concurrent job sessions. Default 1. */
@@ -254,7 +256,7 @@ export class JobQueue {
     const build = this.#options.buildRunnerConfig ?? ((req: CreateSessionRequest) => req)
     let runner: Runner
     try {
-      runner = this.#options.createRunner(build(record.request.session))
+      runner = await this.#options.createRunner(build(record.request.session))
     } catch (error) {
       const failed = await this.#adapter.update(id, {
         status: 'failed',

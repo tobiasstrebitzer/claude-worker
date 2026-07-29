@@ -41,10 +41,22 @@ What's shipped, what's next, and what's still undecided. Status as of 2026-07-29
 ## Next
 
 1. **Dual-engine as the product shape.** The model-agnostic runner is the new direction — not a
-   side experiment. Make both engines (Claude Code via the Agent SDK, and the AI SDK runner)
-   cleanly co-equal options, aligned with the web UI: profile management (create/edit, not just
-   read), per-profile default model selection, engine-aware create forms and session surfaces
-   (hide CLI-only affordances for provider sessions and vice versa).
+   side experiment. Both engines (Claude Code via the Agent SDK, and the AI SDK runner) as
+   cleanly co-equal options, aligned with the web UI.
+   *Done (2026-07-29):* engine-aware create forms and session surfaces — `SessionInfo.engine`
+   reported by each runner, `supportsPermissionMode` as the single source of truth for the
+   restriction (forms filter, gateway 400s, startup refuses a bad profile default), operator-
+   declared `provider.models` driving the model picker, CLI-only affordances (resumable SDK
+   sessions, setting sources, bypass pre-authorization, the config-dir card) hidden for provider
+   profiles; `createEngineRunner` may now be async, which unblocks per-session MCP connects.
+   Also done: session grants on the profile (`session.capabilities` / `mcpServers` /
+   `instructions`), with `CreateSessionRequest.capabilities` narrowing but never widening (400
+   otherwise), MCP named-not-configured on the wire, and client-supplied MCP refused for provider
+   sessions.
+   Also done: profile management (`profileStore` seam with memory + JSON-file stores,
+   `canManageProfiles` on the principal, `allowedConfigDirRoots` bounding managed Claude
+   profiles, create/edit/delete in the dashboard). Startup-declared profiles stay immutable.
+   *Left:* nothing structural — the dual-engine work is feature-complete for M4.5.
 2. **Shared-backend `QueueAdapter`** (BullMQ or plain redis) — the reason the adapter contract
    exists. `claimNext` must stay atomic (BullMQ free; raw redis needs LMOVE/Lua) and honor
    `nextRunAt` (BullMQ delayed jobs); daily counters map to `INCRBY` on a dated key with TTL.

@@ -76,7 +76,19 @@ boundary: anything a client needs must be expressible as protocol events and com
   request's profile (required when several are declared, implicit with one, auto-detected from
   `~/.claude` when unset), applies its defaults, and pins `CLAUDE_CONFIG_DIR` after the
   `buildRunnerConfig` hook; the principal's `allowedProfiles` scopes creation and
-  `GET /profiles`. `BridgeHub` (always on, exposed as `server.bridge`) routes tool executions
+  `GET /profiles`. With the `profileStore` option (a small seam, memory and JSON-file
+  implementations bundled) the dashboard can also create, edit, and delete profiles — gated by
+  `canManageProfiles` on the principal, and never touching the ones declared in server options,
+  which are code. A profile also picks the **engine**: `engine: 'provider'` routes creation to
+  the `createEngineRunner` hook (which may be async, for assembly that has to await) instead of
+  the SDK runner, so this package imports no model SDK and never resolves provider credentials.
+  Because the two engines answer to different vocabularies, the gateway rejects a permission mode
+  the resolved profile's engine cannot run rather than letting the engine coerce it. A provider
+  profile also declares what its sessions get (`session.capabilities` / `mcpServers` /
+  `instructions`); a request may narrow that set but never widen it, and may not bring MCP
+  servers of its own — MCP tools are authoritative, so a client-named one would be an
+  authoritative tool pointed wherever the caller liked.
+  `BridgeHub` (always on, exposed as `server.bridge`) routes tool executions
   between a session and the tabs attached to it: it asks the first attached client and fails
   dispatch immediately when none is attached, which is what makes autonomous jobs simply never
   bridge.
@@ -99,7 +111,10 @@ boundary: anything a client needs must be expressible as protocol events and com
   Tailwind build compiles (`@source` scanning — wiring in the package README). The composer's
   input is a vendored copy of just-marketing/prompt-area (MIT) under `src/components/prompt-area`.
 - **`apps/web`** — the full session-control dashboard (TanStack Router, hash history): session
-  list, create/resume flow, live panel, jobs view, profiles view, settings.
+  list, create/resume flow, live panel, jobs view, profiles view, settings. The create forms and
+  the session panel are engine-aware: they offer only the permission modes and models the
+  selected profile's engine actually runs, and hide the CLI-only affordances (resumable SDK
+  sessions, setting sources, the bypass pre-authorization) for provider profiles.
 - (A minimal second consumer, `apps/demo`, proved `client` + `ui` portability for the V1
   acceptance scope; it was removed once that was established — see git history.)
 

@@ -123,6 +123,7 @@ export class SessionRunner implements Runner {
       status: this.#status,
       cwd: this.#config.cwd,
       profile: this.#config.profile,
+      engine: 'claude',
       model: this.#model ?? this.#config.model,
       permissionMode: this.#permissionMode,
       apiKeySource: this.#apiKeySource,

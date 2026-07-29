@@ -1,5 +1,6 @@
 import { useMemo, type ReactNode } from 'react'
 import type { ClaudeWorkerClient } from '@claude-worker/client'
+import { PROVIDER_PERMISSION_MODES } from '@claude-worker/protocol'
 import { useClaudeSession, useToolCallHost } from '@claude-worker/react'
 import { cn } from '../../lib/utils.ts'
 import { toast } from '../ui/Sonner.tsx'
@@ -114,6 +115,9 @@ export function SessionPanel({ client, sessionId, header, className }: SessionPa
               <PermissionModeSelect
                 mode={state.permissionMode}
                 onModeChange={setPermissionMode}
+                // A provider session rejects the CLI-only modes with a
+                // protocol_error — don't offer what can only fail.
+                modes={state.engine === 'provider' ? PROVIDER_PERMISSION_MODES : undefined}
                 disabled={ended}
               />
             ) : null}

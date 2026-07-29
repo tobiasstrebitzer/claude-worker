@@ -477,6 +477,29 @@ export type ProfileDefaults = {
 export type ProfileEngine = 'claude' | 'provider'
 
 /**
+ * Permission modes the model-agnostic provider engine understands. The rest of
+ * {@link PermissionMode}'s vocabulary is Claude Code's: `acceptEdits`, `plan` and
+ * `auto` name CLI-side behaviours a provider session has no equivalent of.
+ */
+export const PROVIDER_PERMISSION_MODES: readonly PermissionMode[] = [
+  'default',
+  'bypassPermissions',
+  'dontAsk',
+]
+
+/**
+ * Whether a profile's engine can run a permission mode. The single source of
+ * truth for the restriction: create forms filter what they offer with it, the
+ * gateway rejects with it. An absent `engine` means 'claude' (every mode).
+ */
+export function supportsPermissionMode(
+  engine: ProfileEngine | undefined,
+  mode: PermissionMode,
+): boolean {
+  return engine === 'provider' ? PROVIDER_PERMISSION_MODES.includes(mode) : true
+}
+
+/**
  * A model provider a `provider` profile can run on. Credentials are ALWAYS
  * resolved from the operator's environment — never carried on the wire, never
  * stored here. `apiKeyEnv` names the variable to read, it does not hold a key.
@@ -485,12 +508,45 @@ export type ProviderConfig = {
   /** Provider adapter to use, e.g. 'anthropic' | 'openai' | 'moonshotai' |
    * 'openai-compatible'. Kept as a string: the set is host-extensible. */
   id: string
-  /** Model id, e.g. 'kimi-k3'. Overridable per session. */
+  /** Default model id, e.g. 'kimi-k3'. Overridable per session. */
   model?: string
+  /** Model ids this profile offers, for the dashboard's picker. Operator-declared
+   * rather than discovered: provider engines have no equivalent of the CLI's
+   * `supportedModels()`, and only the operator knows which ids their endpoint and
+   * key actually serve. Unset → the picker offers {@link ProviderConfig.model} alone. */
+  models?: string[]
   /** Base URL for OpenAI-compatible providers. */
   baseUrl?: string
   /** Environment variable the operator put the key in. Never the key itself. */
   apiKeyEnv?: string
+}
+
+/**
+ * A grantable capability of the model-agnostic engine, named after the tool it
+ * yields. The always-present tools (`fs_*`, `eval_script`) are not listed: they
+ * are the engine's scratch filesystem and sandbox, not a grant.
+ */
+export type SessionCapability = 'web_search' | 'download' | 'web_fetch' | 'deliver_file'
+
+/**
+ * What sessions under a `provider` profile get, declared by the operator. Meaning-
+ * less for `claude` profiles, whose equivalents live in the config directory.
+ *
+ * MCP servers are named, never configured, here: a server's transport config can
+ * carry credentials in its headers, and this type is served by `GET /profiles`.
+ * The names refer to servers the host connected in `createEngineRunner`, which is
+ * where the configs (and the credentials) stay.
+ */
+export type ProfileSessionDefaults = {
+  /** Capabilities granted to sessions under this profile. Absent = no
+   * declaration, so a session gets whatever backends the host wired. A session
+   * request may narrow this set, never widen it. */
+  capabilities?: SessionCapability[]
+  /** MCP servers, by name, whose tools sessions under this profile may use.
+   * Absent = no declaration (every server the host connected). */
+  mcpServers?: string[]
+  /** Prepended to the session's system prompt. */
+  instructions?: string
 }
 
 export type ProfileInfo = {
@@ -506,6 +562,12 @@ export type ProfileInfo = {
   provider?: ProviderConfig
   description?: string
   defaults?: ProfileDefaults
+  /** Provider-engine session grants (capabilities, MCP servers, instructions). */
+  session?: ProfileSessionDefaults
+  /** Response-only, computed by the server: this profile came from the profile
+   * store and can be edited or deleted through the API. Profiles declared in
+   * server options are absent/false — they are code. Ignored on the way in. */
+  managed?: boolean
 }
 
 /**
@@ -580,6 +642,10 @@ export type CreateSessionRequest = {
   approvalTimeoutMs?: number
   /** AskUserQuestion handling (see {@link QuestionBehavior}). Default 'ask'. */
   questionBehavior?: QuestionBehavior
+  /** Provider engine only: run with fewer capabilities than the profile grants
+   * (see {@link ProfileSessionDefaults.capabilities}). Narrowing only — naming a
+   * capability the profile does not grant is a 400, not a silent upgrade. */
+  capabilities?: SessionCapability[]
   /** Free-form metadata echoed back on SessionInfo (host app bookkeeping). */
   meta?: Record<string, unknown>
 }
@@ -593,6 +659,10 @@ export type SessionInfo = {
   cwd: string
   /** Profile the session runs under (resolved name, present even when implicit). */
   profile?: string
+  /** Engine actually running this session, reported by the runner itself. Lets a
+   * session surface gate CLI-only affordances (permission modes, context usage,
+   * rate limits) without looking the profile back up. Absent = 'claude'. */
+  engine?: ProfileEngine
   model?: string
   permissionMode?: PermissionMode
   /** See the `system_init` event; 'oauth' = claude.ai subscription credentials. */
@@ -650,7 +720,27 @@ export type ResolvePermissionRequest =
 export type ResolvePermissionResponse = { resolved: true }
 export type ListSdkSessionsResponse = { sdkSessions: SdkSessionSummary[] }
 /** `GET {basePath}/profiles` — filtered to the profiles the caller may use. */
-export type ListProfilesResponse = { profiles: ProfileInfo[] }
+export type ListProfilesResponse = {
+  profiles: ProfileInfo[]
+  /** Whether this caller may create profiles here — true only when the server has
+   * a profile store AND the principal carries `canManageProfiles`. Lets a UI hide
+   * controls that would always be refused. */
+  canManage?: boolean
+}
+
+/**
+ * `POST {basePath}/profiles` — create a managed profile. Available only when the
+ * server was given a profile store, and only to a principal with
+ * `canManageProfiles`. Profiles declared in server options are code, not data:
+ * they cannot be created, edited, or deleted through these routes.
+ */
+export type CreateProfileRequest = ProfileInfo
+
+/** `PATCH {basePath}/profiles/:name` — merge into a managed profile. The name is
+ * the route, not the body; pass `null` to clear an optional field. */
+export type UpdateProfileRequest = Omit<Partial<ProfileInfo>, 'name'>
+
+export type SaveProfileResponse = { profile: ProfileInfo }
 /** `GET {basePath}/profiles/:name` — the profile plus a fresh config snapshot. */
 export type GetProfileResponse = { profile: ProfileInfo; config: ProfileConfigSnapshot }
 export type ErrorResponse = { error: string }

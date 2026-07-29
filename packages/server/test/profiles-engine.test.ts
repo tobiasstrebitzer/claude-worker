@@ -274,6 +274,256 @@ describe('provider profiles and engine selection', () => {
     expect(JSON.stringify(body.profile)).not.toContain('sk-')
     expect(body.config.skills).toEqual([])
   })
+
+  it('awaits an async engine factory before answering the create', async () => {
+    let assembled = false
+    running = createWorkerServer({
+      allowUnauthenticated: true,
+      allowedCwdRoots: ['/tmp'],
+      profiles: [providerProfile()],
+      // The shape a per-session MCP connect needs: assembly that resolves later.
+      createEngineRunner: async ({ config }) => {
+        await new Promise((resolve) => setTimeout(resolve, 5))
+        assembled = true
+        return fakeRunner('engine-async', config)
+      },
+    })
+    const { port } = await running.listen(0, '127.0.0.1')
+    const res = await fetch(`http://127.0.0.1:${port}/v1/sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ cwd: '/tmp/project', profile: 'kimi' }),
+    })
+    expect(res.status).toBe(201)
+    expect(assembled).toBe(true)
+    // Adopted into the registry, so it is attachable like any other session.
+    expect(((await res.json()) as { session: SessionInfo }).session.id).toBe('engine-async')
+    const listed = (await fetch(`http://127.0.0.1:${port}/v1/sessions`).then((r) => r.json())) as {
+      sessions: SessionInfo[]
+    }
+    expect(listed.sessions).toHaveLength(1)
+  })
+
+  it('fails the create when async engine assembly rejects', async () => {
+    running = createWorkerServer({
+      allowUnauthenticated: true,
+      allowedCwdRoots: ['/tmp'],
+      profiles: [providerProfile()],
+      createEngineRunner: () => Promise.reject(new Error('MCP server unreachable')),
+    })
+    const { port } = await running.listen(0, '127.0.0.1')
+    const res = await fetch(`http://127.0.0.1:${port}/v1/sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ cwd: '/tmp/project', profile: 'kimi' }),
+    })
+    expect(res.status).toBe(500)
+    expect(((await res.json()) as { error: string }).error).toBe('MCP server unreachable')
+    // Nothing half-registered: a failed assembly leaves no session behind.
+    const listed = (await fetch(`http://127.0.0.1:${port}/v1/sessions`).then((r) => r.json())) as {
+      sessions: SessionInfo[]
+    }
+    expect(listed.sessions).toEqual([])
+  })
+
+  it('rejects a CLI-only permission mode on a provider profile', async () => {
+    const createEngineRunner = vi.fn((ctx: EngineRunnerContext) =>
+      fakeRunner('engine-1', ctx.config),
+    )
+    running = createWorkerServer({
+      allowUnauthenticated: true,
+      allowedCwdRoots: ['/tmp'],
+      profiles: [providerProfile()],
+      createEngineRunner,
+    })
+    const { port } = await running.listen(0, '127.0.0.1')
+    const res = await fetch(`http://127.0.0.1:${port}/v1/sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ cwd: '/tmp/project', profile: 'kimi', permissionMode: 'plan' }),
+    })
+    expect(res.status).toBe(400)
+    expect(((await res.json()) as { error: string }).error).toMatch(
+      /'plan' is not supported by profile 'kimi'/,
+    )
+    // Refused at the gateway — the engine is never asked to make sense of it.
+    expect(createEngineRunner).not.toHaveBeenCalled()
+  })
+
+  it('accepts the modes the provider engine does run', async () => {
+    running = createWorkerServer({
+      allowUnauthenticated: true,
+      allowedCwdRoots: ['/tmp'],
+      profiles: [providerProfile()],
+      createEngineRunner: ({ config }) => fakeRunner('engine-1', config),
+    })
+    const { port } = await running.listen(0, '127.0.0.1')
+    for (const permissionMode of ['default', 'dontAsk', 'bypassPermissions']) {
+      const res = await fetch(`http://127.0.0.1:${port}/v1/sessions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ cwd: '/tmp/project', profile: 'kimi', permissionMode }),
+      })
+      expect(res.status, permissionMode).toBe(201)
+    }
+  })
+
+  it('leaves the full mode vocabulary alone for claude profiles', async () => {
+    running = createWorkerServer({
+      allowUnauthenticated: true,
+      allowedCwdRoots: ['/tmp'],
+      profiles: [claudeProfile()],
+      buildRunnerConfig: (req) => ({ ...req, queryFn: (() => idleQuery()) as never }),
+    })
+    const { port } = await running.listen(0, '127.0.0.1')
+    const res = await fetch(`http://127.0.0.1:${port}/v1/sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ cwd: '/tmp/project', profile: 'claude', permissionMode: 'plan' }),
+    })
+    expect(res.status).toBe(201)
+  })
+
+  it('rejects a job asking for a mode the profile’s engine cannot run', async () => {
+    running = createWorkerServer({
+      allowUnauthenticated: true,
+      allowedCwdRoots: ['/tmp'],
+      profiles: [providerProfile()],
+      createEngineRunner: ({ config }) => fakeRunner('engine-1', config),
+      queue: {},
+    })
+    const { port } = await running.listen(0, '127.0.0.1')
+    const res = await fetch(`http://127.0.0.1:${port}/v1/jobs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        session: {
+          cwd: '/tmp/project',
+          profile: 'kimi',
+          prompt: 'do the thing',
+          permissionMode: 'acceptEdits',
+        },
+      }),
+    })
+    expect(res.status).toBe(400)
+    expect(((await res.json()) as { error: string }).error).toMatch(/'acceptEdits' is not supported/)
+  })
+
+  it('refuses to start when a provider profile defaults to a mode its engine cannot run', () => {
+    expect(() =>
+      createWorkerServer({
+        allowUnauthenticated: true,
+        profiles: [{ ...providerProfile(), defaults: { permissionMode: 'acceptEdits' } }],
+        createEngineRunner: ({ config }) => fakeRunner('x', config),
+      }),
+    ).toThrow(/does not support/)
+  })
+
+  it('refuses a session asking for a capability its profile does not grant', async () => {
+    const createEngineRunner = vi.fn((ctx: EngineRunnerContext) =>
+      fakeRunner('engine-1', ctx.config),
+    )
+    running = createWorkerServer({
+      allowUnauthenticated: true,
+      allowedCwdRoots: ['/tmp'],
+      profiles: [{ ...providerProfile(), session: { capabilities: ['web_fetch'] } }],
+      createEngineRunner,
+    })
+    const { port } = await running.listen(0, '127.0.0.1')
+    const res = await fetch(`http://127.0.0.1:${port}/v1/sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        cwd: '/tmp/project',
+        profile: 'kimi',
+        capabilities: ['web_fetch', 'download'],
+      }),
+    })
+    expect(res.status).toBe(400)
+    expect(((await res.json()) as { error: string }).error).toMatch(/does not grant: download/)
+    expect(createEngineRunner).not.toHaveBeenCalled()
+  })
+
+  it('passes a narrowing capability request through to the engine factory', async () => {
+    const createEngineRunner = vi.fn((ctx: EngineRunnerContext) =>
+      fakeRunner('engine-1', ctx.config),
+    )
+    running = createWorkerServer({
+      allowUnauthenticated: true,
+      allowedCwdRoots: ['/tmp'],
+      profiles: [
+        { ...providerProfile(), session: { capabilities: ['web_fetch', 'deliver_file'] } },
+      ],
+      createEngineRunner,
+    })
+    const { port } = await running.listen(0, '127.0.0.1')
+    const res = await fetch(`http://127.0.0.1:${port}/v1/sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ cwd: '/tmp/project', profile: 'kimi', capabilities: ['web_fetch'] }),
+    })
+    expect(res.status).toBe(201)
+    expect(createEngineRunner.mock.calls[0]![0].config.capabilities).toEqual(['web_fetch'])
+  })
+
+  it('refuses client-supplied MCP servers on a provider profile', async () => {
+    running = createWorkerServer({
+      allowUnauthenticated: true,
+      allowedCwdRoots: ['/tmp'],
+      profiles: [providerProfile()],
+      createEngineRunner: ({ config }) => fakeRunner('engine-1', config),
+    })
+    const { port } = await running.listen(0, '127.0.0.1')
+    const res = await fetch(`http://127.0.0.1:${port}/v1/sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        cwd: '/tmp/project',
+        profile: 'kimi',
+        // MCP tools are authoritative — a client that could name one could point
+        // an authoritative tool at anything it liked.
+        mcpServers: { evil: { type: 'http', url: 'https://attacker.example/mcp' } },
+      }),
+    })
+    expect(res.status).toBe(400)
+    expect(((await res.json()) as { error: string }).error).toMatch(/declared on the profile/)
+  })
+
+  it('still lets claude sessions bring their own MCP servers', async () => {
+    running = createWorkerServer({
+      allowUnauthenticated: true,
+      allowedCwdRoots: ['/tmp'],
+      profiles: [claudeProfile()],
+      buildRunnerConfig: (req) => ({ ...req, queryFn: (() => idleQuery()) as never }),
+    })
+    const { port } = await running.listen(0, '127.0.0.1')
+    const res = await fetch(`http://127.0.0.1:${port}/v1/sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        cwd: '/tmp/project',
+        profile: 'claude',
+        mcpServers: { local: { command: 'my-server' } },
+      }),
+    })
+    expect(res.status).toBe(201)
+  })
+
+  it('reports the engine on SessionInfo so surfaces can gate CLI-only affordances', async () => {
+    running = createWorkerServer({
+      allowUnauthenticated: true,
+      allowedCwdRoots: ['/tmp'],
+      profiles: [claudeProfile()],
+      buildRunnerConfig: (req) => ({ ...req, queryFn: (() => idleQuery()) as never }),
+    })
+    const { port } = await running.listen(0, '127.0.0.1')
+    const res = await fetch(`http://127.0.0.1:${port}/v1/sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ cwd: '/tmp/project', profile: 'claude' }),
+    })
+    expect(((await res.json()) as { session: SessionInfo }).session.engine).toBe('claude')
+  })
 })
 
 function idleQuery() {

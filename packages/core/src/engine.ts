@@ -1,5 +1,5 @@
 import type { LanguageModel, ToolSet } from 'ai'
-import type { McpServerConfigWire, ProfileInfo } from '@claude-worker/protocol'
+import type { McpServerConfigWire, ProfileInfo, SessionCapability } from '@claude-worker/protocol'
 import { createVfs } from '@claude-worker/sandbox'
 import { AiSdkRunner, type AiSdkRunnerConfig } from './ai-sdk-runner.ts'
 import { createToolContext, withMcpTools, type ToolContextOptions } from './tools.ts'
@@ -44,26 +44,47 @@ export type EngineSessionOptions = {
     deliverFiles?: boolean
   }
   /** Authoritative tools that run server-side with server credentials (MCP).
-   * Never bridged to a client. */
+   * Never bridged to a client. Namespaced `<server>__<tool>` by
+   * {@link connectMcpTools}, which is how a profile grants servers by name. */
   mcpTools?: ToolSet
-  /** Extra instructions prepended to the session's system prompt. */
+  /** Extra instructions prepended to the session's system prompt. Overridden by
+   * the profile's `session.instructions` when it declares one. */
   instructions?: string
   executionLimits?: { timeoutMs?: number; memoryLimitBytes?: number }
 }
+
+/** Which capability a wired backend yields, for grant filtering. */
+const CAPABILITY_TOOLS = {
+  search: 'web_search',
+  download: 'download',
+  webFetch: 'web_fetch',
+  deliverFiles: 'deliver_file',
+} as const satisfies Record<string, SessionCapability>
 
 /**
  * Assemble a model-agnostic session: provider model, capability-scoped tools,
  * a scratch VFS, and the executor that runs the sandboxed ones.
  *
  * This is the piece an operator wires into the server's `createEngineRunner`.
+ *
+ * The host wires the *backends*; the profile and the session request decide which
+ * of them are actually granted (`profile.session`, `config.capabilities`). A
+ * backend that isn't granted is simply not built into the tool set, so withholding
+ * a capability costs the host no branching. No declaration anywhere = everything
+ * the host wired, which is what a host that ignores profiles gets.
  */
 export function createEngineSession(options: EngineSessionOptions): AiSdkRunner {
   const vfs = options.config.vfs ?? createVfs()
   const executor = options.selectExecutor()
+  // Narrowing only: the gateway has already refused a request naming a capability
+  // its profile doesn't grant, so the request value wins when present.
+  const granted = options.config.capabilities ?? options.profile?.session?.capabilities
+  const isGranted = (key: keyof typeof CAPABILITY_TOOLS): boolean =>
+    granted === undefined || granted.includes(CAPABILITY_TOOLS[key])
   // The runner doesn't exist yet while the tools are being built; these
   // capabilities reach back into it lazily (they only ever run mid-turn).
   let runner: AiSdkRunner | undefined
-  const webFetchCap = options.capabilities?.webFetch
+  const webFetchCap = isGranted('webFetch') ? options.capabilities?.webFetch : undefined
   const webFetch =
     typeof webFetchCap === 'function'
       ? webFetchCap
@@ -85,20 +106,22 @@ export function createEngineSession(options: EngineSessionOptions): AiSdkRunner 
     executor,
     sessionId: 'pending',
     vfs,
-    search: options.capabilities?.search,
-    download: options.capabilities?.download,
+    search: isGranted('search') ? options.capabilities?.search : undefined,
+    download: isGranted('download') ? options.capabilities?.download : undefined,
     webFetch,
     onFileDelivered:
-      options.capabilities?.deliverFiles === false
+      options.capabilities?.deliverFiles === false || !isGranted('deliverFiles')
         ? undefined
         : (file) => runner?.emitFileDelivered(file),
   })
-  const context = options.mcpTools ? withMcpTools(base, options.mcpTools) : base
+  const mcpTools = selectMcpTools(options.mcpTools, options.profile?.session?.mcpServers)
+  const context = mcpTools ? withMcpTools(base, mcpTools) : base
 
   runner = new AiSdkRunner({
     ...options.config,
     languageModel: options.resolveModel(options.profile, options.config),
-    instructions: options.instructions ?? options.config.instructions,
+    instructions:
+      options.profile?.session?.instructions ?? options.instructions ?? options.config.instructions,
     tools: context.tools,
     vfs,
     executor,
@@ -107,6 +130,23 @@ export function createEngineSession(options: EngineSessionOptions): AiSdkRunner 
     executionLimits: options.executionLimits,
   })
   return runner
+}
+
+/**
+ * Restrict a connected tool set to the MCP servers a profile grants, by the
+ * `<server>__<tool>` namespace {@link connectMcpTools} assigns. Undefined `servers`
+ * = no declaration, so every connected server passes through.
+ *
+ * This is how one process-wide MCP connection serves a mixed fleet: the host
+ * connects everything once, each profile grants a subset. The transport configs —
+ * and any credentials in their headers — never leave the host for a profile.
+ */
+function selectMcpTools(tools: ToolSet | undefined, servers: string[] | undefined): ToolSet | undefined {
+  if (!tools || servers === undefined) return tools
+  const allowed = new Set(servers)
+  return Object.fromEntries(
+    Object.entries(tools).filter(([name]) => allowed.has(name.split('__')[0]!)),
+  )
 }
 
 export type McpConnection = {

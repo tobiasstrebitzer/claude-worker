@@ -21,7 +21,8 @@ session from a host app. Key docs — read before changing scope or structure:
   granted-or-absent backends: `search`, `download`, `webFetch` (`createWebFetch` in
   `web-fetch.ts`: SSRF-guarded fetch → markdown → model digest), `onFileDelivered`
   (`deliver_file` → `file_delivered` event). `createEngineSession` + `connectMcpTools`
-  assemble a provider session.
+  assemble a provider session: the host wires the *backends*, the profile's `session` block and
+  the request's `capabilities` decide which are granted (ungranted = not built into the tool set).
 - `packages/sandbox` — untrusted-code boundary: QuickJS-NG WASM guest + in-memory map VFS
   (deliberately not a node-fs emulation — the tab-side host runs it unpolyfilled, and memfs
   dragged `node:buffer` into the browser) + by-value host bridge, interpreter-enforced
@@ -34,7 +35,10 @@ session from a host app. Key docs — read before changing scope or structure:
   `queue` option mounts `/jobs` + `/queue` routes and a `/queue/ws` JobEvents+stats stream.
   `profiles` option binds names to Claude Code config dirs (session env gets CLAUDE_CONFIG_DIR):
   required-unless-single on create, auto-default from ~/.claude when unset, `allowedProfiles`
-  on the auth principal scopes create + `GET /profiles`. A profile with `engine: 'provider'`
+  on the auth principal scopes create + `GET /profiles`. `profileStore` (seam in
+  `profile-store.ts`; memory + JSON-file impls bundled) mounts profile CRUD, gated by
+  `canManageProfiles` on the principal — startup-declared profiles stay immutable, stored ones
+  carry `managed: true` on the way out. A profile with `engine: 'provider'`
   instead runs the model-agnostic engine, built by the `createEngineRunner` hook (so this package
   imports no model SDK and never resolves provider credentials itself).
   `GET /sessions/:id/files[/<path>]` serves session deliverables straight from `Runner.vfs`
@@ -57,7 +61,10 @@ session from a host app. Key docs — read before changing scope or structure:
   `src/components/ui`, agent components in `src/components/agent`. Composer input is vendored
   prompt-area (`src/components/prompt-area`, MIT) — re-vendor + re-apply token-classname edits
   to update. Ships source styles (`theme.css` + `@source`-scanned classnames; wiring in its README).
-- `apps/web` — dashboard (TanStack Router, hash history).
+- `apps/web` — dashboard (TanStack Router, hash history). Create forms are engine-aware through
+  `src/lib/engine.ts` (`engineFormOptions`): it reconciles the sticky localStorage choices with
+  the selected profile, so a Claude alias or a CLI-only mode carried over to a provider profile
+  is coerced rather than submitted.
 - `examples` — runnable dev entries with root-level deps the packages must not take
   (`provider-server.ts` wires model SDKs into `createEngineRunner`; see `examples/README.md`
   for the manual browser walkthrough).
@@ -145,6 +152,30 @@ in tampering with the credential chain. Compliance/legal review is in progress �
   hook-set env); profile `defaults` fill unset request fields only. An `ANTHROPIC_API_KEY` in
   the server env still outranks every profile's config-dir credentials (SDK chain) — surface,
   don't fight it. The oauth notice is per-profile.
+- Profile management is doubly opt-in (a `profileStore` AND `canManageProfiles`) and the two
+  profile sets never mix: `profiles` from server options are code — immutable over HTTP, and they
+  win a name collision — while the store holds UI-created ones. `validateProfile` is shared by
+  startup and the routes so a POSTed profile can never be one startup would have refused, and
+  `managed` is recomputed on every response (never persisted, never trusted from a client). A
+  managed *Claude* profile needs `allowedConfigDirRoots`: naming a config dir is choosing a
+  credential store, so unset means the routes create provider profiles only. Profiles can't be
+  renamed — sessions and jobs are pinned to the name. A store does NOT suppress the auto-detected
+  `default` profile; opting out of that is still `profiles: []`.
+- Provider-session grants live on `ProfileInfo.session` (`capabilities`, `mcpServers`,
+  `instructions`) and narrow — never widen — via `CreateSessionRequest.capabilities`; the gateway
+  400s a widening request rather than silently downgrading it. MCP is **named, never configured**
+  there: a transport config's headers can carry credentials and `ProfileInfo` is served by
+  `GET /profiles`, so the names refer to servers the host connected in `createEngineRunner` and
+  `selectMcpTools` filters by the `<server>__<tool>` namespace. For the same reason a provider
+  session request carrying its own `mcpServers` is refused (MCP tools are authoritative — a
+  client that could name one could point an authoritative tool anywhere); Claude sessions still
+  bring their own, since the CLI spawns them under the operator's own config dir.
+- Provider engines have no `supportedModels()`: the model picker offers `provider.models` as the
+  operator declared it on the profile, falling back to `provider.model` alone. Don't ship a
+  static per-provider model table — it goes stale and lies outright for openai-compatible
+  endpoints. `SessionInfo.engine` is reported by each runner itself (not looked up from the
+  profile) so any session surface can gate CLI-only affordances; no event carries it, the attach
+  snapshot is the only source.
 - CLI telemetry quirks (smoke-verified, SDK 0.3.217): `supportedModels()` leads with a
   `value: 'default'` sentinel (→ `set_model` undefined); `getContextUsage().categories[].color`
   holds CLI theme token names, not CSS; rate_limit events can omit `utilization` — render
@@ -172,6 +203,10 @@ in tampering with the credential chain. Compliance/legal review is in progress �
   assistant is skipped (double-scheduled turns must not double-generate).
 - `PermissionMode`'s vocabulary is Claude Code's; `AiSdkRunner` supports only
   `default`/`bypassPermissions`/`dontAsk` and throws otherwise (surfacing as `protocol_error`).
+  `supportsPermissionMode(engine, mode)` in protocol is the ONE source of truth for that
+  restriction — create forms filter what they offer with it, the gateway 400s a session/job
+  create with it, startup refuses a provider profile whose `defaults.permissionMode` fails it.
+  Don't re-encode the list anywhere (the example used to coerce; it no longer does).
 - Sandbox guest limits are interpreter-enforced, but the interrupt deadline **cannot preempt time
   inside a host function** — give every granted capability its own timeout (see
   `QuickJsExecutor#fetchText`). Host↔guest values cross **by value only**; never hand the guest a
@@ -196,10 +231,11 @@ in tampering with the credential chain. Compliance/legal review is in progress �
 - `deliver_file` exists only when `onFileDelivered` is wired; `createEngineSession` grants it by
   default (`capabilities.deliverFiles: false` withholds it). Delivered files are downloadable
   only while the session lives — in-memory VFS; durability is the persistence tier (M5).
-- `createEngineRunner` is synchronous, so a per-session MCP connect can't be awaited there —
-  the example connects ONE process-wide MCP client at startup and shares its tools across
-  sessions (sessions must not close it). Per-session connections belong in an async assembly
-  path with `AiSdkRunnerConfig.onClose` as the disposer.
+- `createEngineRunner` may return a promise, so per-session assembly (an MCP connect, a
+  credential lookup) can be awaited there, disposed via `AiSdkRunnerConfig.onClose`; a rejection
+  fails the create (session POST 500s with the message, a job goes straight to `failed`). The
+  example and the SDK smoke still share ONE process-wide MCP client (sessions must not close it)
+  — right for one public endpoint, not a constraint any more.
 - Bridged tool calls: the server asks the **first attached** client and fails dispatch fast when
   none is attached (which is why autonomous jobs simply never bridge). Results are idempotent by
   `executionId` — a late answer racing a timeout is expected and must not error the client or

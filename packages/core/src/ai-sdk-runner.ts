@@ -159,6 +159,7 @@ export class AiSdkRunner implements Runner {
       status: this.#status,
       cwd: this.#config.cwd ?? process.cwd(),
       profile: this.#config.profile,
+      engine: 'provider',
       model: this.#modelId(),
       permissionMode: this.#permissionMode,
       createdAt: this.createdAt,
