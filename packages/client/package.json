@@ -27,10 +27,8 @@
     "@claude-worker/protocol": "workspace:*"
   },
   "devDependencies": {
-    "@claude-worker/react": "workspace:*",
-    "@claude-worker/sandbox": "workspace:*",
+    "@claude-worker/core": "workspace:*",
     "@claude-worker/server": "workspace:*",
-    "@jitl/quickjs-ng-wasmfile-release-asyncify": "^0.31.0",
     "@types/node": "^22.10.0",
     "@types/ws": "^8.18.1",
     "rimraf": "^6.1.3",

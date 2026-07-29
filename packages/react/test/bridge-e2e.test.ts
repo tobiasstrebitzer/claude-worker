@@ -2,10 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import WebSocket from 'ws'
 import variant from '@jitl/quickjs-ng-wasmfile-release-asyncify'
 import { createWorkerServer, type WorkerServer } from '@claude-worker/server'
-import { createToolCallHost } from '@claude-worker/react'
 import { createVfs, loadEngine, type SandboxEngine } from '@claude-worker/sandbox'
 import type { ToolExecutionResult } from '@claude-worker/core'
-import { ClaudeWorkerClient, type SessionHandle } from '../src/index.ts'
+import { ClaudeWorkerClient, type SessionHandle } from '@claude-worker/client'
+import { createToolCallHost } from '../src/tool-host.ts'
 
 /**
  * The whole M3 path with nothing faked but the model: a server dispatches a
