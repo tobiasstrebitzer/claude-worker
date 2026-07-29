@@ -48,21 +48,26 @@ export function ProfilesView() {
                       <span className='truncate text-body-sm text-fg-3'>{p.description}</span>
                     ) : null}
                   </div>
-                  <div className='mt-0.5 truncate font-mono text-label text-fg-4'>{p.configDir}</div>
+                  <div className='mt-0.5 truncate font-mono text-label text-fg-4'>
+                    {p.configDir ?? (p.provider ? `${p.provider.id}${p.provider.model ? ` · ${p.provider.model}` : ''}` : '')}
+                  </div>
                 </div>
                 <div className='flex shrink-0 items-center gap-1.5'>
                   {p.defaults?.model ? <Badge variant='neutral'>{p.defaults.model}</Badge> : null}
                   {p.defaults?.permissionMode ? (
                     <Badge variant='neutral'>{p.defaults.permissionMode}</Badge>
                   ) : null}
-                  <Button
-                    variant='ghost'
-                    size='icon-sm'
-                    aria-label={`Open ${p.name} in VSCode`}
-                    title='Open config dir in VSCode'
-                    onClick={() => openInVsCode(p.configDir)}>
-                    <Code className='size-4' />
-                  </Button>
+                  {/* Provider profiles have no config dir to open. */}
+                  {p.configDir ? (
+                    <Button
+                      variant='ghost'
+                      size='icon-sm'
+                      aria-label={`Open ${p.name} in VSCode`}
+                      title='Open config dir in VSCode'
+                      onClick={() => openInVsCode(p.configDir!)}>
+                      <Code className='size-4' />
+                    </Button>
+                  ) : null}
                   <Button
                     variant='ghost'
                     size='icon-sm'

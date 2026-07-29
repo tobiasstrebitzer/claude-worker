@@ -15,8 +15,11 @@ import type {
   SessionEventBody,
   SessionInfo,
   SessionStatus,
+  ToolExecutionBackend,
 } from '@claude-worker/protocol'
+import type { SandboxVfs } from '@claude-worker/sandbox'
 import type { PermissionDecision, Runner, SessionEventListener } from './runner-interface.ts'
+import type { ToolExecutionResult, ToolExecutor } from './tool-executor.ts'
 
 /** Permission modes this engine can honor. The rest of the protocol vocabulary
  * (acceptEdits/plan/auto) is Claude Code CLI semantics with no meaning here —
@@ -38,6 +41,22 @@ export type AiSdkRunnerConfig = Omit<CreateSessionRequest, 'cwd'> & {
   instructions?: string
   /** Max loop steps per turn. Default 20. */
   maxSteps?: number
+  /**
+   * Executes tool calls the loop cannot run inline (tools declared without
+   * `execute`). With one set, the runner drives the whole cycle itself:
+   * dispatch on park, apply the result, re-enter. Without one, parked calls
+   * stay on {@link pendingToolCalls} for the host to answer via
+   * {@link resolveToolCall}.
+   */
+  executor?: ToolExecutor
+  /** Names the executor handles. Others stay pending for the host. */
+  executableTools?: string[]
+  /** Scratch filesystem handed to sandboxed executions. */
+  vfs?: SandboxVfs
+  /** Per-execution limits passed to the executor. */
+  executionLimits?: { timeoutMs?: number; memoryLimitBytes?: number }
+  /** Which backend the executor represents, for `execution_dispatched` events. */
+  executionBackend?: ToolExecutionBackend
   /** Swap models mid-session (`set_model`). Unset = setModel() is rejected. */
   resolveModel?: (modelId: string | undefined) => LanguageModel
 }
@@ -84,6 +103,8 @@ export class AiSdkRunner implements Runner {
   #permissionMode: PermissionMode
   #messages: ModelMessage[] = []
   #pendingToolCalls = new Map<string, PendingToolCall>()
+  /** Calls already handed to the executor, so a re-park never double-dispatches. */
+  #dispatched = new Set<string>()
   #turnChain: Promise<void> = Promise.resolve()
   #abort: AbortController | undefined
   /** Accumulates across every leg of one turn. A turn that parks on external
@@ -247,6 +268,7 @@ export class AiSdkRunner implements Runner {
     this.#closed = true
     this.#abort?.abort()
     this.#pendingToolCalls.clear()
+    this.#dispatched.clear()
     this.#emit({ type: 'session_closed', reason })
     this.#setStatus('closed')
   }
@@ -261,6 +283,88 @@ export class AiSdkRunner implements Runner {
 
   #scheduleTurn(): void {
     this.#turnChain = this.#turnChain.then(() => this.#runTurn())
+  }
+
+  /**
+   * Deliver the result of an execution this runner dispatched. Used by the host
+   * when a backend settled out-of-band (a browser bridge answering later, a
+   * deferred executor). Idempotent by executionId.
+   */
+  settleExecution(executionId: string, result: ToolExecutionResult): boolean {
+    if (!this.#pendingToolCalls.has(executionId)) return false
+    this.#applyExecutionResult(executionId, result)
+    return true
+  }
+
+  /** Hand every parked call the executor owns to it. */
+  #dispatchPending(): void {
+    const executor = this.#config.executor
+    if (!executor) return
+    const executable = this.#config.executableTools
+    // Snapshot first: applying a result mutates the map we are iterating.
+    for (const call of Array.from(this.#pendingToolCalls.values())) {
+      if (executable && !executable.includes(call.toolName)) continue
+      if (this.#dispatched.has(call.toolCallId)) continue
+      this.#dispatched.add(call.toolCallId)
+      this.#emit({
+        type: 'execution_dispatched',
+        executionId: call.toolCallId,
+        toolName: call.toolName,
+        backend: this.#config.executionBackend ?? 'server',
+      })
+      void executor
+        .dispatch({
+          executionId: call.toolCallId,
+          sessionId: this.id,
+          tool: call.toolName,
+          input: call.input,
+          vfs: this.#config.vfs,
+          limits: this.#config.executionLimits,
+          signal: this.#abort?.signal,
+        })
+        .then((dispatch) => {
+          // 'pending' means the result arrives later via settleExecution().
+          if (dispatch.status === 'settled') {
+            this.#applyExecutionResult(call.toolCallId, dispatch.result)
+          }
+        })
+        .catch((error: unknown) => {
+          this.#applyExecutionResult(call.toolCallId, {
+            status: 'failed',
+            reason: 'dispatch_error',
+            error: error instanceof Error ? error.message : String(error),
+          })
+        })
+    }
+  }
+
+  /** Fold an execution's outcome back into the loop, whichever way it went. */
+  #applyExecutionResult(executionId: string, result: ToolExecutionResult): void {
+    if (this.#closed) return
+    this.#dispatched.delete(executionId)
+    if (result.status === 'ok') {
+      this.#emit({
+        type: 'execution_result',
+        executionId,
+        output: { type: 'json', value: result.output },
+        logs: result.logs,
+      })
+      this.resolveToolCall(executionId, { type: 'json', value: result.output })
+      return
+    }
+    this.#emit({
+      type: 'execution_failed',
+      executionId,
+      reason: result.reason,
+      error: result.error,
+      logs: result.logs,
+    })
+    // A failed execution is ordinary tool output: the agent gets to adapt.
+    this.resolveToolCall(
+      executionId,
+      { type: 'text', value: `${result.reason}: ${result.error}` },
+      { isError: true },
+    )
   }
 
   async #runTurn(): Promise<void> {
@@ -307,7 +411,12 @@ export class AiSdkRunner implements Runner {
           input: call.input,
         })
       }
-      if (this.#pendingToolCalls.size > 0) return // parked: no turn_result yet
+      if (this.#pendingToolCalls.size > 0) {
+        // Parked: no turn_result yet. With an executor wired in, drive the
+        // executions ourselves; otherwise the host answers via resolveToolCall.
+        this.#dispatchPending()
+        return
+      }
       this.#finishTurn(result.text)
     } catch (error) {
       if (this.#closed) return

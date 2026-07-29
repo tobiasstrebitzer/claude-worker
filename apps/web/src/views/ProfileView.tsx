@@ -72,8 +72,9 @@ export function ProfileView() {
               <p className='mt-0.5 text-body-sm text-muted-foreground'>{profile.description}</p>
             ) : null}
           </div>
-          {profile ? (
-            <Button variant='outline' size='xs' onClick={() => openInVsCode(profile.configDir)}>
+          {/* Provider profiles have no config dir to open. */}
+          {profile?.configDir ? (
+            <Button variant='outline' size='xs' onClick={() => openInVsCode(profile.configDir!)}>
               <Code className='size-3' />
               Open in VSCode
             </Button>
