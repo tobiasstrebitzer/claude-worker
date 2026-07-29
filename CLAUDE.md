@@ -19,8 +19,10 @@ session from a host app. Key docs — read before changing scope or structure:
   tab). `createToolContext` builds the capability-scoped tool set with the trust split
   (`sandboxed` = no `execute`, rides the seam; `authoritative` = server-side, never bridged);
   `createEngineSession` + `connectMcpTools` assemble a provider session.
-- `packages/sandbox` — untrusted-code boundary: QuickJS-NG WASM guest + memfs VFS + by-value host
-  bridge, interpreter-enforced memory/time limits. Leaf like `protocol` (no core/server/model-SDK
+- `packages/sandbox` — untrusted-code boundary: QuickJS-NG WASM guest + in-memory map VFS
+  (deliberately not a node-fs emulation — the tab-side host runs it unpolyfilled, and memfs
+  dragged `node:buffer` into the browser) + by-value host bridge, interpreter-enforced
+  memory/time limits. Leaf like `protocol` (no core/server/model-SDK
   imports); engine variant is injected so server and browser share one guest.
 - `packages/queue` — `JobQueue` + `QueueAdapter` (in-memory bundled; `claimNext` must stay
   atomic and skip future `nextRunAt`). Concurrency, token budgets, webhooks, retries, watchdog,
@@ -40,11 +42,20 @@ session from a host app. Key docs — read before changing scope or structure:
   framework-free, unit-tested; keep rendering logic out) + the browser tool host
   (`src/tool-host.ts` framework-free, `use-tool-host.ts` the thin hook) that executes
   server-bridged tool calls in the tab against a lazily-loaded QuickJS guest.
+  `useClaudeSession` exposes its `handle` so companions (the tool host) ride the SAME socket —
+  the bridge asks the first attached client, so a second handle would never see the requests;
+  `SessionPanel` hosts bridged calls by default on that handle. The bridge e2e test lives here
+  (`test/bridge-e2e.test.ts`, node-typed via `tsconfig.test.json` like client's) — react may
+  devDep on server for tests, but client must never devDep on react: that edge is the
+  build-graph cycle turbo refuses.
 - `packages/ui` — styled layer (Tailwind v4 + `@base-ui/react` + cva): primitives in
   `src/components/ui`, agent components in `src/components/agent`. Composer input is vendored
   prompt-area (`src/components/prompt-area`, MIT) — re-vendor + re-apply token-classname edits
   to update. Ships source styles (`theme.css` + `@source`-scanned classnames; wiring in its README).
 - `apps/web` — dashboard (TanStack Router, hash history).
+- `examples` — runnable dev entries with root-level deps the packages must not take
+  (`provider-server.ts` wires model SDKs into `createEngineRunner`; see `examples/README.md`
+  for the manual browser walkthrough).
 - `apps/docs` — Astro docs site, deployed to GitHub Pages by `.github/workflows/docs.yml`.
 - `docs/assets` — brand assets ("Session Stack" mark, app icons, banner source); rules and
   regeneration in `docs/assets/BRAND.md`. The mark is inlined in web's `BrandMark.tsx`,
@@ -68,6 +79,9 @@ also aliases). In-package imports use explicit `.ts` extensions.
 job routes + webhook receiver; queue: fake runner; react: reducer. Real-SDK smoke (spawns Claude
 Code, costs tokens): one-turn `SessionRunner` prompt — never in `pnpm test`. Permission-path or
 CLI-control-request changes need a smoke; the fake harness can't validate those payloads.
+Model-agnostic smokes live in `smoke/` (see its README): `smoke:sandbox` is free; `smoke:live`
+(in-process runner vs a real provider) and `smoke:sdk` (full server + client SDK + browser-host
+stack) cost tokens.
 
 ## Wrapup Config
 
@@ -159,5 +173,8 @@ in tampering with the credential chain. Compliance/legal review is in progress �
 - Bridged tool calls: the server asks the **first attached** client and fails dispatch fast when
   none is attached (which is why autonomous jobs simply never bridge). Results are idempotent by
   `executionId` — a late answer racing a timeout is expected and must not error the client or
-  re-open a settled call. The browser guest engine is loaded on first bridged call, never at
+  re-open a settled call. The server feeds every bridged result into the session runner's
+  optional `settleExecution` before the host's `bridge.onResult` observer — operators don't
+  wire that loop themselves. A runner whose id isn't known yet at assembly time reaches its
+  bridge executor via a dispatch-time delegate on `call.sessionId` (see `smoke/sdk-client.ts`). The browser guest engine is loaded on first bridged call, never at
   import; keep it that way (it is ~2 MB) and keep the variant an optional peer dep.

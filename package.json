@@ -19,19 +19,25 @@
     "web": "pnpm --filter @claude-worker/web run dev",
     "server": "pnpm --filter @claude-worker/server run dev",
     "smoke:sandbox": "node --conditions=@claude-worker/source --import @swc-node/register/esm-register smoke/sandbox.ts",
-    "smoke:live": "node --conditions=@claude-worker/source --import @swc-node/register/esm-register smoke/ai-sdk-live.ts"
+    "smoke:live": "node --conditions=@claude-worker/source --import @swc-node/register/esm-register smoke/ai-sdk-live.ts",
+    "smoke:sdk": "node --conditions=@claude-worker/source --import @swc-node/register/esm-register smoke/sdk-client.ts",
+    "example:server": "node --env-file-if-exists=.env --conditions=@claude-worker/source --import @swc-node/register/esm-register examples/provider-server.ts"
   },
   "devDependencies": {
     "@ai-sdk/anthropic": "^4.0.22",
     "@ai-sdk/moonshotai": "^3.0.18",
     "@ai-sdk/openai": "^4.0.21",
+    "@claude-worker/client": "workspace:*",
     "@claude-worker/core": "workspace:*",
     "@claude-worker/protocol": "workspace:*",
+    "@claude-worker/react": "workspace:*",
     "@claude-worker/sandbox": "workspace:*",
+    "@claude-worker/server": "workspace:*",
     "@jitl/quickjs-ng-wasmfile-release-asyncify": "^0.31.0",
     "@swc-node/register": "^1.11.1",
     "@swc/core": "^1.15.41",
     "@types/node": "^22.20.1",
+    "@types/ws": "^8.18.1",
     "@typescript/native-preview": "7.0.0-dev.20260707.2",
     "ai": "^7.0.38",
     "oxlint": "^1.0.0",
@@ -39,6 +45,7 @@
     "tsdown": "^0.21.10",
     "turbo": "^2.9.9",
     "vitest": "^3.2.0",
+    "ws": "^8.21.1",
     "zod": "^4.4.3"
   }
 }

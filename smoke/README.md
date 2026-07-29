@@ -6,6 +6,7 @@ Things `pnpm test` deliberately cannot check. Run these by hand.
 | --- | --- | --- |
 | Sandbox boundary | `pnpm smoke:sandbox` | No |
 | Live model loop | `<KEY>=... pnpm smoke:live [provider] [model]` | **Yes — real tokens** |
+| Full SDK-client stack | `<KEY>=... pnpm smoke:sdk [provider] [model]` | **Yes — real tokens** |
 
 ## `smoke:sandbox` — the untrusted-code boundary
 
@@ -41,3 +42,27 @@ the turn never completes, or if the model answered without calling the tool at a
 mean the loop was never exercised).
 
 Run it against two providers to satisfy the PRD's SM-1 (same workflow, config swap only).
+
+## `smoke:sdk` — the whole stack, the way a consumer runs it
+
+`smoke:live` drives the runner in-process; `bridge-e2e.test.ts` drives the real server and
+client with a stubbed model. This smoke is the combination neither covers:
+
+    real model → AiSdkRunner on createWorkerServer → HTTP/WS → ClaudeWorkerClient
+    → createToolCallHost executing in a real QuickJS guest
+
+The server has **no QuickJS executor at all** here — every `eval_script` call must travel the
+bridge to the client's sandbox (the run fails if none does), while the authoritative `fs_*`
+tools run server-side, proving the trust split live. Bridged results re-enter the loop through
+the server's own wiring (`BridgeHub.onResult` → `runner.settleExecution`).
+
+```bash
+MOONSHOT_API_KEY=...  pnpm smoke:sdk              # Kimi K3 (default)
+OPENAI_API_KEY=...    pnpm smoke:sdk openai
+ANTHROPIC_API_KEY=... pnpm smoke:sdk anthropic
+```
+
+Hard failures: turn doesn't complete or errors, no bridged client execution, an execution on a
+non-browser backend, wrong answer (348), or empty turn usage. The server-side
+`/out/report.json` written by `fs_write` is reported but only warned on — providers vary in
+following that instruction. Verified against `claude-sonnet-5` and `gpt-5`.
