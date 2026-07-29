@@ -110,7 +110,9 @@ describe('QuickJsExecutor', () => {
       }),
     )
     expect((result as { result: { output: string } }).result.output).toContain('caught:')
-  })
+    // Outer timeout > the 10s guest deadline above: if the host bound ever stops
+    // firing, this must fail on the assertion, not as an ambiguous vitest timeout.
+  }, 20_000)
 })
 
 describe('isHostAllowed', () => {

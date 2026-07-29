@@ -95,15 +95,20 @@ describe('runScript', () => {
     expect(Date.now() - started).toBeLessThan(5000)
   })
 
+  // Outer timeout > the guest deadline granted below, or vitest's 5s default
+  // decides the outcome instead of the interpreter's memory cap — which is the
+  // thing under test. That mismatch made this flake on CI roughly every other
+  // run while passing locally. Bigger chunks reach the cap in far fewer
+  // iterations; what is asserted is the shape of the result, not the speed.
   it('red team: runaway allocation hits the memory cap as a failed result, not a host crash', async () => {
     const result = await runScript(await engine(), {
-      script: 'const a = []; while (true) { a.push(new Uint8Array(64 * 1024)) }',
+      script: 'const a = []; while (true) { a.push(new Uint8Array(512 * 1024)) }',
       memoryLimitBytes: 8 * 1024 * 1024,
       timeoutMs: 10_000,
     })
     expect(result.ok).toBe(false)
     expect((result as { reason: string }).reason).toBe('oom')
-  })
+  }, 20_000)
 
   it('red team: network is deny-by-default — fetchText without a grant throws in-guest', async () => {
     const result = await runScript(await engine(), {
