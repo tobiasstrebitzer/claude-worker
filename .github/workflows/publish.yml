@@ -72,9 +72,11 @@ jobs:
               .filter((e) => e.isDirectory())
               .map((e) => JSON.parse(readFileSync(`packages/${e.name}/package.json`, "utf8")))
               .filter((p) => p.private !== true && p.version !== want)
-            if (bad.length === 0) return console.log(`all packages at ${want}`)
-            console.error(`tag says ${want}, but:\n` + bad.map((p) => `  - ${p.name} is ${p.version}`).join("\n"))
-            process.exit(1)
+            if (bad.length > 0) {
+              console.error(`tag says ${want}, but:\n` + bad.map((p) => `  - ${p.name} is ${p.version}`).join("\n"))
+              process.exit(1)
+            }
+            console.log(`all ${want} — tag and packages agree`)
           ' "${{ github.ref_name }}"
 
       # pnpm publish -r walks every public package in dependency order, rewrites
