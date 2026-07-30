@@ -20,3 +20,6 @@ _docs/
 # Dev-server state: the profile store (examples/provider-server.ts) and the default
 # parked-session directory (createFileSessionStore) — the latter holds transcripts.
 .claude-worker/
+
+# The CLI's on-disk test fixtures (config files, fake dashboard roots).
+packages/cli/test/.tmp-*/

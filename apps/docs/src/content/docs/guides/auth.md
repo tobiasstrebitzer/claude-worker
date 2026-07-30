@@ -55,6 +55,29 @@ may run under anyone's account is multi-account pooling — exactly the red line
 each person running under their own profile is just each person using their own account. The
 subscription notice logs per profile, and `apiKeySource` shows what each session actually used.
 
+## Gateway auth is a separate thing entirely
+
+Everything above is about *Anthropic* credentials. Guarding the gateway itself — deciding who may
+reach it at all — is your own concern, and the two never mix.
+
+For an embedded deployment that is the `authenticate` hook: it gets the raw request and returns a
+principal or nothing, and it guards REST **and** the WebSocket upgrade. For the turnkey
+[`claude-worker`](https://www.npmjs.com/package/claude-worker) instance it is `--auth-key`, one
+shared secret over two transports — a login page trades it for an `HttpOnly` cookie for browsers,
+while services send it as a header.
+
+That split isn't arbitrary. **A browser cannot set a header on a WebSocket handshake**; the
+constructor takes a URL and subprotocols and nothing else. So a browser-facing deployment has
+three options and only three: a cookie (sent automatically on a same-origin upgrade), a
+query-string ticket (`ClientOptions.buildWsUrl` exists for this, but something has to issue the
+ticket), or a proxy that stamps the credential server-side on the tab's behalf. Embedding a key in
+the served JavaScript is not one of them.
+
+If you take the cookie route, remember that WebSocket upgrades are **exempt from CORS** — an
+explicit `Origin` check, not `SameSite` alone, is what actually defends an attach against a
+cross-site page. And note that none of this establishes *identity*: a shared secret is a door key.
+Put an identity-aware proxy in front if you need to know who is on the other end.
+
 ## Compliance status: under review
 
 We are still working through greenlighting the compliance and legal posture of this project —

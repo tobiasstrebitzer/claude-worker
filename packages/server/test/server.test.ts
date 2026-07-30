@@ -140,6 +140,62 @@ describe('createWorkerServer', () => {
     expect(() => createWorkerServer()).toThrow(/authenticate/)
   })
 
+  describe('the fallback option', () => {
+    it('receives everything outside basePath and nothing inside it', async () => {
+      const seen: string[] = []
+      running = createWorkerServer({
+        allowUnauthenticated: true,
+        fallback: (req, res) => {
+          seen.push(req.url ?? '')
+          res.writeHead(200, { 'content-type': 'text/plain' })
+          res.end('from the host')
+        },
+      })
+      const { port } = await running.listen(0, '127.0.0.1')
+      const base = `http://127.0.0.1:${port}`
+
+      expect(await (await fetch(`${base}/`)).text()).toBe('from the host')
+      expect(await (await fetch(`${base}/assets/app.js`)).text()).toBe('from the host')
+      // `/v1` itself and everything under it stays the server's.
+      expect((await fetch(`${base}/v1/nope`)).status).toBe(404)
+      expect(await (await fetch(`${base}/v1/nope`)).json()).toEqual({ error: 'not found' })
+
+      expect(seen).toEqual(['/', '/assets/app.js'])
+    })
+
+    it('does not shadow a route that merely starts with the basePath string', async () => {
+      running = createWorkerServer({
+        allowUnauthenticated: true,
+        fallback: (_req, res) => {
+          res.writeHead(200, { 'content-type': 'text/plain' })
+          res.end('host')
+        },
+      })
+      const { port } = await running.listen(0, '127.0.0.1')
+      // '/v1x' is not under '/v1' — a naive startsWith(basePath) would steal it
+      // from the host, and a naive one the other way would hand it the API.
+      const res = await fetch(`http://127.0.0.1:${port}/v1x`)
+      expect(await res.text()).toBe('host')
+    })
+
+    it('still refuses an upgrade outside basePath', async () => {
+      running = createWorkerServer({
+        allowUnauthenticated: true,
+        fallback: (_req, res) => {
+          res.writeHead(200)
+          res.end()
+        },
+      })
+      const { port } = await running.listen(0, '127.0.0.1')
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/socket`)
+      await new Promise<void>((resolve, reject) => {
+        ws.on('error', () => resolve())
+        ws.on('close', () => resolve())
+        ws.on('open', () => reject(new Error('upgrade should not have been accepted')))
+      })
+    })
+  })
+
   it('runs the full session lifecycle over REST + WS', async () => {
     const harness = fakeHarness()
     const { base, wsBase } = await startServer(harness)

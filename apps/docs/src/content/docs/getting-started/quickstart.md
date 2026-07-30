@@ -12,7 +12,24 @@ order: 2
   Bedrock/Vertex, or your own `claude login`). See
   [Auth & Anthropic's terms](/claude-worker/docs/guides/auth/).
 
+## Just run an instance
+
+If you want claude-worker running rather than embedded, there is nothing to clone:
+
+```bash
+npx claude-worker
+```
+
+The gateway and the full dashboard come up together on `http://127.0.0.1:8787`, with parked
+sessions persisted under `~/.claude-worker`. Add `--auth-key <secret>` to protect it — browsers get
+a login page and a session cookie, services send the same secret as a header — and note that
+without a key it refuses to bind anything but loopback. See the
+[`claude-worker` package](https://www.npmjs.com/package/claude-worker) for the full flag and
+config-file surface.
+
 ## Run the workspace
+
+To develop against the source, or to embed the libraries:
 
 ```bash
 git clone https://github.com/tobiasstrebitzer/claude-worker

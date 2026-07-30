@@ -116,6 +116,18 @@ export type WorkerServerOptions = {
   buildRunnerConfig?: (req: CreateSessionRequest) => SessionRunnerConfig
   /** URL prefix for all routes. Default '/v1'. */
   basePath?: string
+  /**
+   * Handle requests that fall outside `basePath` instead of 404ing them. The
+   * turnkey CLI serves the dashboard through this, which is the whole reason it
+   * exists: a browser cannot put a header on a WebSocket handshake, so the only
+   * credential a tab can present on a session attach is a cookie — and a cookie
+   * only rides requests to the origin that set it. Serving the app and the API
+   * from one origin is therefore not a convenience, it is what makes an
+   * authenticated dashboard possible without a stamping proxy in front.
+   *
+   * Upgrades are not routed here: anything outside `basePath` is still refused.
+   */
+  fallback?: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>
   /** Max JSON body size in bytes. Default 1 MiB. */
   maxBodyBytes?: number
   /**
@@ -371,6 +383,7 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
     )
   }
   const basePath = options.basePath ?? '/v1'
+  const fallback = options.fallback
   const maxBodyBytes = options.maxBodyBytes ?? 1024 * 1024
   const hostBuildRunnerConfig =
     options.buildRunnerConfig ?? ((req: CreateSessionRequest): SessionRunnerConfig => req)
@@ -998,6 +1011,13 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
 
   const handleRequest = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const pathname = new URL(req.url ?? '/', 'http://internal').pathname
+    // Everything outside basePath belongs to the host, if it wants it. Checked
+    // first so the fallback owns a total, contiguous namespace rather than
+    // whatever the route table happens to leave over.
+    if (fallback && pathname !== basePath && !pathname.startsWith(basePath + '/')) {
+      await fallback(req, res)
+      return
+    }
     if (
       pathname === basePath + '/jobs' ||
       pathname.startsWith(basePath + '/jobs/') ||

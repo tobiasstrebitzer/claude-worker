@@ -47,7 +47,7 @@ Seven packages, two apps, one dependency rule:
 | `@claude-worker/react` | Headless React layer: `useClaudeSession` + a pure transcript reducer. |
 | `@claude-worker/ui` | Styled agent-control components: `SessionPanel`, transcript, permission prompts, composer. |
 
-Plus `apps/web` (a full session-control dashboard). The browser side never imports the server
+Plus `packages/web` (a full session-control dashboard). The browser side never imports the server
 side; the protocol is the only bridge. See
 [Packages](/claude-worker/docs/reference/packages/) for the full map.
 

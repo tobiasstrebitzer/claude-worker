@@ -16,12 +16,21 @@ order: 1
 | [`@claude-worker/client`](https://www.npmjs.com/package/@claude-worker/client) | Typed protocol client for browsers and Node: REST + WebSocket attach with auto-reconnect and replay-from-last-seq. Zero runtime deps. |
 | [`@claude-worker/react`](https://www.npmjs.com/package/@claude-worker/react) | The headless React layer: `useClaudeSession` hook + pure transcript reducer. No styling opinion. |
 | [`@claude-worker/ui`](https://www.npmjs.com/package/@claude-worker/ui) | The styled agent-control component library: session panel (status bar, streaming transcript, tool-call cards, permission prompts, composer), session list, and the underlying primitives. Tailwind v4 + Base UI + cva; light/dark via tokens. |
+| [`@claude-worker/web`](https://www.npmjs.com/package/@claude-worker/web) | The dashboard as **prebuilt static files**, for serving from your own host: `dashboardDir` is a path to `index.html` + hashed assets. Zero runtime dependencies — React, the router and Tailwind are compiled in. Must be mounted at a domain root with the gateway same-origin under `/v1`. |
+
+## The instance
+
+Everything above is a library you embed. This one is a service you run.
+
+| Package | What it is |
+| --- | --- |
+| [`claude-worker`](https://www.npmjs.com/package/claude-worker) | The turnkey instance: `npx claude-worker` serves the gateway and the full dashboard on one port, with shared-secret auth (login cookie for browsers, header for services), durable parking, and `claude-worker guard`. Config that can't fit on a command line goes in a `claude-worker.config.mjs` default-exporting the `createWorkerServer` options. |
 
 ## The apps
 
 | App | What it is |
 | --- | --- |
-| `apps/web` | Full session-control web app (dashboard): session list, create/resume flow, live panel, jobs view, profiles, settings. TanStack Router, hash history. |
+| `apps/docs` | This documentation site (Astro), deployed to GitHub Pages on push to `master`. |
 
 ## The dependency rule
 

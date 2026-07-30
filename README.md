@@ -33,12 +33,38 @@ quickstart, embedding guide, permissions, job queue, and the full reference. Des
 [`docs/`](docs/): [architecture](docs/architecture.md), [gotchas](docs/gotchas.md) (the invariants
 that bite, for contributors), and [roadmap](docs/roadmap.md).
 
+## Run an instance
+
+If you just want claude-worker *running* rather than embedded, there is nothing to clone:
+
+```bash
+npx claude-worker
+```
+
+That serves the session gateway **and** the full dashboard on one port
+(`http://127.0.0.1:8787`), with parked sessions persisted under `~/.claude-worker`. Add
+`--auth-key <secret>` to protect it: browsers get a login page and a session cookie, services send
+the same secret as `x-claude-worker-key`. Without a key it refuses to bind anything but loopback.
+
+```bash
+npx claude-worker --port 8080 --auth-key "$SECRET" \
+  --cwd-root ~/projects --profile me=~/.claude
+```
+
+Anything that doesn't fit on a command line — `authenticate`, `buildRunnerConfig`,
+`createEngineRunner` are functions — goes in a `claude-worker.config.mjs` that default-exports the
+[`createWorkerServer` options](docs/architecture.md); see
+[`examples/claude-worker.config.mjs`](examples/claude-worker.config.mjs). `npx claude-worker guard`
+is the restart guard described under [Work that outlives the turn](#work-that-outlives-the-turn).
+
 ## Packages
 
-Each package has its own README with install and usage details.
+Two tiers: the `@claude-worker/*` packages are the libraries you embed, and `claude-worker` is the
+instance you run. Each package has its own README with install and usage details.
 
 | Package | What it is |
 | --- | --- |
+| [`claude-worker`](packages/cli) | The turnkey instance: gateway + dashboard on one port, shared-secret auth, durable parking, and the deploy guard. `npx claude-worker`. |
 | [`@claude-worker/protocol`](packages/protocol) | The wire protocol: session events, commands, REST shapes. Dependency-free, browser-safe. **This is the product boundary** — versioned from day one. |
 | [`@claude-worker/core`](packages/core) | The engines. `SessionRunner` wraps `query()`, owns the streaming input, promotes `canUseTool` calls into pending approvals, normalizes SDK messages into protocol events, keeps a seq-numbered event log for attach/replay. `AiSdkRunner` is the model-agnostic engine over the AI SDK's `ToolLoopAgent`, with tool execution behind a swappable `ToolExecutor` seam. Both implement one `Runner` interface. Pure library, no transport. |
 | [`@claude-worker/sandbox`](packages/sandbox) | The untrusted-code boundary: a QuickJS-NG WebAssembly guest with an in-memory scratch filesystem and a by-value host bridge. Deny-by-default — no filesystem, network, or timers unless granted — with interpreter-enforced memory and time limits. Leaf package; the same guest runs server-side and in a browser tab. |
@@ -47,7 +73,7 @@ Each package has its own README with install and usage details.
 | [`@claude-worker/client`](packages/client) | Typed protocol client for browsers and Node: REST + WebSocket attach with auto-reconnect and replay-from-last-seq. Zero runtime deps. |
 | [`@claude-worker/react`](packages/react) | The headless React layer: `useClaudeSession` hook + pure transcript reducer. No styling opinion. |
 | [`@claude-worker/ui`](packages/ui) | The styled agent-control component library: session panel (status bar, streaming transcript, tool-call cards, permission prompts, composer), session list, and the underlying primitives. Tailwind v4 + Base UI + cva; light/dark via tokens. See `packages/ui/README.md` for consumer wiring. |
-| `apps/web` | Full session-control web app (dashboard): session list, create/resume flow, live panel, settings. |
+| [`@claude-worker/web`](packages/web) | The dashboard as prebuilt static files (session list, create/resume flow, live panel, jobs, profiles, settings), for serving from your own host. Zero runtime deps — `dashboardDir` is just a path to `index.html` + hashed assets. |
 | `apps/docs` | This documentation site (Astro), deployed to GitHub Pages on push to `master`. |
 
 ## Quickstart
@@ -280,13 +306,18 @@ single-process, like the bundled queue adapter — two servers over one director
 rebuild the same sessions.
 
 Durability still doesn't make a restart free: a turn actually in flight dies with the process, as
-does a pending permission request, and a running job is left claimed. `pnpm deploy:guard` (i.e.
-`node scripts/deploy-guard.mjs`) asks a live worker whether anything would be lost and exits
-non-zero while the answer is yes, so a deploy script can gate the restart on it:
+does a pending permission request, and a running job is left claimed. `claude-worker guard` asks a
+live worker whether anything would be lost and exits non-zero while the answer is yes, so a deploy
+script can gate the restart on it:
 
 ```bash
-node scripts/deploy-guard.mjs --wait 300 --allow-parked && ./restart-worker
+npx claude-worker guard --wait 300 --allow-parked && ./restart-worker
 ```
+
+It needs no checkout and doesn't care what started the worker — point `--url` at any instance, and
+authenticate with `--token` (sent as `Authorization: Bearer`) or `--header name=value` for a host
+whose `authenticate` hook reads something else. In this repo, `pnpm deploy:guard` runs it from
+source.
 
 ## Permissions are the sharp edge
 

@@ -1,9 +1,16 @@
 name: Publish
 
-# Publishes all 8 @claude-worker packages to npm via **trusted publishing**: pnpm
+# Publishes all 10 packages (the @claude-worker/* libraries plus the unscoped
+# `claude-worker` CLI) to npm via **trusted publishing**: pnpm
 # trades this workflow's GitHub OIDC token for a short-lived publish credential,
 # so there is no NPM_TOKEN in this repo and provenance attestations are generated
 # automatically.
+#
+# NOTE: a package must already EXIST on npm before a trusted publisher can be
+# configured for it — the settings page is on the package. So the first release
+# of a new name is published by hand (`pnpm publish --access public` from its
+# directory), and only then does it join this workflow. As of writing that
+# applies to `claude-worker` and `@claude-worker/web`.
 #
 # One-time setup, per package, at npmjs.com → package → Settings → Trusted
 # publisher (all fields are exact and case-sensitive):

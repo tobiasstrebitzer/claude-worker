@@ -1,0 +1,307 @@
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { request } from 'node:http'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import WebSocket from 'ws'
+import type { Options, Query, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
+import type { ServerFrame } from '@claude-worker/protocol'
+import { parseArgs, resolveInstanceConfig, type ResolvedConfig } from '../src/config.ts'
+import { startInstance, type Instance } from '../src/instance.ts'
+
+/**
+ * The end-to-end check the whole single-port design exists for: a browser with
+ * nothing but a cookie must be able to load the dashboard, call the API, **and
+ * attach a live session over WebSocket**. A REST-only test passes right through
+ * the regression that matters, because the upgrade is the one request a tab
+ * cannot put a header on.
+ *
+ * No tokens are spent: `buildRunnerConfig` injects a fake `queryFn`, the same
+ * trick the server package's integration tests use.
+ */
+
+const SECRET = 'a-long-enough-test-secret'
+
+/** Minimal stand-in for the Agent SDK's `query()`. */
+function fakeQueryFn() {
+  const messages: SDKMessage[] = []
+  let waiter: ((r: IteratorResult<SDKMessage>) => void) | null = null
+  let done = false
+  const emit = (msg: SDKMessage): void => {
+    if (waiter) {
+      const resolve = waiter
+      waiter = null
+      resolve({ value: msg, done: false })
+    } else messages.push(msg)
+  }
+  const query = {
+    [Symbol.asyncIterator]() {
+      return this
+    },
+    next(): Promise<IteratorResult<SDKMessage>> {
+      const buffered = messages.shift()
+      if (buffered !== undefined) return Promise.resolve({ value: buffered, done: false })
+      if (done) return Promise.resolve({ value: undefined, done: true })
+      return new Promise((resolve) => {
+        waiter = resolve
+      })
+    },
+    interrupt: vi.fn(async () => {}),
+    setModel: vi.fn(async () => {}),
+    close: () => {
+      done = true
+    },
+  } as unknown as Query
+
+  const queryFn = (params: { prompt: string | AsyncIterable<SDKUserMessage>; options?: Options }) => {
+    void (async () => {
+      for await (const _ of params.prompt as AsyncIterable<SDKUserMessage>) {
+        // drain the streaming input so the runner isn't backpressured
+      }
+    })()
+    return query
+  }
+  return { queryFn, emit }
+}
+
+let instance: Instance | undefined
+const dirs: string[] = []
+
+afterEach(async () => {
+  await instance?.close()
+  instance = undefined
+  await Promise.all(dirs.splice(0).map((d) => rm(d, { recursive: true, force: true })))
+})
+
+/** A dashboard build stand-in — the real one is only present after a prepack. */
+async function fakeWebRoot(): Promise<string> {
+  const dir = await mkdtemp(join(import.meta.dirname, '.tmp-web-'))
+  dirs.push(dir)
+  await mkdir(join(dir, 'assets'))
+  await writeFile(join(dir, 'index.html'), '<!doctype html><title>dashboard</title>')
+  await writeFile(join(dir, 'assets', 'app-abc123.js'), 'export const x = 1\n')
+  return dir
+}
+
+async function start(argv: string[]): Promise<{ base: string; wsBase: string }> {
+  const webRoot = await fakeWebRoot()
+  const stateDir = await mkdtemp(join(import.meta.dirname, '.tmp-state-'))
+  dirs.push(stateDir)
+  const config: ResolvedConfig = {
+    ...resolveInstanceConfig(parseArgs(['--port', '0', ...argv]), { path: null, options: {} }, {}),
+    webRoot,
+    stateDir,
+  }
+  config.options.profiles = []
+  config.options.allowedCwdRoots = ['/tmp']
+  config.options.buildRunnerConfig = (req) => ({ ...req, queryFn: fakeQueryFn().queryFn })
+  instance = await startInstance(config, { quiet: true })
+  return {
+    base: `http://127.0.0.1:${instance.port}`,
+    wsBase: `ws://127.0.0.1:${instance.port}`,
+  }
+}
+
+/** A GET with a Host header of our choosing — see the rebinding test. */
+function rawGet(port: number, path: string, host: string): Promise<{ status: number }> {
+  return new Promise((resolve, reject) => {
+    const req = request(
+      { host: '127.0.0.1', port, path, method: 'GET', headers: { host } },
+      (res) => {
+        res.resume()
+        res.on('end', () => resolve({ status: res.statusCode ?? 0 }))
+      },
+    )
+    req.on('error', reject)
+    req.end()
+  })
+}
+
+/** Extract our session cookie from a Set-Cookie header. */
+const cookieFrom = (res: Response): string => {
+  const raw = res.headers.get('set-cookie')
+  expect(raw).toBeTruthy()
+  return raw!.split(';')[0]!
+}
+
+async function login(base: string): Promise<string> {
+  const res = await fetch(`${base}/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded', origin: base },
+    body: new URLSearchParams({ secret: SECRET }),
+    redirect: 'manual',
+  })
+  expect(res.status).toBe(303)
+  return cookieFrom(res)
+}
+
+describe('an unauthenticated instance', () => {
+  it('serves the dashboard and the API from one port', async () => {
+    const { base } = await start([])
+
+    const page = await fetch(`${base}/`)
+    expect(page.status).toBe(200)
+    expect(page.headers.get('content-type')).toMatch(/text\/html/)
+    expect(await page.text()).toContain('dashboard')
+    // index.html must revalidate or a deployed update never reaches a browser.
+    expect(page.headers.get('cache-control')).toMatch(/no-cache/)
+
+    const asset = await fetch(`${base}/assets/app-abc123.js`)
+    expect(asset.status).toBe(200)
+    expect(asset.headers.get('cache-control')).toContain('immutable')
+
+    const api = await fetch(`${base}/v1/sessions`)
+    expect(api.status).toBe(200)
+    expect(await api.json()).toEqual({ sessions: [] })
+  })
+
+  it('serves index.html for an app route, since hash history never reaches us', async () => {
+    const { base } = await start([])
+    const res = await fetch(`${base}/some/deep/route`)
+    expect(res.status).toBe(200)
+    expect(await res.text()).toContain('dashboard')
+  })
+
+  it('404s a missing asset instead of handing back the SPA shell', async () => {
+    const { base } = await start([])
+    expect((await fetch(`${base}/assets/nope-000.js`)).status).toBe(404)
+  })
+
+  it('refuses a rebound Host on both the API and the dashboard', async () => {
+    await start([])
+    const port = instance!.port
+    // Raw http, not fetch: `Host` is a forbidden header name in fetch, so undici
+    // drops it silently and the request would be indistinguishable from a normal
+    // one — the test would pass while testing nothing.
+    expect((await rawGet(port, '/', 'attacker.example')).status).toBe(403)
+    expect((await rawGet(port, '/v1/sessions', 'attacker.example')).status).toBe(401)
+    // …and the same requests with a loopback Host are fine.
+    expect((await rawGet(port, '/', `127.0.0.1:${port}`)).status).toBe(200)
+    expect((await rawGet(port, '/v1/sessions', `localhost:${port}`)).status).toBe(200)
+  })
+})
+
+describe('an instance with --auth-key', () => {
+  it('shows the login page instead of the dashboard, and refuses the API', async () => {
+    const { base } = await start(['--auth-key', SECRET])
+
+    const page = await fetch(`${base}/`)
+    expect(page.status).toBe(401)
+    const html = await page.text()
+    expect(html).toContain('Access key')
+    expect(html).toContain('action="/auth/login"')
+    expect(html).not.toContain('dashboard')
+
+    expect((await fetch(`${base}/v1/sessions`)).status).toBe(401)
+  })
+
+  it('accepts the secret as a header for services', async () => {
+    const { base } = await start(['--auth-key', SECRET])
+    const res = await fetch(`${base}/v1/sessions`, { headers: { 'x-claude-worker-key': SECRET } })
+    expect(res.status).toBe(200)
+  })
+
+  it('logs a browser in and then serves the dashboard', async () => {
+    const { base } = await start(['--auth-key', SECRET])
+    const cookie = await login(base)
+
+    const page = await fetch(`${base}/`, { headers: { cookie } })
+    expect(page.status).toBe(200)
+    expect(await page.text()).toContain('dashboard')
+
+    const api = await fetch(`${base}/v1/sessions`, { headers: { cookie } })
+    expect(api.status).toBe(200)
+  })
+
+  it('re-renders the login page with an error after a wrong secret', async () => {
+    const { base } = await start(['--auth-key', SECRET])
+    const res = await fetch(`${base}/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', origin: base },
+      body: new URLSearchParams({ secret: 'wrong-but-long-enough' }),
+      redirect: 'manual',
+    })
+    expect(res.status).toBe(303)
+    expect(res.headers.get('location')).toBe('/?auth=failed')
+    expect(await (await fetch(`${base}/?auth=failed`)).text()).toContain('Invalid access key')
+  })
+
+  it('invalidates the cookie on logout', async () => {
+    const { base } = await start(['--auth-key', SECRET])
+    const cookie = await login(base)
+    expect((await fetch(`${base}/v1/sessions`, { headers: { cookie } })).status).toBe(200)
+
+    await fetch(`${base}/auth/logout`, {
+      method: 'POST',
+      headers: { cookie, origin: base },
+      redirect: 'manual',
+    })
+    // The server-side entry is gone, so a stolen copy of the cookie is dead too.
+    expect((await fetch(`${base}/v1/sessions`, { headers: { cookie } })).status).toBe(401)
+  })
+})
+
+describe('attaching a live session', () => {
+  /** The regression a REST-only check cannot see. */
+  const attach = async (wsBase: string, sessionId: string, headers: Record<string, string>) => {
+    const ws = new WebSocket(`${wsBase}/v1/sessions/${sessionId}/ws?afterSeq=0`, { headers })
+    return await new Promise<{ ok: boolean; frame?: ServerFrame }>((resolve) => {
+      const fail = () => resolve({ ok: false })
+      ws.on('error', fail)
+      ws.on('unexpected-response', fail)
+      ws.on('message', (data) => {
+        ws.close()
+        resolve({ ok: true, frame: JSON.parse(String(data)) as ServerFrame })
+      })
+    })
+  }
+
+  const createSession = async (base: string, headers: Record<string, string>): Promise<string> => {
+    const res = await fetch(`${base}/v1/sessions`, {
+      method: 'POST',
+      // `origin` because a browser sets it on every non-GET fetch, same-origin
+      // included — which is exactly what the cookie transport requires.
+      headers: { 'content-type': 'application/json', origin: base, ...headers },
+      body: JSON.stringify({ cwd: '/tmp', prompt: 'hello' }),
+    })
+    expect(res.status).toBe(201)
+    return ((await res.json()) as { session: { id: string } }).session.id
+  }
+
+  it('attaches with nothing but the login cookie', async () => {
+    const { base, wsBase } = await start(['--auth-key', SECRET])
+    const cookie = await login(base)
+    const id = await createSession(base, { cookie })
+
+    // Origin is what a browser sends on the handshake; the cookie rides along
+    // by itself. No header carries the secret here — that is the whole point.
+    const result = await attach(wsBase, id, { cookie, origin: base })
+    expect(result.ok).toBe(true)
+    expect(result.frame?.type).toBe('attached')
+  })
+
+  it('refuses an upgrade carrying the cookie from a foreign origin', async () => {
+    const { base, wsBase } = await start(['--auth-key', SECRET])
+    const cookie = await login(base)
+    const id = await createSession(base, { cookie })
+
+    // WebSocket is exempt from CORS, so without this check a hostile page could
+    // read the whole session stream using the victim's ambient cookie.
+    const result = await attach(wsBase, id, { cookie, origin: 'http://evil.example' })
+    expect(result.ok).toBe(false)
+  })
+
+  it('refuses an upgrade with no credential at all', async () => {
+    const { base, wsBase } = await start(['--auth-key', SECRET])
+    const cookie = await login(base)
+    const id = await createSession(base, { cookie })
+    expect((await attach(wsBase, id, {})).ok).toBe(false)
+  })
+
+  it('attaches on an unauthenticated instance', async () => {
+    const { base, wsBase } = await start([])
+    const id = await createSession(base, {})
+    const result = await attach(wsBase, id, { origin: base })
+    expect(result.ok).toBe(true)
+    expect(result.frame?.type).toBe('attached')
+  })
+})

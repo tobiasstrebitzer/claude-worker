@@ -150,6 +150,18 @@ change is the wrong one. Grouped by where they bite. Architecture lives in
 
 - `createWorkerServer` refuses to start without `authenticate` unless `allowUnauthenticated: true`
   (loopback dev only). Keep it that way.
+- **A browser cannot authenticate a WebSocket attach with a header** — the `WebSocket` constructor
+  takes `(url, subprotocols)` and nothing else, and the one `authenticate` hook guards REST *and*
+  the upgrade. So a dashboard has exactly three options: a cookie (sent automatically on a
+  same-origin upgrade), a query-string ticket (`ClientOptions.buildWsUrl` exists for this, but
+  something has to issue the ticket), or a server-side proxy that stamps the credential on the
+  tab's behalf. Baking a key into the served JS is not one of them. `packages/cli` takes the cookie
+  route, which is the entire reason it serves the app and `/v1` from one origin via the `fallback`
+  option. Anything reached through `fallback` is outside `basePath` and gets no `authenticate`
+  call — that namespace is the host's to guard.
+- Cookie auth means ambient authority, so CSRF is live: WebSocket upgrades are **exempt from
+  CORS**, which makes an explicit `Origin` check — not `SameSite` alone — the actual defense on an
+  attach.
 - Profiles pin `CLAUDE_CONFIG_DIR` *after* the `buildRunnerConfig` hook (profile wins over
   hook-set env); profile `defaults` fill unset request fields only. An `ANTHROPIC_API_KEY` in the
   server env still outranks every profile's config-dir credentials (SDK chain) — surface, don't
@@ -182,6 +194,13 @@ change is the wrong one. Grouped by where they bite. Architecture lives in
   pack` rewrite the protocol to the concrete version, `npm publish` does not — npm can't resolve
   it, since this workspace is declared to pnpm alone (no `workspaces` field in the root
   package.json), so it would ship `workspace:*` verbatim and break every consumer.
+- **A brand-new package cannot have its first release published by `publish.yml`.** Trusted
+  publishing is configured *per package* on npmjs.com, and that settings page only exists once the
+  package does — so the first version of a new name has to go out by hand, authenticated normally
+  (`pnpm publish --access public` from `packages/<new>`, with 2FA), *then* the trusted publisher is
+  configured, and every later release goes through CI. Skip this and the tagged run fails at the
+  publish step having already passed the whole gate. The rest of the packages in the same run are
+  unaffected — `pnpm publish -r` skips versions already on the registry, so a re-run is safe.
 - npm trusted publishing needs npm ≥ 11.5.1 / Node ≥ 22.14, and pnpm's own OIDC support needs
   pnpm ≥ 11.1.0: `actions/setup-node` writes an unresolved `${NODE_AUTH_TOKEN}` into `.npmrc`,
   and 11.0.8 sent that placeholder as auth (404s). A trusted publisher is configured per package
@@ -189,3 +208,37 @@ change is the wrong one. Grouped by where they bite. Architecture lives in
   commit — so a tag that predates `publish.yml` publishes nothing.
 - streamdown (ui's markdown renderer) needs its whole `dist` dir `@source`-scanned; under pnpm it
   lives at `packages/ui/node_modules/streamdown`, not the workspace root.
+- **Everything publishable lives under `packages/`, and that is load-bearing.** Three release
+  invariants disagree about paths: `publish.yml`'s tag/version gate reads only
+  `readdirSync("packages")`, `version:set` filters `./packages/*` — but `pnpm publish -r` walks
+  *every* non-private workspace package, `apps/` included. A publishable package under `apps/`
+  would therefore ship while being invisible to both the version bump and the tag check: a stale
+  version, silently, on every release. This is why the dashboard is `packages/web` and not
+  `apps/web` — it is published, so all three have to agree about it.
+- The root package is `claude-worker-monorepo`, not `claude-worker`. The unscoped npm name belongs
+  to `packages/cli`, and two packages with one name in a pnpm workspace is a conflict. The root is
+  private, so its name is cosmetic — but don't "fix" it back.
+- `packages/web` is published as **static files with zero runtime dependencies** — everything it
+  builds with (React, the router, Tailwind, the workspace packages) is a devDependency, because it
+  all ends up compiled into `dist/`. Declaring any of them a dependency would make consumers
+  install a toolchain to obtain files. Its entry (`entry.mjs`) is hand-written and outside vite's
+  graph, so the published entry can never drift from the published `dist/`.
+- `packages/cli` gets the dashboard from a **runtime dependency** on `@claude-worker/web`, not a
+  vendored copy: `resolveWebRoot()` is that package's exported `dashboardDir`. Two consequences.
+  In a checkout it resolves to `packages/web/dist`, which only exists once the app has been built
+  — dev never builds, so `pnpm --filter @claude-worker/web run build` is a prerequisite for
+  running the CLI from source (`resolveWebRoot()` throws with that instruction). And in
+  `packages/cli/vitest.config.ts` the workspace-source alias needs an explicit entry for `web`
+  *before* the general rule: `web` is an app with no `src/index.ts` for the regex to find.
+- The dist is portable only because the SPA builds its client from `location.origin` and uses hash
+  history; `packages/web/vite.config.ts` sets no `base`, so assets resolve from an absolute
+  `/assets/...` and the dashboard **must be mounted at a domain root**. Subpath mounting would be
+  a build-time `base` decision, not a runtime flag.
+- `packages/web`'s build drops the legacy `.woff` files that `@fontsource` emits alongside
+  `.woff2` (`scripts/trim-fonts.mjs`, ~660 KB). The generated `@font-face` lists `woff2` first, so
+  any browser that can run the app never requests them. It happens in the *producing* package so
+  every consumer gets one payload.
+- The CLI loads `claude-worker.config.mjs` through a dynamic `import()` of a *runtime* path on
+  purpose: it is the operator's code, not part of our module graph. Keep the specifier
+  non-literal so no bundler tries to resolve it — and note vitest cannot load a config fixture from
+  outside the project root, which is why `packages/cli/test` writes them under the package.

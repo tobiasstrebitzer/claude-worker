@@ -1,0 +1,70 @@
+{
+  "name": "@claude-worker/web",
+  "version": "0.5.0",
+  "type": "module",
+  "description": "The claude-worker dashboard as prebuilt static files: session list, create/resume flow, live panel, jobs, profiles, settings. Ships dist/ plus the path to it — serve it from the same origin as the gateway. Zero runtime dependencies.",
+  "license": "MIT",
+  "main": "./entry.mjs",
+  "types": "./entry.d.mts",
+  "files": [
+    "dist",
+    "entry.mjs",
+    "entry.d.mts"
+  ],
+  "exports": {
+    ".": {
+      "types": "./entry.d.mts",
+      "default": "./entry.mjs"
+    },
+    "./dist/*": "./dist/*",
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "clean": "rimraf dist",
+    "dev": "vite",
+    "build": "vite build && node ./scripts/trim-fonts.mjs",
+    "prepack": "pnpm clean && pnpm build",
+    "preview": "vite preview",
+    "typecheck": "tsgo -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@claude-worker/client": "workspace:*",
+    "@claude-worker/protocol": "workspace:*",
+    "@claude-worker/react": "workspace:*",
+    "@claude-worker/ui": "workspace:*",
+    "@fontsource/inter": "^5.2.8",
+    "@fontsource/jetbrains-mono": "^5.2.8",
+    "@jitl/quickjs-singlefile-browser-release-asyncify": "^0.31.0",
+    "@tailwindcss/vite": "^4.3.1",
+    "@tanstack/react-router": "^1.170.16",
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react-swc": "^3.9.0",
+    "lucide-react": "^1.21.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "rimraf": "^6.1.3",
+    "tailwindcss": "^4.3.1",
+    "vite": "^6.3.0"
+  },
+  "author": "Tobias Strebitzer",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tobiasstrebitzer/claude-worker.git",
+    "directory": "packages/web"
+  },
+  "homepage": "https://tobiasstrebitzer.github.io/claude-worker/",
+  "bugs": "https://github.com/tobiasstrebitzer/claude-worker/issues",
+  "keywords": [
+    "claude",
+    "claude-code",
+    "anthropic",
+    "agent",
+    "dashboard",
+    "spa"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

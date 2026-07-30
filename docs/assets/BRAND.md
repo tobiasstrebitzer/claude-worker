@@ -49,8 +49,8 @@ deferred — derive them from these renders when an app ships.
 
 ## Where the mark is deployed
 
-- `apps/web/public/favicon.svg` and `apps/docs/public/favicon.svg` — copies of `icon.svg`
-- `apps/web/src/components/shell/BrandMark.tsx` — inline mark in the dashboard sidebar
+- `packages/web/public/favicon.svg` and `apps/docs/public/favicon.svg` — copies of `icon.svg`
+- `packages/web/src/components/shell/BrandMark.tsx` — inline mark in the dashboard sidebar
 - `apps/docs/src/components/Header.astro` — inline mark in the docs header
 
 Keep all of these byte-identical in geometry to `icon.svg` — the mark has no

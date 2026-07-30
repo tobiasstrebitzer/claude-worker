@@ -1,6 +1,6 @@
 # Architecture
 
-How claude-worker is put together: eight packages, three apps, one dependency rule. Scope
+How claude-worker is put together: ten packages, a docs site, one dependency rule. Scope
 guards behind this shape: no serverless hosting, no multi-tenant SaaS, no claude.ai auth. For
 what's deliberately not built yet, see the [roadmap](./roadmap.md).
 
@@ -15,8 +15,10 @@ what's deliberately not built yet, see the [roadmap](./roadmap.md).
        queue           react
          |               |
        server            ui
-                         |
-                        web
+         |               |
+        cli ──────────> web
+              (depends on it for the
+               prebuilt dashboard)
 ```
 
 `@claude-worker/protocol` depends on nothing and everything depends on it. The browser side
@@ -134,11 +136,22 @@ boundary: anything a client needs must be expressible as protocol events and com
   design tokens with light/dark on `<html data-theme>`. Ships source styles that the consumer's
   Tailwind build compiles (`@source` scanning — wiring in the package README). The composer's
   input is a vendored copy of just-marketing/prompt-area (MIT) under `src/components/prompt-area`.
-- **`apps/web`** — the full session-control dashboard (TanStack Router, hash history): session
-  list, create/resume flow, live panel, jobs view, profiles view, settings. The create forms and
+- **`packages/web`** — the full session-control dashboard (TanStack Router, hash history): session
+  list, create/resume flow, live panel, jobs view, profiles view, settings. Published as prebuilt
+  static files with zero runtime deps (`dashboardDir` is a path, not a component tree) — it is an
+  application, so everything it builds with is a devDependency. The create forms and
   the session panel are engine-aware: they offer only the permission modes and models the
   selected profile's engine actually runs, and hide the CLI-only affordances (resumable SDK
   sessions, setting sources, the bypass pre-authorization) for provider profiles.
+- **`packages/cli`** — published as the unscoped **`claude-worker`**: the turnkey instance, the
+  one package that is a service rather than a library. It runs `createWorkerServer` and serves the
+  dashboard — `@claude-worker/web`'s exported `dashboardDir`, a runtime dependency rather than a
+  vendored copy — from the *same* `node:http` server via the server's `fallback` option. Single-origin is not a convenience here: a browser cannot set a header on a
+  WebSocket handshake, so the only credential a tab can present on a session attach is a cookie,
+  and a cookie only rides requests to the origin that set it. That is why the dashboard and `/v1`
+  share a port, and why `--auth-key` can protect both with one shared secret — a login page trades
+  it for an `HttpOnly` cookie for browsers, while services keep sending it as a header. Also hosts
+  `claude-worker guard`, the restart guard.
 - (A minimal second consumer, `apps/demo`, proved `client` + `ui` portability for the V1
   acceptance scope; it was removed once that was established — see git history.)
 
@@ -197,9 +210,9 @@ With `createFileSessionStore()` the boundary survives the process too: `hydrate(
 `listen()`, re-indexes every stored record's executions, and re-arms their watchdogs — with a
 floor (`parking.expiredGraceMs`, default 60s) under any deadline that passed during the outage,
 since nothing could have been delivered while the process was down. What durability does *not*
-cover is a turn in flight at the moment of the restart; `scripts/deploy-guard.mjs` is the other
-half, refusing the restart while any session is mid-turn, awaiting an approval, or (unless
-`--allow-parked`) parked without a durable store behind it.
+cover is a turn in flight at the moment of the restart; `claude-worker guard` (`packages/cli`) is
+the other half, refusing the restart while any session is mid-turn, awaiting an approval, or
+(unless `--allow-parked`) parked without a durable store behind it.
 
 ## Tooling conventions
 

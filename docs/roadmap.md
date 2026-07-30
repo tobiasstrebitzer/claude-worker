@@ -11,13 +11,14 @@ What's shipped, what's next, and what's still undecided. Status as of 2026-07-30
 | 0.4.0 | **never published** | Tagged at `19c9d15`, but the manual release ran aground on the pin/restore dance. npm went 0.3.0 → 0.4.1; the tag stays where it is. |
 | 0.4.1 | published 2026-07-30 | Deferred execution (protocol v4). First release published from CI under trusted publishing. |
 | 0.4.2 | published 2026-07-30 | Protocol errors render inside `SessionPanel`; workflow actions on current majors. First release through the pnpm-owned workflow — `workspace:*` rewriting verified in the published tarballs. |
+| 0.5.0 | 2026-07-30 | **Two new packages.** `claude-worker` (unscoped) is the turnkey instance — `npx claude-worker` serves gateway + dashboard on one port with shared-secret cookie auth — and `@claude-worker/web` publishes the dashboard as prebuilt static files. Durable parks (`createFileSessionStore`) and the server's `fallback` option ship here too. `apps/web` → `packages/web`; `scripts/deploy-guard.mjs` → `claude-worker guard`. Protocol unchanged at v4. First release of the two new names is published by hand — trusted publishing can only be configured on a package that already exists. |
 
 ## Shipped
 
 - **V1 runner + protocol + server + client + panel** (2026-07-20) — the original acceptance
   scope: create/attach/interrupt a live session, approve/deny from the panel, resume after
   reload, prove embeddability with a second consumer.
-- **Styled UI layer + web dashboard** (2026-07-20) — `packages/ui`, `apps/web`, headless
+- **Styled UI layer + web dashboard** (2026-07-20) — `packages/ui`, `packages/web`, headless
   `@claude-worker/react`, resume backfill, SessionInfo rollups.
 - **Model switching, slash commands, prompt-area composer** (2026-07-21).
 - **Job queue + hardening** (2026-07-21) — budgets, retries, watchdog, retention, live
@@ -57,20 +58,32 @@ What's shipped, what's next, and what's still undecided. Status as of 2026-07-30
   their wall-clock budget (`job_parked` / `job_resumed`, `maxParkedDurationMs`). Parked sessions
   stay readable and downloadable from their snapshot; attaching wakes them. Protocol v4.
 
-- **Release pipeline** (2026-07-30) — a `v*` tag publishes all 8 packages from CI under npm
+- **Release pipeline** (2026-07-30) — a `v*` tag publishes all packages from CI under npm
   trusted publishing (OIDC, no NPM_TOKEN, automatic provenance). Inter-package deps went back to
   `workspace:*` now that `pnpm publish -r` does the packing, which retired the exact-pin scheme,
   both release scripts, and the `check:versions` guard. 0.4.1 is the first release through it.
 
-- **Durable parks** (2026-07-30, *on `master`, not yet on npm* — latest release is 0.4.2) —
+- **Durable parks** (2026-07-30, released in 0.5.0) —
   `createFileSessionStore()`: one JSON file per parked session,
   temp-file+rename writes, adopted by `hydrate()` inside `listen()` so a restart re-indexes the
   executions and re-arms their watchdogs (no sooner than `parking.expiredGraceMs`, since nothing
   could have been delivered while the process was down). `toDurableRecord` keeps credentials,
   injected functions, and SDK options out of the file — all four are Claude-engine fields, and
-  the Claude engine cannot park. The other half of a safe restart is `scripts/deploy-guard.mjs`
+  the Claude engine cannot park. The other half of a safe restart is `claude-worker guard`
   (`pnpm deploy:guard`), which exits non-zero while a session is mid-turn, awaiting an approval,
   or parked without durability behind it — a durable store still can't preserve an in-flight turn.
+
+- **Turnkey instance** (2026-07-30, released in 0.5.0) — `claude-worker` (unscoped) is a new package:
+  `npx claude-worker` runs the gateway *and* the dashboard on one port, with durable parking on by
+  default, a `claude-worker.config.mjs` for the options that are functions, and `claude-worker
+  guard` (which replaced `scripts/deploy-guard.mjs`). Single-origin is the load-bearing part: a tab
+  cannot put a header on a WebSocket handshake, so a same-origin cookie is the only credential it
+  can present on a session attach — hence `--auth-key`, one secret over two transports (login-page
+  cookie for browsers, header for services), with an explicit `Origin` check because upgrades are
+  exempt from CORS, and a Host allowlist against DNS rebinding on the unauthenticated loopback
+  default. Enabled by a new `fallback` option on the server for requests outside `basePath`.
+  `apps/web` moved to `packages/web` (all three release invariants only agree under `packages/`)
+  and is now published itself, as prebuilt static files with zero runtime deps.
 
 ## Next
 

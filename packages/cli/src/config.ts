@@ -1,0 +1,365 @@
+import { existsSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
+import type { ProfileInfo } from '@claude-worker/protocol'
+import type { WorkerServerOptions } from '@claude-worker/server'
+import type { CliAuthOptions } from './auth.ts'
+
+/**
+ * The config surface has to be JavaScript, not JSON: the two options a real
+ * deployment always needs — `authenticate` and `buildRunnerConfig` — are
+ * functions. So the file default-exports `WorkerServerOptions` (optionally as a
+ * function, sync or async, for config that has to await something), and flags
+ * and env cover the cases that fit on a command line.
+ *
+ * Precedence, narrowest wins: flags > env > config file > defaults. A config
+ * file that sets `authenticate` itself opts out of the built-in shared-secret
+ * auth entirely — see `resolveInstanceConfig`.
+ */
+
+const CONFIG_BASENAMES = [
+  'claude-worker.config.mjs',
+  'claude-worker.config.js',
+  'claude-worker.config.cjs',
+]
+
+/**
+ * What a `claude-worker.config.mjs` default-exports: the server options, plus
+ * the few instance-level settings that aren't the server's business. Keeping
+ * them in one object means a deployment is one file, not a file plus a
+ * memorised command line.
+ */
+export type ClaudeWorkerConfig = WorkerServerOptions & {
+  port?: number
+  host?: string
+  /** Built-in shared-secret auth. Ignored entirely if you supply `authenticate`. */
+  auth?: CliAuthOptions
+  /** Where parked sessions are persisted; null disables durable parking. */
+  stateDir?: string | null
+  /**
+   * Host header values accepted when running *without* auth. Defaults to the
+   * loopback names; see `resolveInstanceConfig` for why this exists at all.
+   */
+  allowedHosts?: string[]
+  /** Serve a dashboard build from here instead of the bundled one. */
+  webRoot?: string
+}
+
+export type CliFlags = {
+  config?: string
+  port?: number
+  host?: string
+  authKey?: string
+  profiles: ProfileInfo[]
+  cwdRoots: string[]
+  allowedOrigins: string[]
+  allowedHosts: string[]
+  trustProxy?: boolean
+  stateDir?: string
+  parking?: boolean
+  insecure?: boolean
+  open?: boolean
+  help?: boolean
+  version?: boolean
+}
+
+export class ConfigError extends Error {}
+
+function parsePort(raw: string, source: string): number {
+  const port = Number(raw)
+  if (!Number.isInteger(port) || port < 0 || port > 65535) {
+    throw new ConfigError(`${source}: not a valid port: ${raw}`)
+  }
+  return port
+}
+
+/**
+ * Hand-rolled rather than a dependency: the CLI's whole value is that `npx
+ * claude-worker` pulls down a small tree, and an arg parser is a hundred lines
+ * of it.
+ */
+export function parseArgs(argv: string[]): CliFlags {
+  const flags: CliFlags = { profiles: [], cwdRoots: [], allowedOrigins: [], allowedHosts: [] }
+  const next = (i: number, name: string): string => {
+    const value = argv[i + 1]
+    if (value === undefined || value.startsWith('-')) {
+      throw new ConfigError(`${name} requires a value`)
+    }
+    return value
+  }
+
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]!
+    switch (arg) {
+      case '-h':
+      case '--help':
+        flags.help = true
+        break
+      case '-v':
+      case '--version':
+        flags.version = true
+        break
+      case '-c':
+      case '--config':
+        flags.config = next(i, arg)
+        i++
+        break
+      case '-p':
+      case '--port':
+        flags.port = parsePort(next(i, arg), arg)
+        i++
+        break
+      case '--host':
+        flags.host = next(i, arg)
+        i++
+        break
+      case '--auth-key':
+        flags.authKey = next(i, arg)
+        i++
+        break
+      case '--profile': {
+        // name=dir — the config dir is a credential store, so naming one is a
+        // deliberate act and never inferred.
+        const raw = next(i, arg)
+        i++
+        const eq = raw.indexOf('=')
+        if (eq <= 0) throw new ConfigError(`--profile expects name=dir, got: ${raw}`)
+        const name = raw.slice(0, eq)
+        const dir = raw.slice(eq + 1)
+        if (!dir) throw new ConfigError(`--profile ${name}= is missing a directory`)
+        flags.profiles.push({ name, configDir: resolve(dir) })
+        break
+      }
+      case '--cwd-root':
+        flags.cwdRoots.push(resolve(next(i, arg)))
+        i++
+        break
+      case '--allowed-origin':
+        flags.allowedOrigins.push(next(i, arg))
+        i++
+        break
+      case '--allowed-host':
+        flags.allowedHosts.push(next(i, arg))
+        i++
+        break
+      case '--trust-proxy':
+        flags.trustProxy = true
+        break
+      case '--state-dir':
+        flags.stateDir = resolve(next(i, arg))
+        i++
+        break
+      case '--no-parking-store':
+        flags.parking = false
+        break
+      case '--insecure':
+        flags.insecure = true
+        break
+      case '--open':
+        flags.open = true
+        break
+      default:
+        throw new ConfigError(`unknown option: ${arg}`)
+    }
+  }
+  return flags
+}
+
+export type LoadedConfig = {
+  /** Absolute path of the file that was loaded, or null if there wasn't one. */
+  path: string | null
+  options: ClaudeWorkerConfig
+}
+
+/**
+ * Explicit `--config` must exist — a typo that silently starts a default
+ * instance is worse than a failure. An implicit one is looked up in cwd only:
+ * walking parent directories would make what a given command does depend on
+ * where it was run from.
+ */
+export async function loadConfigFile(explicit?: string, cwd = process.cwd()): Promise<LoadedConfig> {
+  let path: string | null = null
+  if (explicit) {
+    path = isAbsolute(explicit) ? explicit : resolve(cwd, explicit)
+    if (!existsSync(path)) throw new ConfigError(`no config file at ${path}`)
+  } else {
+    path = CONFIG_BASENAMES.map((name) => join(cwd, name)).find((p) => existsSync(p)) ?? null
+  }
+  if (!path) return { path: null, options: {} }
+
+  let mod: { default?: unknown }
+  try {
+    // The specifier is a runtime value on purpose: the config file is the
+    // operator's code, not part of our module graph, so no bundler should ever
+    // try to resolve or inline it.
+    mod = (await import(pathToFileURL(path).href)) as { default?: unknown }
+  } catch (error) {
+    throw new ConfigError(
+      `failed to load ${path}: ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+  const exported = mod.default
+  if (exported === undefined) {
+    throw new ConfigError(`${path} has no default export (expected WorkerServerOptions)`)
+  }
+  const options = typeof exported === 'function' ? await (exported as () => unknown)() : exported
+  if (typeof options !== 'object' || options === null) {
+    throw new ConfigError(`${path} default export is not an options object`)
+  }
+  return { path, options: options as ClaudeWorkerConfig }
+}
+
+const LOOPBACK = new Set(['127.0.0.1', '::1', 'localhost', '::ffff:127.0.0.1'])
+
+export function isLoopback(host: string): boolean {
+  return LOOPBACK.has(host)
+}
+
+export type ResolvedConfig = {
+  port: number
+  host: string
+  /** Shared secret, or undefined for an unauthenticated instance. */
+  authKey?: string
+  /** Everything else the built-in auth takes (proxy trust, extra origins). */
+  auth: CliAuthOptions
+  /** Where parked sessions and other instance state live; null disables durable parking. */
+  stateDir: string | null
+  configPath: string | null
+  /** True when the config file supplied its own `authenticate` — built-in auth stands down. */
+  hostAuthenticates: boolean
+  /**
+   * Host header values to accept, or null to accept any. Non-null only for an
+   * unauthenticated instance — see `resolveInstanceConfig`.
+   */
+  allowedHosts: Set<string> | null
+  /** Dashboard build to serve; resolved from the package when unset. */
+  webRoot?: string
+  open: boolean
+  options: WorkerServerOptions
+}
+
+/**
+ * Durable parking is on by default because this is a long-lived instance: a
+ * turnkey tool that silently drops parked work on every restart is the wrong
+ * default. The store writes whole transcripts in plaintext, so it goes beside
+ * the config file (or under the home directory) rather than anywhere temporary,
+ * and one directory serves exactly one instance — the store is single-process
+ * by design, which the single-port model already implies.
+ */
+export function defaultStateDir(configPath: string | null): string {
+  return configPath ? join(dirname(configPath), '.claude-worker') : join(homedir(), '.claude-worker')
+}
+
+/** Hostname out of a Host header, minus the port and any IPv6 brackets. */
+export function hostnameOf(hostHeader: string): string {
+  try {
+    return new URL(`http://${hostHeader}`).hostname.replace(/^\[|\]$/g, '').toLowerCase()
+  } catch {
+    return ''
+  }
+}
+
+/** 127.0.0.0/8, ::1, and the names that mean them. */
+export function isLoopbackHostname(hostname: string): boolean {
+  if (LOOPBACK.has(hostname)) return true
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname)
+}
+
+export function resolveInstanceConfig(
+  flags: CliFlags,
+  loaded: LoadedConfig,
+  env: NodeJS.ProcessEnv = process.env,
+  cwd = process.cwd(),
+): ResolvedConfig {
+  const envPort = env.CLAUDE_WORKER_PORT
+    ? parsePort(env.CLAUDE_WORKER_PORT, 'CLAUDE_WORKER_PORT')
+    : undefined
+  const port = flags.port ?? envPort ?? loaded.options.port ?? 8787
+  const host = flags.host ?? env.CLAUDE_WORKER_HOST ?? loaded.options.host ?? '127.0.0.1'
+  // `?? undefined` would keep an empty string, and an empty secret is not a
+  // secret: CLAUDE_WORKER_AUTH_KEY= in an env file means "unset", not "no auth
+  // but pretend otherwise".
+  const authKey =
+    flags.authKey || env.CLAUDE_WORKER_AUTH_KEY || loaded.options.auth?.secret || undefined
+  const hostAuthenticates = typeof loaded.options.authenticate === 'function'
+
+  // Refusing here rather than warning: an unauthenticated Claude Code gateway on
+  // a routable interface is a shell for anyone who can reach the port, and a
+  // warning in a log nobody reads is not a boundary.
+  if (!authKey && !hostAuthenticates && !loaded.options.allowUnauthenticated) {
+    if (!isLoopback(host) && !flags.insecure) {
+      throw new ConfigError(
+        `refusing to serve without auth on ${host}: anyone who can reach that ` +
+          `interface would get a Claude Code session.\n` +
+          `  set --auth-key <secret> (or CLAUDE_WORKER_AUTH_KEY), or pass --insecure if ` +
+          `something in front of it is doing the authenticating.`,
+      )
+    }
+  }
+
+  const stateDir =
+    flags.parking === false || loaded.options.stateDir === null
+      ? null
+      : (flags.stateDir ??
+        env.CLAUDE_WORKER_STATE_DIR ??
+        loaded.options.stateDir ??
+        defaultStateDir(loaded.path))
+
+  const envCwdRoots = env.CLAUDE_WORKER_CWD_ROOTS?.split(':')
+    .filter(Boolean)
+    .map((p) => resolve(cwd, p))
+  const cwdRoots = flags.cwdRoots.length ? flags.cwdRoots : envCwdRoots
+
+  const auth: CliAuthOptions = {
+    ...loaded.options.auth,
+    secret: authKey,
+    trustProxy: flags.trustProxy ?? loaded.options.auth?.trustProxy,
+    allowedOrigins: [...(loaded.options.auth?.allowedOrigins ?? []), ...flags.allowedOrigins],
+  }
+
+  /**
+   * DNS rebinding is the one attack an unauthenticated loopback instance is
+   * actually exposed to: a hostile page resolves its own name to 127.0.0.1 and
+   * then talks to us same-origin, with no cookie needed because nothing is
+   * checked. The defence is to require the Host header to name a loopback
+   * address — an attacker controls their DNS, not the name the victim's browser
+   * puts in Host. With auth on this is moot (their origin holds no cookie), and
+   * for a deliberately exposed instance the operator has said what they want, so
+   * only the unauthenticated case is fenced.
+   */
+  const authEnabled = Boolean(authKey) || hostAuthenticates
+  const allowedHosts = authEnabled
+    ? null
+    : new Set([...LOOPBACK, ...flags.allowedHosts, ...(loaded.options.allowedHosts ?? [])])
+
+  // Strip the instance-level keys: what's left is exactly WorkerServerOptions.
+  const {
+    port: _p,
+    host: _h,
+    auth: _a,
+    stateDir: _s,
+    allowedHosts: _ah,
+    webRoot: _w,
+    ...serverOptions
+  } = loaded.options
+  const options: WorkerServerOptions = { ...serverOptions }
+  if (cwdRoots?.length) options.allowedCwdRoots = cwdRoots
+  // Flags win, but they *replace* rather than merge: a half-declared profile set
+  // is a credential mix-up waiting to happen.
+  if (flags.profiles.length) options.profiles = flags.profiles
+
+  return {
+    port,
+    host,
+    authKey,
+    auth,
+    stateDir,
+    configPath: loaded.path,
+    hostAuthenticates,
+    allowedHosts,
+    webRoot: loaded.options.webRoot,
+    open: flags.open ?? false,
+    options,
+  }
+}

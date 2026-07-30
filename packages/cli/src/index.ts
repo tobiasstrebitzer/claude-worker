@@ -1,0 +1,28 @@
+/**
+ * Library surface of the turnkey instance, for hosts that want the same wiring
+ * (single-port gateway + dashboard + shared-secret auth) inside their own
+ * process rather than as a child. The `bin` is a thin shell over exactly this.
+ */
+export { startInstance, resolveWebRoot, createHostGuard } from './instance.ts'
+export type { Instance } from './instance.ts'
+export {
+  ConfigError,
+  defaultStateDir,
+  hostnameOf,
+  isLoopback,
+  isLoopbackHostname,
+  loadConfigFile,
+  parseArgs,
+  resolveInstanceConfig,
+} from './config.ts'
+export type {
+  ClaudeWorkerConfig,
+  CliFlags,
+  LoadedConfig,
+  ResolvedConfig,
+} from './config.ts'
+export { runGuard } from './guard.ts'
+export { createCliAuth } from './auth.ts'
+export type { CliAuth, CliAuthOptions, CliPrincipal } from './auth.ts'
+export { renderLoginPage } from './login-page.ts'
+export type { LoginPageOptions } from './login-page.ts'

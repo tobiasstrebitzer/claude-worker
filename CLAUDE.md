@@ -42,13 +42,26 @@ protocol. Read these before changing scope or structure:
 - `packages/ui` — styled layer (Tailwind v4 + `@base-ui/react` + cva): `src/components/ui`
   primitives, `src/components/agent` components, vendored prompt-area composer (MIT). Ships source
   styles (`theme.css` + `@source`-scanned classnames; wiring in its README).
-- `apps/web` — dashboard (TanStack Router, hash history); create forms are engine-aware via
-  `src/lib/engine.ts`, reconciling sticky localStorage choices against the chosen profile.
+- `packages/web` — dashboard (TanStack Router, hash history); create forms are engine-aware via
+  `src/lib/engine.ts`, reconciling sticky localStorage choices against the chosen profile. Published
+  as prebuilt static files with **zero runtime deps** — React/router/Tailwind are compiled into
+  `dist/`, so every one of them is a devDep; the entry (`entry.mjs`, hand-written, never bundled) is
+  a path to `dist/`, not a component. Two constraints are baked in at build time: no vite `base`, so
+  it must mount at a domain root, and `location.origin + '/v1'`, so the gateway must be same-origin.
+- `packages/cli` — published unscoped as **`claude-worker`**, the turnkey instance (`npx
+  claude-worker`): gateway + dashboard on ONE port via the server's `fallback` hook. Single-origin
+  is load-bearing, not cosmetic — a tab can't put a header on a WS handshake, so a cookie is the
+  only credential it can present on an attach, and cookies are per-origin. `--auth-key` is one
+  secret over two transports (login-page cookie for browsers, header for services); a config file
+  supplying its own `authenticate` turns the built-in off entirely rather than layering. The web
+  dashboard is a real runtime dep on `@claude-worker/web` — `resolveWebRoot()` is just its exported
+  `dashboardDir` — so there is one dashboard, versioned in lockstep, not a vendored copy. Also
+  hosts `claude-worker guard`.
 - `apps/docs` — Astro site → Pages via `docs.yml`. `examples` — dev entries with root-level deps
   the packages must not take. `docs/assets` — brand assets (rules in `BRAND.md`); the mark is
   inlined in `BrandMark.tsx`, `Header.astro` and both favicons — keep geometry identical.
 
-Dependency direction: `protocol ← core ← queue ← server`, `protocol ← client ← react ← ui ← web`,
+Dependency direction: `protocol ← core ← queue ← server ← cli`, `protocol ← client ← react ← ui ← web`,
 `sandbox` a leaf either side may use. The browser side (client/react/ui/apps) must never import
 core/server, the Agent SDK, or any model SDK; `client` must never devDep on `react` — that edge is
 the build-graph cycle turbo refuses.
@@ -77,8 +90,8 @@ one — the fake harness can't validate those payloads. Model-agnostic smokes li
 - check: `pnpm lint` + `pnpm typecheck`
 - test: `pnpm test`
 - push: yes — branch `master`, repo is public, and every push deploys the docs site.
-- version_bump: yes — `pnpm version:set <x.y.z> && pnpm install --lockfile-only` (the 8 packages
-  only; `workspace:*` needs no bumping, so the lockfile step is a no-op). 0.4.2 published.
+- version_bump: yes — `pnpm version:set <x.y.z> && pnpm install --lockfile-only` (the 10 packages
+  only; `workspace:*` needs no bumping, so the lockfile step is a no-op). 0.5.0 published.
 - publish: yes — npm `@claude-worker` org, always through pnpm. Push a `v<x.y.z>` tag:
   `.github/workflows/publish.yml` runs `pnpm publish -r` under npm trusted publishing (OIDC, no
   NPM_TOKEN, automatic provenance), re-running the full CI gate, refusing a tag that disagrees

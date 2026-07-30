@@ -63,15 +63,18 @@ before the server accepts a request. Three things to know:
   same sessions.
 
 Durability doesn't make a restart free. A turn actually in flight dies with the process, as does
-a pending permission request, and a running job is left claimed. `scripts/deploy-guard.mjs` in
-the repo asks a live worker whether anything would be lost and exits non-zero while the answer
-is yes:
+a pending permission request, and a running job is left claimed. `claude-worker guard` asks a live
+worker whether anything would be lost and exits non-zero while the answer is yes. It needs no
+checkout and doesn't care what started the worker:
 
 ```bash
 # 0 = safe to restart, 1 = still busy, 2 = could not tell (bad URL, auth, unexpected response)
-node scripts/deploy-guard.mjs --url https://worker.internal/v1 --token "$TOKEN" \
+npx claude-worker guard --url https://worker.internal/v1 --token "$TOKEN" \
   --wait 300 --allow-parked && systemctl restart claude-worker
 ```
+
+`--token` is sent as `Authorization: Bearer`; for a host whose `authenticate` hook reads something
+else, use `--header name=value` (repeatable).
 
 It blocks on any session that is `starting`, `running`, or `awaiting_approval`, on any running
 job, on parked sessions unless `--allow-parked` says a durable `SessionStore` is configured, and

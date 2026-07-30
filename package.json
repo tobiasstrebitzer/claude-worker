@@ -1,5 +1,5 @@
 {
-  "name": "claude-worker",
+  "name": "claude-worker-monorepo",
   "version": "0.1.1",
   "private": true,
   "license": "MIT",
@@ -19,7 +19,8 @@
     "test": "turbo run test",
     "lint": "oxlint",
     "clean": "turbo run clean",
-    "deploy:guard": "node scripts/deploy-guard.mjs",
+    "deploy:guard": "node --conditions=@claude-worker/source --import @swc-node/register/esm-register packages/cli/src/cli.ts guard",
+    "cli": "node --conditions=@claude-worker/source --import @swc-node/register/esm-register packages/cli/src/cli.ts",
     "web": "pnpm --filter @claude-worker/web run dev",
     "server": "pnpm --filter @claude-worker/server run dev",
     "smoke:sandbox": "node --conditions=@claude-worker/source --import @swc-node/register/esm-register smoke/sandbox.ts",
