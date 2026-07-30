@@ -6,11 +6,13 @@ name: Publish
 # so there is no NPM_TOKEN in this repo and provenance attestations are generated
 # automatically.
 #
-# NOTE: a package must already EXIST on npm before a trusted publisher can be
-# configured for it — the settings page is on the package. So the first release
-# of a new name is published by hand (`pnpm publish --access public` from its
-# directory), and only then does it join this workflow. As of writing that
-# applies to `claude-worker` and `@claude-worker/web`.
+# NOTE for any FUTURE new package: a package must already EXIST on npm before a
+# trusted publisher can be configured for it — the settings page lives on the
+# package. So the first release of a new name is published by hand (`pnpm publish
+# --access public` from its directory, which is also what rewrites `workspace:*`),
+# and only then does it join this workflow. `claude-worker` and
+# `@claude-worker/web` went out that way at 0.5.0 and are configured now; all ten
+# packages release through here from 0.5.1 on.
 #
 # One-time setup, per package, at npmjs.com → package → Settings → Trusted
 # publisher (all fields are exact and case-sensitive):

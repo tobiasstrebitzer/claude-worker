@@ -201,6 +201,17 @@ change is the wrong one. Grouped by where they bite. Architecture lives in
   configured, and every later release goes through CI. Skip this and the tagged run fails at the
   publish step having already passed the whole gate. The rest of the packages in the same run are
   unaffected — `pnpm publish -r` skips versions already on the registry, so a re-run is safe.
+  Observed at 0.5.0: the OIDC exchange 404s (`[WARN] Skipped OIDC:
+  ERR_PNPM_AUTH_TOKEN_EXCHANGE`) and the publish then 404s on `PUT` — because npm has no trusted
+  publisher to authorise *creating* the name. `pnpm publish -r` walks in dependency order and
+  stops at the first failure, so packages after it never publish; check the registry rather than
+  assuming the whole run failed.
+- **A publish is visible to the write path before the read path.** Straight after publishing a new
+  name, `npm view <pkg>` and `npm install` can 404 for minutes while the *packument* is indexed,
+  even though `GET /<pkg>/<version>` already returns 200 and `npm access get status` reports it
+  public. A re-publish attempt answering `E403 "cannot publish over the previously published
+  versions"` is proof the first one worked — do not mistake the 404 for a failed publish and
+  re-run. `npm cache clean --force` clears the negative cache locally.
 - npm trusted publishing needs npm ≥ 11.5.1 / Node ≥ 22.14, and pnpm's own OIDC support needs
   pnpm ≥ 11.1.0: `actions/setup-node` writes an unresolved `${NODE_AUTH_TOKEN}` into `.npmrc`,
   and 11.0.8 sent that placeholder as auth (404s). A trusted publisher is configured per package
