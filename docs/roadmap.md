@@ -2,6 +2,15 @@
 
 What's shipped, what's next, and what's still undecided. Status as of 2026-07-30.
 
+## Releases
+
+| Version | npm | Notes |
+| --- | --- | --- |
+| 0.1.0 – 0.2.1 | published | V1 runner/protocol/server/client/panel, then UI + queue. |
+| 0.3.0 | published | Model-agnostic engine, `@claude-worker/sandbox` (first release), profiles. |
+| 0.4.0 | **never published** | Tagged at `19c9d15`, but the manual release ran aground on the pin/restore dance. npm went 0.3.0 → 0.4.1; the tag stays where it is. |
+| 0.4.1 | published 2026-07-30 | Deferred execution (protocol v4). First release published from CI under trusted publishing. |
+
 ## Shipped
 
 - **V1 runner + protocol + server + client + panel** (2026-07-20) — the original acceptance

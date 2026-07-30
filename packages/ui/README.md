@@ -59,6 +59,12 @@ const client = new ClaudeWorkerClient({ baseUrl: `${location.origin}/v1` })
 
 Every component takes `className` and carries `data-slot` attributes for targeted overrides.
 
+`SessionPanel` is self-sufficient for errors: a `protocol_error` (the gateway or CLI refusing a
+command — a `set_permission_mode` a provider engine can't run, say) renders as a dismissible strip
+inside the panel. You do **not** need to mount anything else to see them. `Toaster` is exported
+for your own `toast()` calls; the panel never depends on it, because an error channel a host can
+lose by forgetting a second mount isn't one.
+
 ## Caveats
 
 - Token names are unprefixed (`--bg`, `--accent`, `--primary`, …) and `theme.css` styles

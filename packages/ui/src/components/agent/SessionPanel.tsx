@@ -1,9 +1,8 @@
-import { useMemo, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import type { ClaudeWorkerClient } from '@claude-worker/client'
 import { PROVIDER_PERMISSION_MODES } from '@claude-worker/protocol'
 import { useClaudeSession, useToolCallHost } from '@claude-worker/react'
 import { cn } from '../../lib/utils.ts'
-import { toast } from '../ui/Sonner.tsx'
 import { Composer } from './Composer.tsx'
 import { ModelSelect } from './ModelSelect.tsx'
 import { PermissionModeSelect } from './PermissionModeSelect.tsx'
@@ -26,12 +25,17 @@ export interface SessionPanelProps {
  * sessions.
  */
 export function SessionPanel({ client, sessionId, header, className }: SessionPanelProps) {
+  // Rejected commands (the CLI refusing a permission-mode switch, say) render INSIDE
+  // the panel rather than through `toast`. The panel does not mount a `Toaster`, and
+  // an embedder that doesn't either would drop the only signal that a command failed
+  // — the select would just "not stick". An error channel a host can lose by omission
+  // is not an error channel.
+  const [protocolError, setProtocolError] = useState<string | undefined>(undefined)
   const { state, connected, handle, send, approve, deny, interrupt, setModel, setPermissionMode } =
-    useClaudeSession(client, sessionId, {
-      // Surface rejected commands (e.g. the CLI refusing a permission-mode switch)
-      // instead of dropping them — otherwise the select just "doesn't stick".
-      onProtocolError: (message) => toast.error(message),
-    })
+    useClaudeSession(client, sessionId, { onProtocolError: setProtocolError })
+  // Callers are told to remount on a session switch, but a changed prop must not leave
+  // the previous session's failure on screen.
+  useEffect(() => setProtocolError(undefined), [sessionId])
   // Host server-bridged tool calls (provider-engine sessions) in this tab, on the
   // SAME handle the panel attached with — the bridge asks the first attached
   // client. Free for Claude sessions: the guest loads lazily on the first call,
@@ -67,6 +71,22 @@ export function SessionPanel({ client, sessionId, header, className }: SessionPa
       className={cn('flex h-full min-h-0 flex-col overflow-hidden bg-bg', className)}>
       {header}
       <StatusBar state={state} connected={connected} />
+      {protocolError ? (
+        <div className='px-3 pt-2'>
+          <div
+            role='alert'
+            className='mx-auto flex w-full max-w-3xl items-start gap-2 rounded-md border border-danger/40 bg-danger-bg px-3 py-2 text-body-sm text-danger'>
+            <span className='min-w-0 flex-1 break-words'>{protocolError}</span>
+            <button
+              type='button'
+              onClick={() => setProtocolError(undefined)}
+              aria-label='Dismiss error'
+              className='shrink-0 opacity-70 transition-opacity hover:opacity-100'>
+              ✕
+            </button>
+          </div>
+        </div>
+      ) : null}
       <Transcript
         state={state}
         fileUrl={sessionId ? (path) => client.sessionFileUrl(sessionId, path) : undefined}
