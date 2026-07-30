@@ -62,7 +62,8 @@ What's shipped, what's next, and what's still undecided. Status as of 2026-07-30
   `workspace:*` now that `pnpm publish -r` does the packing, which retired the exact-pin scheme,
   both release scripts, and the `check:versions` guard. 0.4.1 is the first release through it.
 
-- **Durable parks** (2026-07-30) — `createFileSessionStore()`: one JSON file per parked session,
+- **Durable parks** (2026-07-30, *on `master`, not yet on npm* — latest release is 0.4.2) —
+  `createFileSessionStore()`: one JSON file per parked session,
   temp-file+rename writes, adopted by `hydrate()` inside `listen()` so a restart re-indexes the
   executions and re-arms their watchdogs (no sooner than `parking.expiredGraceMs`, since nothing
   could have been delivered while the process was down). `toDurableRecord` keeps credentials,
