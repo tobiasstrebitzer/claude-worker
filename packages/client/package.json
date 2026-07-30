@@ -24,11 +24,11 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@claude-worker/protocol": "0.4.1"
+    "@claude-worker/protocol": "workspace:*"
   },
   "devDependencies": {
-    "@claude-worker/core": "0.4.1",
-    "@claude-worker/server": "0.4.1",
+    "@claude-worker/core": "workspace:*",
+    "@claude-worker/server": "workspace:*",
     "@types/node": "^22.10.0",
     "@types/ws": "^8.18.1",
     "rimraf": "^6.1.3",

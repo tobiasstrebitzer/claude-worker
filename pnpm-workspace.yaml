@@ -3,11 +3,11 @@
 # export condition so apps resolve straight to TS source (packages/*/src) in dev with no build
 # step. Packages build to build/ via tsdown only on prepack/CI (never in dev). Turbo orchestrates.
 #
-# Publishable packages (packages/*) pin siblings to an EXACT version, not `workspace:*`:
-# publishing runs plain `npm publish`, which doesn't rewrite the workspace protocol. Linking
-# still happens because linkWorkspacePackages symlinks whenever the range matches the local
-# version — which is exactly why `pnpm version:set` moves versions and specifiers together and
-# `pnpm check:versions` guards it. The apps stay on `workspace:*`: private, never published.
+# Every inter-package dep is `workspace:*`, which `pnpm publish` rewrites to the concrete
+# version as it packs. `npm publish` does NOT — npm can't resolve the protocol here, since
+# this workspace is declared to pnpm only (no `workspaces` field in the root package.json),
+# so it would ship `workspace:*` verbatim and break every consumer. Releases therefore go
+# through pnpm, always: `.github/workflows/publish.yml` on a tag, `pnpm publish:all` locally.
 packages:
   - packages/*
   - apps/*

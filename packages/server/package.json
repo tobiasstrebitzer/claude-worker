@@ -25,14 +25,14 @@
     "dev": "node --conditions=@claude-worker/source --import @swc-node/register/esm-register src/dev.ts"
   },
   "dependencies": {
-    "@claude-worker/core": "0.4.1",
-    "@claude-worker/protocol": "0.4.1",
-    "@claude-worker/queue": "0.4.1",
+    "@claude-worker/core": "workspace:*",
+    "@claude-worker/protocol": "workspace:*",
+    "@claude-worker/queue": "workspace:*",
     "ws": "^8.18.0"
   },
   "devDependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.217",
-    "@claude-worker/sandbox": "0.4.1",
+    "@claude-worker/sandbox": "workspace:*",
     "@swc-node/register": "^1.11.1",
     "@swc/core": "^1.15.41",
     "@types/node": "^22.10.0",

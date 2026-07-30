@@ -16,11 +16,6 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      # Before anything else: a half-done version bump leaves a package pinned to
-      # a sibling version that no longer exists locally, and pnpm then resolves it
-      # from the registry — everything below would pass against the last published
-      # copy instead of this checkout.
-      - run: pnpm check:versions
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm test

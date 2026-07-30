@@ -96,12 +96,12 @@ lint oxlint, `build/` via tsdown only on `prepack`/CI — dev never builds: the
 `--conditions=@claude-worker/source` + swc-node; Vite/vitest set `resolve.conditions`, vitest
 also aliases). In-package imports use explicit `.ts` extensions.
 
-Publishable packages pin their siblings to an exact version (`"@claude-worker/protocol": "0.4.0"`,
-never `workspace:*` — keybridge publishes with plain `npm publish`, which ships the workspace
-protocol verbatim and breaks every consumer). They still symlink locally because
-`linkWorkspacePackages` links whenever the range matches. `scripts/set-version.mjs` (`pnpm
-version:set` / `pnpm check:versions`) owns both halves; the apps keep `workspace:*` since they are
-private and never published.
+Inter-package deps are `workspace:*` everywhere, and **pnpm must be what packs them**: `pnpm
+publish`/`pnpm pack` rewrite the protocol to the concrete version, `npm publish` does not — npm
+can't resolve it, since this workspace is declared to pnpm alone (no `workspaces` field in the
+root package.json), so it would ship `workspace:*` verbatim and break every consumer. Hence
+`pnpm publish -r` in CI and `pnpm publish:all` locally; never `npm publish`, and never keybridge,
+which wraps it. `pnpm version:set <x.y.z>` bumps `packages/*` and nothing else.
 
 ## Testing
 
@@ -115,26 +115,27 @@ stack) cost tokens.
 
 ## Wrapup Config
 
-- check: `pnpm lint` + `pnpm typecheck` + `pnpm check:versions`
+- check: `pnpm lint` + `pnpm typecheck`
 - test: `pnpm test`
 - push: yes (github.com/tobiasstrebitzer/claude-worker, branch `master`; repo is public, and
   every push to master deploys the docs site to https://tobiasstrebitzer.github.io/claude-worker/
   via `.github/workflows/docs.yml`)
-- version_bump: yes — `pnpm version:set <x.y.z> && pnpm install --lockfile-only`, which moves all
-  8 packages AND their pinned inter-dep specifiers together. Never hand-edit a version: pinned
-  siblings that drift from the local version stop being symlinked and resolve from the registry
-  instead, silently. `pnpm check:versions` is the guard (CI runs it first). 0.4.0 tagged;
-  `sandbox` first published at 0.3.0.
-- publish: yes — npm `@claude-worker` org. Default path is CI: push a `v<x.y.z>` tag and
-  `.github/workflows/publish.yml` publishes all 8 via npm **trusted publishing** (OIDC, no
-  NPM_TOKEN, automatic provenance). It re-runs the full CI gate, refuses a tag that disagrees
-  with `packages/*/package.json`, derives dependency order from the runtime dep graph, and skips
-  versions already on the registry — so a half-failed run is safe to re-run. Each package needs a
-  trusted publisher configured once on npmjs.com (workflow filename `publish.yml`, no path).
-  Manual fallback is keybridge Touch ID: `npx -y keybridge@latest publish` from each package dir
-  in that same order. Versions are already pinned in the repo, so there is no pin/restore dance —
-  publish straight from a clean tree. Run the gatekeeper audit first. MIT (LICENSE per package;
-  ui intentionally ships `src/`, allowlisted in `.claude/gatekeeper.json`).
+- version_bump: yes — `pnpm version:set <x.y.z> && pnpm install --lockfile-only`. That's
+  `pnpm --filter "./packages/*" exec npm version`, so it moves the 8 publishable packages and
+  leaves the apps alone; `workspace:*` needs no bumping. 0.4.1 published (0.4.0 was tagged but
+  never reached the registry); `sandbox` first published at 0.3.0.
+- publish: yes — npm `@claude-worker` org, always through **pnpm** (see the `workspace:*` note
+  under Tooling: `npm publish` would ship the protocol verbatim). Default path is CI: push a
+  `v<x.y.z>` tag and `.github/workflows/publish.yml` runs `pnpm publish -r` under npm **trusted
+  publishing** (OIDC, no NPM_TOKEN, automatic provenance). It re-runs the full CI gate, refuses a
+  tag that disagrees with `packages/*/package.json`, publishes in dependency order, and skips
+  versions already on the registry — so a half-failed run is safe to re-run. A prerelease tag
+  (`v0.5.0-rc.1`) goes out under the `next` dist-tag. Each package needs a trusted publisher
+  configured once on npmjs.com (workflow filename `publish.yml`, no path). A tag runs the
+  workflow from the TAGGED commit, so the tag must contain `publish.yml`. Manual fallback is
+  `pnpm publish:all` from a clean tree — never keybridge/`npm publish` any more. Run the
+  gatekeeper audit first. MIT (LICENSE per package; ui intentionally ships `src/`, allowlisted in
+  `.claude/gatekeeper.json`).
 - docs: root CLAUDE.md + README.md + docs/ + apps/docs (keep site content in sync with README)
 - frontend_smoke: no (manual via `pnpm server` + `pnpm web`)
 - co_authored_by: no (global)

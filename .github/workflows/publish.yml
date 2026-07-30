@@ -1,9 +1,9 @@
 name: Publish
 
-# Publishes all 8 @claude-worker packages to npm via **trusted publishing**: the
-# npm CLI trades this workflow's GitHub OIDC token for a short-lived publish
-# credential, so there is no NPM_TOKEN in this repo and provenance attestations
-# are generated automatically.
+# Publishes all 8 @claude-worker packages to npm via **trusted publishing**: pnpm
+# trades this workflow's GitHub OIDC token for a short-lived publish credential,
+# so there is no NPM_TOKEN in this repo and provenance attestations are generated
+# automatically.
 #
 # One-time setup, per package, at npmjs.com → package → Settings → Trusted
 # publisher (all fields are exact and case-sensitive):
@@ -12,9 +12,9 @@ name: Publish
 #   Workflow filename:    publish.yml     <- filename only, NOT .github/workflows/publish.yml
 #   Environment:          (leave blank)   <- if you set one here, add `environment:` to the job below
 #
-# Release flow: pnpm version:set <x.y.z> && pnpm install --lockfile-only, commit,
-# then `git tag v<x.y.z> && git push --tags`. The tag must match the version in
-# packages/*/package.json — the publish script refuses the run otherwise.
+# Release flow: `pnpm version:set <x.y.z>`, commit, then `git tag v<x.y.z> &&
+# git push --tags`. A tag runs the workflow from the TAGGED commit, so the tag
+# must point at a commit that contains this file.
 
 on:
   push:
@@ -39,35 +39,51 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          # >= 22.14 is a trusted-publishing requirement; `22` resolves to the
-          # latest 22.x and matches the engines field. No dependency cache: a
-          # release build should resolve everything from the lockfile alone.
+          # registry-url writes an ~/.npmrc with an unresolved ${NODE_AUTH_TOKEN}
+          # placeholder; pnpm >= 11.1.0 drops it so OIDC can take over (it 404s on
+          # 11.0.8). packageManager pins 11.8.0 and action-setup honours it — do
+          # not pin pnpm below 11.1.0 or trusted publishing breaks.
           node-version: 22
           registry-url: https://registry.npmjs.org
-      # Node 22 ships npm 10; trusted publishing needs >= 11.5.1.
-      - run: npm install -g npm@latest
-      - run: npm --version
 
       - run: pnpm install --frozen-lockfile
-      # Same gate as CI, because a tag push doesn't inherit CI's verdict and a
-      # bad publish can't be taken back. check:versions first for the reason
-      # given in ci.yml: a half-done bump makes everything below test the last
-      # published copy instead of this checkout.
-      - run: pnpm check:versions
+      # Same gate as CI: a tag push doesn't inherit CI's verdict, and a publish
+      # can't be taken back.
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
 
-      - name: Publish
+      # The tag is the release's name; if it disagrees with what's in the tree,
+      # every downstream artifact (npm version, provenance, GitHub release) is
+      # labelled wrong. Cheaper to catch here than to unpublish.
+      - name: Check tag matches package versions
+        if: startsWith(github.ref, 'refs/tags/v')
         run: |
-          node scripts/publish-workspace.mjs \
-            ${TAG:+--expect-version=${TAG#v}} \
-            ${DRY_RUN:+--dry-run}
-        env:
-          TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
-          DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+          node -e '
+            const { readdirSync, readFileSync } = require("node:fs")
+            const want = process.argv[1].replace(/^v/, "")
+            const bad = readdirSync("packages", { withFileTypes: true })
+              .filter((e) => e.isDirectory())
+              .map((e) => JSON.parse(readFileSync(`packages/${e.name}/package.json`, "utf8")))
+              .filter((p) => p.private !== true && p.version !== want)
+            if (bad.length === 0) return console.log(`all packages at ${want}`)
+            console.error(`tag says ${want}, but:\n` + bad.map((p) => `  - ${p.name} is ${p.version}`).join("\n"))
+            process.exit(1)
+          ' "${{ github.ref_name }}"
+
+      # pnpm publish -r walks every public package in dependency order, rewrites
+      # `workspace:*` to the concrete version as it packs, runs each package's own
+      # prepack, and skips versions already on the registry — so a half-failed run
+      # is safe to re-run. --no-git-checks is required on a detached tag checkout.
+      # A prerelease tag (v0.5.0-rc.1) publishes under `next` so it never becomes
+      # npm's `latest`.
+      - name: Publish
+        run: >-
+          pnpm publish -r --access public --no-git-checks
+          ${{ contains(github.ref_name, '-') && '--tag next' || '' }}
+          ${{ inputs.dry_run && '--dry-run' || '' }}
