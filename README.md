@@ -30,7 +30,8 @@ engine a session runs on, so one worker can serve both. See
 
 **Documentation: [tobiasstrebitzer.github.io/claude-worker](https://tobiasstrebitzer.github.io/claude-worker/)** —
 quickstart, embedding guide, permissions, job queue, and the full reference. Design docs live in
-[`docs/`](docs/): [architecture](docs/architecture.md) and [roadmap](docs/roadmap.md).
+[`docs/`](docs/): [architecture](docs/architecture.md), [gotchas](docs/gotchas.md) (the invariants
+that bite, for contributors), and [roadmap](docs/roadmap.md).
 
 ## Packages
 
@@ -47,7 +48,7 @@ Each package has its own README with install and usage details.
 | [`@claude-worker/react`](packages/react) | The headless React layer: `useClaudeSession` hook + pure transcript reducer. No styling opinion. |
 | [`@claude-worker/ui`](packages/ui) | The styled agent-control component library: session panel (status bar, streaming transcript, tool-call cards, permission prompts, composer), session list, and the underlying primitives. Tailwind v4 + Base UI + cva; light/dark via tokens. See `packages/ui/README.md` for consumer wiring. |
 | `apps/web` | Full session-control web app (dashboard): session list, create/resume flow, live panel, settings. |
-| `apps/docs` | This documentation site (Astro), deployed to GitHub Pages on push to `main`. |
+| `apps/docs` | This documentation site (Astro), deployed to GitHub Pages on push to `master`. |
 
 ## Quickstart
 

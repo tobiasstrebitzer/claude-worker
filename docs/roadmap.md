@@ -1,6 +1,6 @@
 # Roadmap & open questions
 
-What's shipped, what's next, and what's still undecided. Status as of 2026-07-29.
+What's shipped, what's next, and what's still undecided. Status as of 2026-07-30.
 
 ## Shipped
 
@@ -46,6 +46,11 @@ What's shipped, what's next, and what's still undecided. Status as of 2026-07-29
   agent as ordinary tool output, and `parked` job runs that free their concurrency slot and stop
   their wall-clock budget (`job_parked` / `job_resumed`, `maxParkedDurationMs`). Parked sessions
   stay readable and downloadable from their snapshot; attaching wakes them. Protocol v4.
+
+- **Release pipeline** (2026-07-30) — a `v*` tag publishes all 8 packages from CI under npm
+  trusted publishing (OIDC, no NPM_TOKEN, automatic provenance). Inter-package deps went back to
+  `workspace:*` now that `pnpm publish -r` does the packing, which retired the exact-pin scheme,
+  both release scripts, and the `check:versions` guard. 0.4.1 is the first release through it.
 
 ## Next
 
