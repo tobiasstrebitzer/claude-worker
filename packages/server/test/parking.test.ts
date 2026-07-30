@@ -1,3 +1,6 @@
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import WebSocket from 'ws'
 import type {
@@ -15,7 +18,12 @@ import type {
   SessionEventBody,
   SessionInfo,
 } from '@claude-worker/protocol'
-import { createWorkerServer, type WorkerServer } from '../src/index.ts'
+import {
+  createFileSessionStore,
+  createWorkerServer,
+  type SessionStore,
+  type WorkerServer,
+} from '../src/index.ts'
 
 /**
  * A runner that parks the way the provider engine does: it announces the park with
@@ -436,5 +444,170 @@ describe('deferred execution: parking and result ingestion', () => {
     expect(jobEvents.map((e) => e.type)).toContain('job_parked')
     expect(jobEvents.map((e) => e.type)).toContain('job_resumed')
     expect(second.id).not.toBe(first.id)
+  })
+})
+
+/**
+ * The half a memory store cannot cover: the process goes away mid-park. Two servers
+ * over one directory, sequentially — which is also the only way a file store is ever
+ * legal (see `createFileSessionStore`).
+ */
+describe('deferred execution: durability across a restart', () => {
+  let dir: string
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  const withStore = async (expiredGraceMs?: number): Promise<Harness> =>
+    startServer({
+      parking: { parkDelayMs: 10, expiredGraceMs, store: createFileSessionStore({ dir }) },
+    })
+
+  /** Age a parked record's deadline past, the way an outage of any real length
+   * would. Done on the file rather than with a short timer so the park itself
+   * can't race the watchdog. */
+  const backdateDeadline = async (sessionId: string): Promise<void> => {
+    const path = join(dir, `${sessionId}.json`)
+    const file = JSON.parse(await readFile(path, 'utf8')) as {
+      record: { executions: Array<{ expiresAt?: number }>; snapshot: { parked: Array<{ expiresAt?: number }> } }
+    }
+    const expiresAt = Date.now() - 1000
+    for (const execution of file.record.executions) execution.expiresAt = expiresAt
+    for (const execution of file.record.snapshot.parked) execution.expiresAt = expiresAt
+    await writeFile(path, JSON.stringify(file))
+  }
+
+  it('hydrates a parked session from disk and wakes it under the same id', async () => {
+    dir = await mkdtemp(join(tmpdir(), 'cw-parked-'))
+    const first = await withStore()
+    const session = await createSession(first.base)
+    first.runners[0]!.defer('exec-1')
+    await vi.waitFor(async () => expect(await running!.parking.get(session.id)).not.toBeNull())
+    expect(await readdir(dir)).toEqual([`${session.id}.json`])
+
+    // The deploy restart, mid-park.
+    await running!.close()
+    const second = await withStore()
+
+    // The new process knows the session without having built anything for it.
+    expect(second.runners).toHaveLength(0)
+    const listed = (await fetch(`${second.base}/sessions`).then((r) => r.json())) as {
+      sessions: SessionInfo[]
+    }
+    expect(listed.sessions.map((s) => [s.id, s.status])).toEqual([[session.id, 'parked']])
+    // Its snapshot came back whole, transcript and scratch files included.
+    const download = await fetch(`${second.base}/sessions/${session.id}/files/out/report.md`)
+    expect(await download.text()).toBe('# draft')
+
+    const res = await submitResult(second.base, 'exec-1', {
+      status: 'ok',
+      output: { type: 'json', value: 42 },
+    })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ applied: true, sessionId: session.id })
+    const resumed = second.runners[0]!
+    expect(resumed.id).toBe(session.id)
+    expect(resumed.settled).toEqual([
+      { executionId: 'exec-1', result: { status: 'ok', output: 42, logs: undefined } },
+    ])
+    // Seq numbering continues from the snapshot: a client reattaching with the
+    // afterSeq it had before the restart sees one unbroken stream.
+    expect(resumed.info().lastSeq).toBeGreaterThan(2)
+    expect(await running!.parking.get(session.id)).toBeNull()
+    expect(await readdir(dir)).toEqual([])
+  })
+
+  /**
+   * A store whose `save` takes real time — which every durable one does, and the
+   * memory store never did. The park evicts the runner before the write lands, so
+   * this is the window where the session is in neither the registry nor the store.
+   */
+  const slowSaveStore = (delayMs: number): SessionStore => {
+    const inner = createFileSessionStore({ dir })
+    return {
+      ...inner,
+      save: async (record) => {
+        await new Promise((resolve) => setTimeout(resolve, delayMs))
+        await inner.save(record)
+      },
+    }
+  }
+
+  it('applies a result that lands while the park is still being written', async () => {
+    dir = await mkdtemp(join(tmpdir(), 'cw-parked-'))
+    const h = await startServer({ parking: { parkDelayMs: 10, store: slowSaveStore(80) } })
+    const session = await createSession(h.base)
+    h.runners[0]!.defer('exec-1')
+    // Deliver into the save window: the runner is already evicted, the record is
+    // still in flight. Reading past the write would 404 the caller, file the
+    // execution as settled, and leave a record nothing could ever wake.
+    await vi.waitFor(() => expect(running!.registry.get(session.id)).toBeUndefined())
+
+    const res = await submitResult(h.base, 'exec-1', {
+      status: 'ok',
+      output: { type: 'json', value: 42 },
+    })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ applied: true, sessionId: session.id })
+    expect(h.runners[1]!.settled).toHaveLength(1)
+    expect(await running!.parking.get(session.id)).toBeNull()
+    expect(await readdir(dir)).toEqual([])
+  })
+
+  it('keeps a session deleted during the save window deleted', async () => {
+    dir = await mkdtemp(join(tmpdir(), 'cw-parked-'))
+    const h = await startServer({ parking: { parkDelayMs: 10, store: slowSaveStore(80) } })
+    const session = await createSession(h.base)
+    h.runners[0]!.defer('exec-1')
+    await vi.waitFor(() => expect(running!.registry.get(session.id)).toBeUndefined())
+
+    const deleted = await fetch(`${h.base}/sessions/${session.id}`, { method: 'DELETE' })
+    expect(deleted.status).toBe(200)
+    // The save lands after the delete: without ordering it would resurrect a
+    // session the caller was told was closed — and hydrate() would wake it later.
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    expect(await readdir(dir)).toEqual([])
+    const listed = (await fetch(`${h.base}/sessions`).then((r) => r.json())) as {
+      sessions: SessionInfo[]
+    }
+    expect(listed.sessions).toEqual([])
+    expect((await submitResult(h.base, 'exec-1', { status: 'ok', output: { type: 'json', value: 1 } })).status).toBe(404)
+  })
+
+  it('gives an execution whose deadline passed during the outage a grace window', async () => {
+    dir = await mkdtemp(join(tmpdir(), 'cw-parked-'))
+    const first = await withStore()
+    const session = await createSession(first.base)
+    first.runners[0]!.defer('exec-1', 'remote_task', Date.now() + 5_000)
+    await vi.waitFor(async () => expect(await running!.parking.get(session.id)).not.toBeNull())
+    await running!.close()
+    await backdateDeadline(session.id)
+
+    // Deadline long past by the time the process is back — the result could not
+    // have been delivered while it was down, so the watchdog holds off.
+    const second = await withStore(10_000)
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    expect(second.runners).toHaveLength(0)
+
+    // A delivery still lands, which is the point of holding off.
+    expect((await submitResult(second.base, 'exec-1', { status: 'ok', output: { type: 'json', value: 1 } })).status).toBe(200)
+    expect(second.runners[0]!.settled[0]).toMatchObject({ result: { status: 'ok' } })
+  })
+
+  it('still fails an expired execution once the grace window is over', async () => {
+    dir = await mkdtemp(join(tmpdir(), 'cw-parked-'))
+    const first = await withStore()
+    const session = await createSession(first.base)
+    first.runners[0]!.defer('exec-1', 'remote_task', Date.now() + 5_000)
+    await vi.waitFor(async () => expect(await running!.parking.get(session.id)).not.toBeNull())
+    await running!.close()
+    await backdateDeadline(session.id)
+
+    const second = await withStore(0)
+    await vi.waitFor(() => expect(second.runners).toHaveLength(1), { timeout: 2000 })
+    expect(second.runners[0]!.settled[0]).toMatchObject({
+      executionId: 'exec-1',
+      result: { status: 'failed', reason: 'timeout' },
+    })
   })
 })

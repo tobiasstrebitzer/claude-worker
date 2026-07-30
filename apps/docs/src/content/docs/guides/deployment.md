@@ -26,9 +26,58 @@ and resume works across process restarts **on the same host**: pass `resume: sdk
 a restart. Note the two ids: `SessionInfo.id` is the server-assigned id; `sdkSessionId` is the
 Agent SDK's — the one you feed back as `resume`.
 
-Multi-host session storage (a custom `SessionStore`) is on the roadmap but unimplemented; if you
-need the queue to span hosts, the `QueueAdapter` seam is the supported path — see
-[Job queue](/claude-worker/docs/guides/job-queue/).
+Multi-host session storage is still on the roadmap: the bundled `SessionStore` implementations
+are both single-process (see below). If you need the queue to span hosts, the `QueueAdapter` seam
+is the supported path — see [Job queue](/claude-worker/docs/guides/job-queue/).
+
+## Restarts, parked sessions, and the deploy guard
+
+A session parked on a deferred execution lives in a `SessionStore`. The default one is in-memory:
+the park survives a client disconnect, not a restart. Since a park can legitimately last days,
+a deploy that restarts the process is how parked work actually gets lost — so point it at the
+bundled file store:
+
+```ts
+import { createFileSessionStore, createWorkerServer } from '@claude-worker/server'
+
+createWorkerServer({
+  authenticate,
+  parking: {
+    store: createFileSessionStore({ dir: '/var/lib/claude-worker/parked' }),
+    // Boot grace for a deadline that lapsed while the process was down (default 60s):
+    // the watchdog must not fail every parked execution at t=0.
+    expiredGraceMs: 60_000,
+  },
+})
+```
+
+`hydrate()` runs inside `listen()`, so the records are re-indexed and their watchdogs re-armed
+before the server accepts a request. Three things to know:
+
+- **The directory holds plaintext transcripts.** Each record is one parked session's whole event
+  log and tool I/O. Protect it like the SDK's own `~/.claude/projects`.
+- **Credentials never reach it.** The stored config keeps the wire request only: `env`,
+  `extraOptions`, and injected functions are dropped, and a rebuilt provider session resolves
+  credentials through `createEngineRunner` from the environment, exactly as the first build did.
+- **One process per directory.** Two servers sharing it would both hydrate and both rebuild the
+  same sessions.
+
+Durability doesn't make a restart free. A turn actually in flight dies with the process, as does
+a pending permission request, and a running job is left claimed. `scripts/deploy-guard.mjs` in
+the repo asks a live worker whether anything would be lost and exits non-zero while the answer
+is yes:
+
+```bash
+# 0 = safe to restart, 1 = still busy, 2 = could not tell (bad URL, auth, unexpected response)
+node scripts/deploy-guard.mjs --url https://worker.internal/v1 --token "$TOKEN" \
+  --wait 300 --allow-parked && systemctl restart claude-worker
+```
+
+It blocks on any session that is `starting`, `running`, or `awaiting_approval`, on any running
+job, on parked sessions unless `--allow-parked` says a durable `SessionStore` is configured, and
+on queued jobs unless `--allow-queued` says the same of the `QueueAdapter`. The two are separate
+decisions: a durable session store under the bundled in-memory adapter still wakes a parked
+session that no job is left waiting on, so the guard says so rather than pretending otherwise.
 
 ## The auth hook is mandatory
 

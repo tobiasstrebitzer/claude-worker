@@ -30,8 +30,9 @@ protocol. Read these before changing scope or structure:
   Jobs are one-shot, but a run that parks frees its slot and stops its duration clock.
 - `packages/server` — HTTP + WS gateway (`node:http` + `ws`): session registry, auth hook,
   optional `/jobs` + `/queue` routes, profiles (+ `profileStore` CRUD), `GET /sessions/:id/files`,
-  `SessionParkManager` (`parking.ts`) owning deferred execution. Imports no model SDK — a provider
-  profile is built by the host's `createEngineRunner` hook.
+  `SessionParkManager` (`parking.ts`) owning deferred execution over the `SessionStore` seam
+  (`session-store.ts`: memory + JSON-file, the file one durable across restarts). Imports no model
+  SDK — a provider profile is built by the host's `createEngineRunner` hook.
 - `packages/client` — REST + WS client on platform `fetch`/`WebSocket`; zero runtime deps. Owns
   the WS frame surface, so new frames need `SessionHandle` methods/events here.
 - `packages/react` — headless: `useClaudeSession`, the pure transcript reducer

@@ -1,70 +1,12 @@
 import type {
   ParkedExecution,
   Runner,
-  RunnerSnapshot,
   SessionRunnerConfig,
   ToolExecutionResult,
 } from '@claude-worker/core'
 import type { SessionInfo } from '@claude-worker/protocol'
 import type { SessionRegistry } from './registry.ts'
-
-/**
- * A session with its live runner torn down, waiting on deferred executions.
- *
- * Everything needed to bring it back: the wire-visible info (so it still lists and
- * reads over REST while parked), the config to rebuild the runner, the engine's
- * snapshot, and what it is waiting for.
- */
-export type ParkedSessionRecord = {
-  id: string
-  /** Session info as of the park, with `status: 'parked'`. */
-  info: SessionInfo
-  profile?: string
-  /** The config the session was created with (profile defaults already applied). */
-  config: SessionRunnerConfig
-  snapshot: RunnerSnapshot
-  executions: ParkedExecution[]
-  parkedAt: number
-}
-
-/**
- * Where parked sessions live. The bundled implementation is
- * {@link MemorySessionStore}; a durable one (redis, sqlite, a table) implements the
- * same three operations and makes parks survive a restart.
- *
- * Two things to know before writing one: the record holds the session's whole
- * transcript and tool I/O, and `config` may carry host-injected values (env, hooks)
- * that a JSON round-trip silently drops or, worse, persists. That is exactly why
- * nothing durable ships here — choosing where this lands is the operator's call.
- */
-export interface SessionStore {
-  save(record: ParkedSessionRecord): Promise<void>
-  get(id: string): Promise<ParkedSessionRecord | null>
-  list(): Promise<ParkedSessionRecord[]>
-  delete(id: string): Promise<boolean>
-}
-
-/** Single-process, no persistence: parks survive a client disconnect, not a restart. */
-export class MemorySessionStore implements SessionStore {
-  #records = new Map<string, ParkedSessionRecord>()
-
-  save(record: ParkedSessionRecord): Promise<void> {
-    this.#records.set(record.id, record)
-    return Promise.resolve()
-  }
-
-  get(id: string): Promise<ParkedSessionRecord | null> {
-    return Promise.resolve(this.#records.get(id) ?? null)
-  }
-
-  list(): Promise<ParkedSessionRecord[]> {
-    return Promise.resolve([...this.#records.values()])
-  }
-
-  delete(id: string): Promise<boolean> {
-    return Promise.resolve(this.#records.delete(id))
-  }
-}
+import type { ParkedSessionRecord, SessionStore } from './session-store.ts'
 
 export type SessionParkOptions = {
   registry: SessionRegistry
@@ -78,6 +20,12 @@ export type SessionParkOptions = {
   /** Wait this long after the last client detaches before parking, so a reconnect
    * (a wifi blip, a page reload) doesn't cost a teardown. Default 2000. */
   parkDelayMs?: number
+  /** Grace given at {@link SessionParkManager.hydrate} to an execution whose
+   * deadline passed while the server was down. Its result could not have been
+   * delivered during the outage, so failing it the instant the process is back
+   * would throw away an answer that is very likely seconds behind. Extends a
+   * deadline, never shortens one. Default 60000. */
+  expiredGraceMs?: number
   /** Veto + accounting hook, called before the teardown: the job queue frees the
    * run's concurrency slot here, and refuses (false) when the run is finalizing. */
   onParking?: (sessionId: string, executionId: string) => boolean
@@ -117,6 +65,20 @@ export class SessionParkManager {
   /** The config each live session was built from — what a rebuild needs, and the
    * one thing a runner doesn't carry on its public surface. */
   #configs = new Map<string, SessionRunnerConfig>()
+  /**
+   * In-flight store work per session, so operations on one record run in order.
+   *
+   * Load-bearing with any store whose writes are real I/O. `#park` must evict the
+   * runner *before* the save completes (an attach between `park()` and `evict()`
+   * would bind a client to an inert runner), which leaves a window where the
+   * session is in neither the registry nor the store. A delivery arriving inside it
+   * would read past the write: `store.get` misses, the result is answered 404, the
+   * execution is filed as settled with its watchdog cleared — and then the record
+   * lands on disk with nothing left alive that could ever wake it. A `discard`
+   * inside the same window would delete nothing and leave the save to resurrect a
+   * session the caller was told was closed.
+   */
+  #storeOps = new Map<string, Promise<void>>()
   #closed = false
 
   constructor(options: SessionParkOptions) {
@@ -130,10 +92,12 @@ export class SessionParkManager {
   }
 
   /** Adopt the store's contents (a durable store after a restart): re-index the
-   * executions and re-arm their watchdogs. */
+   * executions and re-arm their watchdogs, no deadline sooner than the grace
+   * window — nothing could have been delivered while the process was down. */
   async hydrate(): Promise<void> {
+    const floor = Date.now() + (this.#options.expiredGraceMs ?? 60_000)
     for (const record of await this.#options.store.list()) {
-      for (const execution of record.executions) this.#track(record.id, execution)
+      for (const execution of record.executions) this.#track(record.id, execution, floor)
     }
   }
 
@@ -194,11 +158,15 @@ export class SessionParkManager {
 
   /** The parked session's record, for the read paths (GET, list, attach). */
   get(id: string): Promise<ParkedSessionRecord | null> {
-    return this.#options.store.get(id)
+    return this.#queue(id, () => this.#options.store.get(id))
   }
 
   /** Every parked session's info, to merge into `GET {basePath}/sessions`. */
   async listInfo(): Promise<SessionInfo[]> {
+    // A park mid-save belongs in the listing: it is neither in the registry nor
+    // readable yet, and a caller that saw it there a moment ago must not see it
+    // vanish. Waiting on the writes in flight is what keeps the two views joined.
+    await Promise.all(this.#storeOps.values())
     return (await this.#options.store.list()).map((record) => record.info)
   }
 
@@ -253,7 +221,7 @@ export class SessionParkManager {
     for (const [executionId, owner] of this.#settled) {
       if (owner === sessionId) this.#settled.delete(executionId)
     }
-    await this.#options.store.delete(sessionId)
+    await this.#queue(sessionId, () => this.#options.store.delete(sessionId))
   }
 
   close(): void {
@@ -293,7 +261,7 @@ export class SessionParkManager {
     }
     for (const execution of snapshot.parked) this.#track(id, execution)
     try {
-      await this.#options.store.save(record)
+      await this.#queue(id, () => this.#options.store.save(record))
     } catch (error) {
       // The runner is already inert and evicted; without the record the session
       // cannot come back. Nothing to roll back to — surface it loudly.
@@ -314,7 +282,7 @@ export class SessionParkManager {
   }
 
   async #rebuild(id: string): Promise<Runner | undefined> {
-    const record = await this.#options.store.get(id)
+    const record = await this.#queue(id, () => this.#options.store.get(id))
     if (!record) return undefined
     let runner: Runner
     try {
@@ -342,14 +310,32 @@ export class SessionParkManager {
     this.remember(id, record.config)
     this.watch(runner, record.snapshot.seq)
     this.#options.onResumed?.(id, runner)
-    await this.#options.store.delete(id)
+    await this.#queue(id, () => this.#options.store.delete(id))
     void runner.start()
     return runner
   }
 
-  #track(sessionId: string, execution: ParkedExecution): void {
+  /** Run a store operation after whatever is already in flight for this session.
+   * The chain is per session and drops itself once idle; a failed operation never
+   * poisons the ones behind it (each caller handles its own). */
+  #queue<T>(sessionId: string, op: () => Promise<T>): Promise<T> {
+    const previous = this.#storeOps.get(sessionId) ?? Promise.resolve()
+    const result = previous.then(op)
+    const settled = result.then(
+      () => {},
+      () => {},
+    )
+    this.#storeOps.set(sessionId, settled)
+    void settled.then(() => {
+      if (this.#storeOps.get(sessionId) === settled) this.#storeOps.delete(sessionId)
+    })
+    return result
+  }
+
+  #track(sessionId: string, execution: ParkedExecution, notBefore = 0): void {
     this.#owners.set(execution.executionId, sessionId)
     if (execution.expiresAt === undefined || this.#timers.has(execution.executionId)) return
+    const expiresAt = Math.max(execution.expiresAt, notBefore)
     const timer = setTimeout(
       () => {
         this.#timers.delete(execution.executionId)
@@ -363,7 +349,7 @@ export class SessionParkManager {
           this.#options.onError?.(error, { sessionId, phase: 'resume' })
         })
       },
-      Math.max(0, execution.expiresAt - Date.now()),
+      Math.max(0, expiresAt - Date.now()),
     )
     timer.unref?.()
     this.#timers.set(execution.executionId, timer)

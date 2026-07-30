@@ -139,3 +139,7 @@ cancelling a parked job discards its snapshot so nothing can wake it. A `failed`
 execution watchdog's timeout — reaches the agent as ordinary tool output, which it adapts to,
 rather than failing the run. Wiring the executor side is in
 [the server reference](/claude-worker/docs/reference/server/).
+
+A park that may outlive the process needs a durable store —
+`parking: { store: createFileSessionStore({ dir }) }`, plus the restart guard, in
+[Deployment](/claude-worker/docs/guides/deployment/#restarts-parked-sessions-and-the-deploy-guard).

@@ -107,9 +107,10 @@ boundary: anything a client needs must be expressible as protocol events and com
   dispatch immediately when none is attached, which is what makes autonomous jobs simply never
   bridge. `SessionParkManager` (`server.parking`) owns the other end of the timescale: when an
   unwatched session parks it snapshots, evicts the runner from the registry, and persists to a
-  `SessionStore` (memory bundled; the record holds the whole transcript, which is why nothing
-  durable ships by default). Parked sessions still list, read, and serve their files — from the
-  snapshot, with no runner. `POST /executions/:executionId/result` rebuilds the session under the
+  `SessionStore` (`session-store.ts`: memory by default, `createFileSessionStore()` for one JSON
+  file per park under a directory `hydrate()` adopts on `listen()`; the record holds the whole
+  transcript, so a shared backend is the operator's call). Parked sessions still list, read, and
+  serve their files — from the snapshot, with no runner. `POST /executions/:executionId/result` rebuilds the session under the
   same id and folds the result into its loop, idempotently by `executionId`; an execution
   watchdog does the same with a `timeout` failure when no result ever comes, which the agent
   adapts to like any other tool failure. A session someone is watching stays live and parks
@@ -191,6 +192,14 @@ Results are applied idempotently by `executionId`: a duplicate, or one racing th
 answers `applied: false` rather than applying twice. Because the park is only a persistence
 boundary, `parked` is not terminal anywhere — `claimNext` never claims one, retention never
 prunes one, and `DELETE /v1/sessions/:id` is what actually ends one.
+
+With `createFileSessionStore()` the boundary survives the process too: `hydrate()` runs inside
+`listen()`, re-indexes every stored record's executions, and re-arms their watchdogs — with a
+floor (`parking.expiredGraceMs`, default 60s) under any deadline that passed during the outage,
+since nothing could have been delivered while the process was down. What durability does *not*
+cover is a turn in flight at the moment of the restart; `scripts/deploy-guard.mjs` is the other
+half, refusing the restart while any session is mid-turn, awaiting an approval, or (unless
+`--allow-parked`) parked without a durable store behind it.
 
 ## Tooling conventions
 

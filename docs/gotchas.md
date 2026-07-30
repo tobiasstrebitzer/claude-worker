@@ -112,6 +112,30 @@ change is the wrong one. Grouped by where they bite. Architecture lives in
   `registry.evict()` (not `remove()`) drops a parked runner — `remove()` closes it. A rebuild
   that ignores `EngineRunnerContext.restore` produces a fresh id and is refused with a loud
   error, because the silent version is a session that quietly forgot its task.
+- A durable `SessionStore` persists the record's config, and `toDurableRecord` (what
+  `createFileSessionStore` applies) drops four fields from it: `queryFn`, `historyFn`,
+  `extraOptions`, `env`. Two are functions JSON would eat silently, and `env` is credentials —
+  no store may ever hold those. Nothing is lost, because all four belong to the Claude engine and
+  the Claude engine cannot park; a rebuilt provider session resolves credentials through
+  `createEngineRunner` from the live environment on every build. A host that smuggles live values
+  into `config` for its factory to read back is the one thing this breaks — resolve them in the
+  factory instead.
+- Store operations are serialized per session (`SessionParkManager#queue`), and that ordering is
+  load-bearing the moment writes are real I/O. `#park` MUST evict before the save completes (an
+  attach in between binds a client to an inert runner), so there is a window where the session is
+  in neither the registry nor the store — a delivery reading past it 404s the caller, files the
+  execution as settled, and leaves a record nothing alive can wake; a `discard` reading past it
+  deletes nothing and lets the save resurrect a closed session. Read paths (`get`, `listInfo`)
+  queue behind the write for the same reason.
+- Re-arming a watchdog at `hydrate()` uses `max(expiresAt, now + expiredGraceMs)` (default 60s):
+  a deadline that lapsed during a restart must not fire at t=0, or the boot fails every parked
+  execution before the delivery that was retrying against a down server can land. Storage-side,
+  a file store is single-process (two servers over one directory both hydrate and both rebuild),
+  its `list()` reads every transcript into memory, and its directory is plaintext transcripts
+  (written 0600 under a 0700 dir). Two things a restart does NOT carry over: `#settled` is
+  in-memory, so a duplicate delivery after a restart is a 404 rather than `applied: false`, and a
+  parked *job*'s queue-side record belongs to the `QueueAdapter` — a durable `SessionStore` under
+  the bundled in-memory adapter wakes a session no job is waiting on.
 - Bridged tool calls: the server asks the **first attached** client and fails dispatch fast when
   none is attached (which is why autonomous jobs simply never bridge). Results are idempotent by
   `executionId` — a late answer racing a timeout is expected and must not error the client or

@@ -32,7 +32,8 @@ import {
 } from '@claude-worker/protocol'
 import { SessionRegistry } from './registry.ts'
 import { BridgeHub, type BridgeHubOptions } from './bridge.ts'
-import { MemorySessionStore, SessionParkManager, type SessionStore } from './parking.ts'
+import { SessionParkManager } from './parking.ts'
+import { MemorySessionStore, type SessionStore } from './session-store.ts'
 import type { ProfileStore } from './profile-store.ts'
 
 export type SdkSessionLister = (options: {
@@ -104,7 +105,14 @@ export type WorkerServerOptions = {
    */
   allowedConfigDirRoots?: string[]
   /** Map/patch the incoming CreateSessionRequest into the runner config (inject queryFn,
-   * env, tool policy, per-skill constraints...). Defaults to identity. */
+   * env, tool policy, per-skill constraints...). Defaults to identity.
+   *
+   * What this hook injects is **not** durable: a session rebuilt from a parked
+   * record is built from the stored config, and a durable store persists neither
+   * `env` nor injected functions (see `toDurableRecord` in session-store.ts). That costs the
+   * Claude engine nothing, since it cannot park — but a provider host that
+   * resolves credentials into `config.env` here for its `createEngineRunner` to
+   * read back loses them on the wake. Resolve them in the factory instead. */
   buildRunnerConfig?: (req: CreateSessionRequest) => SessionRunnerConfig
   /** URL prefix for all routes. Default '/v1'. */
   basePath?: string
@@ -144,13 +152,16 @@ export type WorkerServerOptions = {
    * the result is POSTed to `{basePath}/executions/:executionId/result`.
    *
    * On by default with an in-memory store, so a park survives a disconnect but not
-   * a restart; pass a durable `store` to change that (read its doc first — the
-   * record holds the whole transcript).
+   * a restart; pass `store: createFileSessionStore()` (or your own) to change that
+   * — read its doc first, the record holds the whole transcript.
    */
   parking?: {
     store?: SessionStore
     /** Grace after the last client detaches before parking. Default 2000. */
     parkDelayMs?: number
+    /** Grace given on boot to an execution whose deadline passed while the server
+     * was down (durable stores only — nothing else survives a restart). Default 60000. */
+    expiredGraceMs?: number
     /** Park/resume failures — storage or engine-assembly problems, not session errors. */
     onError?: (error: unknown, context: { sessionId: string; phase: 'park' | 'resume' }) => void
   }
@@ -664,6 +675,7 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
     registry,
     store: options.parking?.store ?? new MemorySessionStore(),
     parkDelayMs: options.parking?.parkDelayMs,
+    expiredGraceMs: options.parking?.expiredGraceMs,
     onError: options.parking?.onError,
     rebuild: (record) => buildRunner(record.config, record.snapshot),
     attachedCount: (sessionId) => bridge.attachedCount(sessionId),

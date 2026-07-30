@@ -19,6 +19,7 @@
     "test": "turbo run test",
     "lint": "oxlint",
     "clean": "turbo run clean",
+    "deploy:guard": "node scripts/deploy-guard.mjs",
     "web": "pnpm --filter @claude-worker/web run dev",
     "server": "pnpm --filter @claude-worker/server run dev",
     "smoke:sandbox": "node --conditions=@claude-worker/source --import @swc-node/register/esm-register smoke/sandbox.ts",

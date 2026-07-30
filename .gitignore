@@ -17,5 +17,6 @@ _docs/
 .roam/
 .roamignore
 
-# Dev-server profile store (examples/provider-server.ts)
+# Dev-server state: the profile store (examples/provider-server.ts) and the default
+# parked-session directory (createFileSessionStore) — the latter holds transcripts.
 .claude-worker/

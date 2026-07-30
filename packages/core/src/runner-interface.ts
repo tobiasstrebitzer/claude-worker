@@ -27,6 +27,9 @@ export type ParkedExecution = {
  * importing a model SDK.
  *
  * Must stay JSON-serializable end to end: a durable store round-trips it verbatim.
+ * "Serializable" here means round-trips *unchanged* — a Date, a Map, or a typed
+ * array inside `state` survives `JSON.stringify` as something else and rehydrates
+ * wrong. Only the in-memory store hides that, by never serializing at all.
  */
 export type RunnerSnapshot = {
   /** Engine that produced it. Rehydrating into a different one is refused. */

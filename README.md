@@ -258,6 +258,36 @@ timeout can't apply twice.
 
 Parked sessions still list, read, and serve their delivered files; attaching to one wakes it.
 
+A park is only as durable as its store. The default is in-memory — it survives a client
+disconnect, not a restart — so a server that parks for days wants the bundled file store:
+
+```ts
+import { createFileSessionStore, createWorkerServer } from '@claude-worker/server'
+
+createWorkerServer({
+  // One JSON file per parked session, adopted on listen(): the executions are re-indexed
+  // and their watchdogs re-armed, so a deploy restart no longer drops parked work.
+  parking: { store: createFileSessionStore({ dir: '/var/lib/claude-worker/parked' }) },
+  // ...
+})
+```
+
+That directory holds each parked session's **whole transcript** in plaintext — treat it like the
+SDK's own `~/.claude/projects`, not like a cache. Credentials never reach it: the record keeps the
+wire config only, and a rebuilt session resolves its provider credentials through
+`createEngineRunner` from the operator's environment, exactly as the first build did. It is
+single-process, like the bundled queue adapter — two servers over one directory would race to
+rebuild the same sessions.
+
+Durability still doesn't make a restart free: a turn actually in flight dies with the process, as
+does a pending permission request, and a running job is left claimed. `pnpm deploy:guard` (i.e.
+`node scripts/deploy-guard.mjs`) asks a live worker whether anything would be lost and exits
+non-zero while the answer is yes, so a deploy script can gate the restart on it:
+
+```bash
+node scripts/deploy-guard.mjs --wait 300 --allow-parked && ./restart-worker
+```
+
 ## Permissions are the sharp edge
 
 `canUseTool` promotes a tool call into a **pending approval** the panel renders; the runner blocks
@@ -313,10 +343,11 @@ stays 100% Anthropic-owned code.
   `mcpServers` and tool policy; gate session creation behind your own auth and use
   `allowedCwdRoots` + `buildRunnerConfig` to clamp what clients may request. (Provider sessions
   are tighter by construction: MCP is declared on the profile, never by the caller.)
-- **Parked sessions are only as durable as their store.** Deferred execution works (below), but
-  the bundled `SessionStore` is in-memory: a park survives a client disconnect, not a server
-  restart. The seam is there for a durable one; nothing durable ships, because the record holds
-  the session's whole transcript and its config.
+- **Parked sessions are only as durable as their store, and single-host either way.** The default
+  `SessionStore` is in-memory (a park survives a client disconnect, not a restart);
+  `createFileSessionStore()` makes it survive both, on one host — the seam is there for a shared
+  backend, and the record holds the session's whole transcript, so where it lands is a decision
+  worth making deliberately.
 
 ## Development
 

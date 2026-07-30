@@ -62,6 +62,15 @@ What's shipped, what's next, and what's still undecided. Status as of 2026-07-30
   `workspace:*` now that `pnpm publish -r` does the packing, which retired the exact-pin scheme,
   both release scripts, and the `check:versions` guard. 0.4.1 is the first release through it.
 
+- **Durable parks** (2026-07-30) — `createFileSessionStore()`: one JSON file per parked session,
+  temp-file+rename writes, adopted by `hydrate()` inside `listen()` so a restart re-indexes the
+  executions and re-arms their watchdogs (no sooner than `parking.expiredGraceMs`, since nothing
+  could have been delivered while the process was down). `toDurableRecord` keeps credentials,
+  injected functions, and SDK options out of the file — all four are Claude-engine fields, and
+  the Claude engine cannot park. The other half of a safe restart is `scripts/deploy-guard.mjs`
+  (`pnpm deploy:guard`), which exits non-zero while a session is mid-turn, awaiting an approval,
+  or parked without durability behind it — a durable store still can't preserve an in-flight turn.
+
 ## Next
 
 1. **Dual-engine as the product shape.** The model-agnostic runner is the new direction — not a
@@ -92,10 +101,11 @@ What's shipped, what's next, and what's still undecided. Status as of 2026-07-30
 4. **Managed sandbox tier-2** — a hosted execution backend (Vercel/E2B) behind the existing
    `ToolExecutor` seam. Deliberately after deferred execution: if a third backend needs no
    runner-loop or protocol change, the seam held.
-5. **Durable `SessionStore` / multi-host sessions** — the seam exists and parked sessions round-
-   trip through it, but only the in-memory store is bundled, so a park survives a disconnect and
-   not a restart. A durable store (and, for Claude-engine sessions, cross-host resume over the
-   SDK's on-disk transcripts) is the remaining half.
+5. **Multi-host sessions** — the durable half landed (`createFileSessionStore`), but it is
+   single-process by construction: two servers over one directory would both hydrate and both
+   rebuild. A shared-backend store (redis/sqlite/a table) with a claim on rebuild, and — for
+   Claude-engine sessions — cross-host resume over the SDK's on-disk transcripts, is what's left.
+   Also unproven against a real provider: `smoke:deferred`, a live park → POST result → finish.
 
 ## Open questions
 
