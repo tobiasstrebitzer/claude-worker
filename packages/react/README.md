@@ -83,6 +83,28 @@ stream doesn't carry yet; events stay authoritative once they arrive.
 The reducer is pure and immutable: same events in, same state out — which is also how it is
 unit-tested. Keep rendering logic out of it.
 
+## Running tool calls in the tab
+
+A provider-engine session can ask the *browser* to execute a sandboxed tool call, so documents the
+user holds locally never reach the server. `useToolCallHost` answers those requests from a mounted
+component, running the code in a QuickJS guest
+([`@claude-worker/sandbox`](https://www.npmjs.com/package/@claude-worker/sandbox), loaded on
+demand):
+
+```tsx
+const { handle } = useClaudeSession(client, sessionId)
+const { executions } = useToolCallHost(handle, {
+  tools: ['eval_script'], // allowlist — anything else the server asks for is refused
+  timeoutMs: 15_000,
+  fetchText: (url) => myGatedFetch(url), // omit and the guest has no network at all
+})
+```
+
+The host must ride **the hook's own `handle`** — the server bridges each call to the first attached
+client, so a second, separately-created handle would sit idle while the real one gets the requests.
+`createToolCallHost` is the same logic without React. Results returned from a tab are untrusted
+input by construction: fine for the user's own data, never a source of server-authoritative state.
+
 ## License
 
 MIT © Tobias Strebitzer — see

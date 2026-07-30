@@ -67,6 +67,21 @@ Two rules matter when implementing one:
 The bundled `InMemoryQueueAdapter` is single-process and non-persistent: jobs and daily counters
 reset on restart. Back the queue with a shared store for anything beyond one trusted host.
 
+### Runs that park
+
+A job whose session is waiting on a deferred execution does not sit and hold a slot. The session
+parks — its state is snapshotted, its runner torn down — and the job goes `parked`, emitting
+`job_parked` with the `executionId` it waits on. It keeps its attempt, its accumulated usage, and
+its place, but frees its concurrency slot and stops its wall-clock clock; `job_resumed` fires when
+the result lands. One worker can therefore have a hundred runs waiting on the world and still run
+only three at a time.
+
+`parked` is not terminal anywhere: `claimNext` never claims one, retention never prunes one, and
+cancelling one discards its snapshot so nothing can wake it. `maxParkedDurationMs` caps total
+parked time across all parks of a run, and `QueueStats.parked` / `JobInfo.parkedAt` /
+`JobInfo.parkedExecutionId` report what is waiting on what. A park that may outlive the process
+needs a durable session store on the server side.
+
 ## Options at a glance
 
 | Option | Default | Effect |

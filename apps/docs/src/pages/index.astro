@@ -1,8 +1,14 @@
 ---
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import Base from '../layouts/Base.astro'
 
 const base = import.meta.env.BASE_URL.replace(/\/$/, '')
 const repo = 'https://github.com/tobiasstrebitzer/claude-worker'
+
+// Read at build time so the hero badge can never drift from what's published.
+const cliPkg = fileURLToPath(new URL('../../../../packages/cli/package.json', import.meta.url))
+const version = (JSON.parse(readFileSync(cliPkg, 'utf8')) as { version: string }).version
 
 const features = [
   {
@@ -10,16 +16,20 @@ const features = [
     body: 'Sessions behave like Claude Code launched in the same directory: same skills, same CLAUDE.md, same MCP config surface, same permission system.',
   },
   {
-    title: 'Typed wire protocol',
-    body: 'One ordered stream of seq-numbered events plus a small command set. Versioned from day one — the protocol is the product boundary.',
-  },
-  {
     title: 'Human-in-the-loop permissions',
     body: 'Tool calls surface as approve/deny cards; the tool blocks until a client decides, with deny-on-timeout. Safe to point at a real checkout.',
   },
   {
+    title: 'Typed wire protocol',
+    body: 'One ordered stream of seq-numbered events plus a small command set. Versioned from day one — the protocol is the product boundary.',
+  },
+  {
     title: 'Embeddable panel components',
     body: 'A styled SessionPanel with streaming transcript, tool-call cards, and composer — or go headless with the hook and reducer.',
+  },
+  {
+    title: 'Two engines, one protocol',
+    body: 'Claude Code via the Agent SDK, or a model-agnostic engine over the AI SDK with capability-scoped tools in a QuickJS sandbox — same client, same panel, same queue.',
   },
   {
     title: 'Attach, replay, resume',
@@ -29,16 +39,23 @@ const features = [
     title: 'Unattended job queue',
     body: 'Schedule one-shot runs with bounded concurrency, token budgets, retries, a wall-clock watchdog, and ordered webhook delivery.',
   },
+  {
+    title: 'Work that outlives the turn',
+    body: 'A session can park on work nothing here is doing — a batch job, a human approving on Monday — and wake days later, mid-turn, as itself.',
+  },
 ]
 
 const packages = [
+  ['claude-worker', 'the turnkey instance: gateway + dashboard, one port'],
   ['@claude-worker/protocol', 'wire protocol types — events, commands, REST shapes'],
-  ['@claude-worker/core', 'the session runner over the Agent SDK'],
+  ['@claude-worker/core', 'both engines behind one Runner interface'],
+  ['@claude-worker/sandbox', 'QuickJS-NG guest for untrusted code'],
   ['@claude-worker/queue', 'one-shot jobs, budgets, webhooks'],
   ['@claude-worker/server', 'HTTP + WebSocket gateway'],
   ['@claude-worker/client', 'typed client for browsers and Node'],
   ['@claude-worker/react', 'headless hook + transcript reducer'],
   ['@claude-worker/ui', 'styled agent-control components'],
+  ['@claude-worker/web', 'the dashboard as prebuilt static files'],
 ]
 ---
 
@@ -51,7 +68,7 @@ const packages = [
       <p
         class="mx-auto mb-6 w-fit rounded-full border border-border bg-surface px-3 py-1 text-[12px] font-medium text-fg-3"
       >
-        v0.1 · MIT · powered by the official Anthropic Agent SDK
+        v{version} · MIT · powered by the official Anthropic Agent SDK
       </p>
       <h1 class="text-balance text-4xl font-bold tracking-tight text-fg-1 sm:text-5xl">
         Claude Code sessions your app can embed, watch, and control
@@ -60,6 +77,14 @@ const packages = [
         claude-worker runs a close-to-real Claude Code session via the Agent SDK and exposes it to
         your host app — a session server, a typed wire protocol, and embeddable panel components
         with approve/deny controls.
+      </p>
+      <div
+        class="mx-auto mt-9 w-fit rounded-lg border border-border bg-code-bg px-5 py-3 font-mono text-[13px] text-fg-2"
+      >
+        npx claude-worker
+      </div>
+      <p class="mx-auto mt-3 text-[13px] text-fg-4">
+        Gateway and dashboard on one port. Nothing to clone.
       </p>
       <div class="mt-8 flex items-center justify-center gap-3">
         <a
@@ -72,11 +97,6 @@ const packages = [
           class="rounded-lg border border-border bg-surface px-5 py-2.5 text-sm font-semibold text-fg-1 transition-colors hover:border-border-strong"
           >GitHub</a
         >
-      </div>
-      <div
-        class="mx-auto mt-10 w-fit rounded-lg border border-border bg-code-bg px-5 py-3 font-mono text-[13px] text-fg-2"
-      >
-        npm install @claude-worker/server @claude-worker/client @claude-worker/ui
       </div>
     </section>
 
@@ -95,9 +115,9 @@ const packages = [
 
     <section class="border-t border-border">
       <div class="mx-auto max-w-6xl px-4 py-16 sm:px-6">
-        <h2 class="text-xl font-bold tracking-tight text-fg-1">Seven focused packages</h2>
+        <h2 class="text-xl font-bold tracking-tight text-fg-1">One instance, nine libraries</h2>
         <p class="mt-2 max-w-2xl text-sm text-fg-3">
-          Use the full stack or just the layers you need — from in-process
+          Run the turnkey instance, or take just the layers you need — from in-process
           <code class="rounded bg-code-bg px-1.5 py-0.5 font-mono text-[12px]">SessionRunner</code>
           to drop-in
           <code class="rounded bg-code-bg px-1.5 py-0.5 font-mono text-[12px]">SessionPanel</code>.

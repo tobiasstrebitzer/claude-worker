@@ -1,14 +1,17 @@
 # @claude-worker/core
 
-The claude-worker session runner: wraps the Agent SDK's `query()` with a push-based input queue,
-promotes `canUseTool` calls into pending approvals, normalizes SDK messages into wire-protocol
-events, and keeps a seq-numbered event log for attach/replay. Pure library, no transport.
+The claude-worker engines, behind one `Runner` interface: `SessionRunner` wraps the Agent SDK's
+`query()` with a push-based input queue, promotes `canUseTool` calls into pending approvals,
+normalizes SDK messages into wire-protocol events, and keeps a seq-numbered event log for
+attach/replay; `AiSdkRunner` does the same for any provider the AI SDK supports. Pure library, no
+transport.
 
 Part of [claude-worker](https://github.com/tobiasstrebitzer/claude-worker). A `SessionRunner`
 behaves like Claude Code launched in the session's directory — same skills, same `CLAUDE.md`, same
-permission system — and emits [`@claude-worker/protocol`](https://www.npmjs.com/package/@claude-worker/protocol)
-events. [`@claude-worker/server`](https://www.npmjs.com/package/@claude-worker/server) bridges
-runners to HTTP + WebSocket; use core directly when you want sessions in-process with no server.
+permission system — and both runners emit
+[`@claude-worker/protocol`](https://www.npmjs.com/package/@claude-worker/protocol) events.
+[`@claude-worker/server`](https://www.npmjs.com/package/@claude-worker/server) bridges runners to
+HTTP + WebSocket; use core directly when you want sessions in-process with no server.
 
 ## Install
 
@@ -20,6 +23,10 @@ Depends on `@anthropic-ai/claude-agent-sdk`, which spawns the official Claude Co
 Node ≥ 22 and a real filesystem. claude-worker implements no Anthropic auth: the SDK/CLI resolves
 credentials from the operator's environment (`ANTHROPIC_API_KEY`, Bedrock/Vertex, or a personal
 `claude login`).
+
+The provider engine additionally wants `ai` (AI SDK v7), your provider package, and — for
+`eval_script` — [`@claude-worker/sandbox`](https://www.npmjs.com/package/@claude-worker/sandbox);
+all optional, and unused if you only run Claude sessions.
 
 ## Usage
 
@@ -74,9 +81,58 @@ Other controls: `interrupt()`, `setPermissionMode(mode)`, `setModel(model?)`, `c
   supported models/slash commands and a context-window snapshot, emitting `capabilities` and
   `context_usage` events; context usage is re-polled after every turn.
 
-Also exported: `InputQueue` (the push-based `AsyncIterable` bridging `sendMessage()` into the
-SDK's streaming prompt) and `normalizeSdkMessage`/`toApiMessage` (SDKMessage → protocol event
-normalization). Tests inject a fake `queryFn` — no real CLI spawn needed.
+## The second engine
+
+`AiSdkRunner` runs the same protocol against any provider the [AI SDK](https://ai-sdk.dev)
+supports — no CLI process, no config directory. `createEngineSession()` assembles one: the model,
+the capability-scoped tool set, and the executor that runs tool calls.
+
+```ts
+import { createEngineSession, QuickJsExecutor } from '@claude-worker/core'
+
+const runner = createEngineSession({
+  config: { ...createSessionRequest, languageModel: anthropic('claude-sonnet-5') },
+  selectExecutor: () => new QuickJsExecutor({ timeoutMs: 15_000 }),
+  capabilities: { webFetch: {} },  // backends, not grants
+})
+```
+
+Two seams matter here:
+
+- **Capabilities are grants, wired separately from backends.** `createToolContext` builds the tool
+  set from what a profile grants (`fs_*`, `eval_script`, `web_search`, `download`, `web_fetch`,
+  `deliver_file`) over what the host actually wired. There is no shell and no host filesystem: the
+  files a session sees are an in-memory scratch VFS. Every tool is typed `sandboxed` or
+  `authoritative`, and only sandboxed calls may leave the server.
+- **`ToolExecutor` decides where code runs.** `QuickJsExecutor` runs it in-process in the
+  [QuickJS guest](https://www.npmjs.com/package/@claude-worker/sandbox); `BrowserBridgeExecutor`
+  ships it to the user's own tab, so client-held documents never reach the server; and
+  `DeferredExecutor` hands the call off to something that will answer later.
+
+## Work that outlives the runner
+
+`DeferredExecutor` dispatches a call and doesn't wait. The runner then **parks**: `park()` returns
+a `RunnerSnapshot`, the process can tear the runner down, and passing that snapshot back as
+`restore` rebuilds the session as itself — same id, same event log, same seq numbering, mid-turn,
+scratch filesystem included.
+
+```ts
+selectExecutor: () => new DeferredExecutor({
+  timeoutMs: 86_400_000,                             // watchdog; a timeout reaches the agent as tool output
+  onDispatch: (call) => enqueueForYourWorkers(call), // call.executionId is the callback address
+})
+```
+
+[`@claude-worker/server`](https://www.npmjs.com/package/@claude-worker/server) drives both halves
+for you — a `SessionStore` plus `POST /executions/:id/result` — but the mechanism is here, and works
+with no server at all.
+
+## Also exported
+
+`InputQueue` (the push-based `AsyncIterable` bridging `sendMessage()` into the SDK's streaming
+prompt), `normalizeSdkMessage`/`toApiMessage` (SDKMessage → protocol event normalization),
+`connectMcpTools` for live MCP over http/sse, and `createWebFetch` with its SSRF guard
+(`isPrivateAddress`). Tests inject a fake `queryFn` — no real CLI spawn needed.
 
 ## License
 

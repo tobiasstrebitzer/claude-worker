@@ -18,7 +18,8 @@ consumes them. Anthropic API message content is modeled structurally (`ApiMessag
 npm install @claude-worker/protocol
 ```
 
-Type-only for most consumers; the single runtime export is `PROTOCOL_VERSION`.
+Type-only for most consumers; the runtime exports are `PROTOCOL_VERSION` and
+`supportsPermissionMode()`.
 
 ## Usage
 
@@ -54,19 +55,32 @@ server reports it in the `attached` (and `queue_attached`) frame so clients can 
 
 **Events (server → client)** — `system_init`, `status_changed`, `capabilities`, `model_changed`,
 `permission_mode_changed`, `context_usage`, `rate_limit`, `assistant_message`, `user_message`,
-`stream_delta`, `turn_result`, `permission_requested`, `permission_resolved`, `sdk_event`
-(forward-compatible passthrough for unmodeled SDK messages), `session_error`, `session_closed`.
+`stream_delta`, `turn_result`, `permission_requested`, `permission_resolved`,
+`execution_dispatched` / `execution_result` / `execution_failed` (tool-execution lifecycle,
+correlated by `executionId`), `file_delivered`, `sdk_event` (forward-compatible passthrough for
+unmodeled SDK messages), `session_error`, `session_closed`.
 
 **Commands (client → server)** — `user_message`, `permission_decision`, `interrupt`,
-`set_permission_mode`, `set_model`, `close`.
+`set_permission_mode`, `set_model`, `tool_call_result` (answering a bridged execution), `close`.
+
+**Other server frames** — `attached`, `event`, `tool_call_request` / `tool_call_canceled` (the
+browser tool bridge: the server asks an attached client to run a *sandboxed* tool call), and
+`protocol_error`.
 
 **REST shapes** — `CreateSessionRequest` / `SessionInfo` and their response wrappers,
-`ResolvePermissionRequest` (the REST counterpart of `permission_decision`), and
-`SdkSessionSummary` for listing the Agent SDK's on-disk sessions to offer resume.
+`ResolvePermissionRequest` (the REST counterpart of `permission_decision`),
+`SdkSessionSummary` for listing the Agent SDK's on-disk sessions to offer resume,
+`ProfileInfo` for what a session may run as, `ListSessionFilesResponse` for a session's
+deliverables, and `SubmitExecutionResultRequest` for delivering a deferred execution's result.
 
-**Job queue** — `CreateJobRequest` / `JobInfo` / `JobEvent` / `QueueStats` and the
-`QueueServerFrame` union for the one-way queue WebSocket, used when the server mounts the
+**Job queue** — `CreateJobRequest` / `JobInfo` / `JobEvent` (including `job_parked` /
+`job_resumed`) / `QueueStats` and the `QueueServerFrame` union for the one-way queue WebSocket,
+used when the server mounts the
 [`@claude-worker/queue`](https://www.npmjs.com/package/@claude-worker/queue) routes.
+
+Two engines ride this one protocol: `SessionInfo.engine` says which (`claude` or `provider`), and
+`supportsPermissionMode(engine, mode)` — a real runtime export, the single source of truth for the
+restriction — is what create forms filter with and the gateway rejects with.
 
 Forward compatibility is deliberate: unknown content blocks fall back to `UnknownBlock`, unions
 the SDK may grow (`apiKeySource`, rate-limit fields) stay `string`, and unmodeled SDK messages

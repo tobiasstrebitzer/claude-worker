@@ -1,10 +1,10 @@
 ---
 title: Packages
-description: The eight packages, two apps, and the one dependency rule that holds them together.
+description: The nine libraries, the instance you run, and the one dependency rule that holds them together.
 order: 1
 ---
 
-## The packages
+## The libraries
 
 | Package | What it is |
 | --- | --- |
@@ -35,26 +35,33 @@ Everything above is a library you embed. This one is a service you run.
 ## The dependency rule
 
 ```text
-              protocol            sandbox
-             /        \          (leaf: either side)
+              protocol                sandbox
+             /        \            (leaf: either side)
    (server side)    (browser side)
-        core           client
-         |               |
-       queue           react
-         |               |
-       server            ui
-                         |
-                        web
+        core            client
+          |               |
+        queue           react
+          |               |
+       server             ui
+          |               |
+          |              web
+          └───── cli ─────┘   (the instance: gateway + prebuilt dashboard)
 ```
 
 `@claude-worker/protocol` depends on nothing and everything depends on it; `@claude-worker/sandbox`
-is the same kind of leaf, usable from either side. The browser side (client / react / ui / apps)
+is the same kind of leaf, usable from either side. The browser side (client / react / ui / web)
 must never import core, server, the Agent SDK, or any model SDK — the wire protocol is the only
 bridge. This rule is what keeps the protocol honest as the product
 boundary: anything a client needs must be expressible as protocol events and commands.
 
+`claude-worker` is where the two sides finally meet, and only because they don't have to touch: it
+depends on `@claude-worker/server` for the gateway and on `@claude-worker/web` for *already-built*
+static files. No browser code is imported, only served.
+
 ## Which package do I need?
 
+- Just running it, on your machine or a box: nothing — `npx claude-worker`. See
+  [Run an instance](/claude-worker/docs/getting-started/run-an-instance/).
 - Embedding a panel in a web app: `@claude-worker/client` + `@claude-worker/ui` (which pulls in
   `react`), against a running `@claude-worker/server`. See
   [Embedding](/claude-worker/docs/guides/embedding/).

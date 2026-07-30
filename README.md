@@ -6,94 +6,61 @@
 
 <p>
   <a href="https://github.com/tobiasstrebitzer/claude-worker/actions/workflows/ci.yml"><img src="https://github.com/tobiasstrebitzer/claude-worker/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
-  <a href="https://www.npmjs.com/package/@claude-worker/core"><img src="https://img.shields.io/npm/v/%40claude-worker%2Fcore?label=npm" alt="npm version" /></a>
+  <a href="https://www.npmjs.com/package/claude-worker"><img src="https://img.shields.io/npm/v/claude-worker?label=npm" alt="npm version" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-black.svg" alt="MIT license" /></a>
   <a href="https://tobiasstrebitzer.github.io/claude-worker/"><img src="https://img.shields.io/badge/docs-github%20pages-black.svg" alt="Documentation" /></a>
   <img src="https://img.shields.io/badge/node-%E2%89%A522-black.svg" alt="Node >= 22" />
 </p>
 
-Run a **close-to-real Claude Code session** programmatically via the
-[Anthropic Agent SDK](https://code.claude.com/docs/en/agent-sdk), and expose it to a host
-application as something it can **embed, watch, and control** — a side-panel that brings Claude
-Code into your app.
+**Claude Code sessions your app can embed, watch, and control.** claude-worker runs a
+close-to-real Claude Code session via the
+[Anthropic Agent SDK](https://code.claude.com/docs/en/agent-sdk) and puts a session server, a
+typed wire protocol, and an approve/deny UI around it — so a browser can drive an agent working
+in a real checkout.
 
-A session created here behaves like Claude Code launched in the same directory: same skills
-(`.claude/skills/`), same `CLAUDE.md`, same MCP config surface, same permission system. The worker
-adds the missing hosting layer: a session server your web app can talk to, a typed wire protocol
-for the message stream, and embeddable panel components with approve/deny controls.
-
-Since 0.3 it also runs a **second, model-agnostic engine** on the same protocol, transport, and
-UI: any provider the [AI SDK](https://ai-sdk.dev) supports, with capability-scoped tools that
-execute in a QuickJS sandbox — server-side or in the user's own browser tab. A profile picks which
-engine a session runs on, so one worker can serve both. See
-[Two engines](#two-engines-claude-code-and-any-provider).
-
-**Documentation: [tobiasstrebitzer.github.io/claude-worker](https://tobiasstrebitzer.github.io/claude-worker/)** —
-quickstart, embedding guide, permissions, job queue, and the full reference. Design docs live in
-[`docs/`](docs/): [architecture](docs/architecture.md), [gotchas](docs/gotchas.md) (the invariants
-that bite, for contributors), and [roadmap](docs/roadmap.md).
-
-## Run an instance
-
-If you just want claude-worker *running* rather than embedded, there is nothing to clone:
+## Run it
 
 ```bash
 npx claude-worker
 ```
 
-That serves the session gateway **and** the full dashboard on one port
-(`http://127.0.0.1:8787`), with parked sessions persisted under `~/.claude-worker`. Add
-`--auth-key <secret>` to protect it: browsers get a login page and a session cookie, services send
-the same secret as `x-claude-worker-key`. Without a key it refuses to bind anything but loopback.
+Gateway **and** dashboard on one port at `http://127.0.0.1:8787` — nothing to clone, no config.
+Point a session at a project directory, give it a prompt, watch the transcript stream, approve or
+deny the tool calls it wants to make.
 
 ```bash
-npx claude-worker --port 8080 --auth-key "$SECRET" \
-  --cwd-root ~/projects --profile me=~/.claude
+# Reachable, protected, and scoped to a directory tree:
+npx claude-worker --host 0.0.0.0 --auth-key "$SECRET" --cwd-root ~/projects
 ```
 
-Anything that doesn't fit on a command line — `authenticate`, `buildRunnerConfig`,
-`createEngineRunner` are functions — goes in a `claude-worker.config.mjs` that default-exports the
-[`createWorkerServer` options](docs/architecture.md); see
-[`examples/claude-worker.config.mjs`](examples/claude-worker.config.mjs). `npx claude-worker guard`
-is the restart guard described under [Work that outlives the turn](#work-that-outlives-the-turn).
+`--auth-key` is one secret over two transports: browsers get a login page and an `HttpOnly`
+cookie, services send the same secret as `x-claude-worker-key`. Without a key the instance
+refuses to bind anything but loopback. Options that are *functions* — `authenticate`,
+`buildRunnerConfig`, `createEngineRunner` — go in a `claude-worker.config.mjs`
+([example](examples/claude-worker.config.mjs)). Full flag surface:
+[Run an instance](https://tobiasstrebitzer.github.io/claude-worker/docs/getting-started/run-an-instance/).
 
-## Packages
+**Docs: [tobiasstrebitzer.github.io/claude-worker](https://tobiasstrebitzer.github.io/claude-worker/)** —
+quickstart, embedding, permissions, profiles, job queue, protocol reference.
 
-Two tiers: the `@claude-worker/*` packages are the libraries you embed, and `claude-worker` is the
-instance you run. Each package has its own README with install and usage details.
+## What it actually gives you
 
-| Package | What it is |
-| --- | --- |
-| [`claude-worker`](packages/cli) | The turnkey instance: gateway + dashboard on one port, shared-secret auth, durable parking, and the deploy guard. `npx claude-worker`. |
-| [`@claude-worker/protocol`](packages/protocol) | The wire protocol: session events, commands, REST shapes. Dependency-free, browser-safe. **This is the product boundary** — versioned from day one. |
-| [`@claude-worker/core`](packages/core) | The engines. `SessionRunner` wraps `query()`, owns the streaming input, promotes `canUseTool` calls into pending approvals, normalizes SDK messages into protocol events, keeps a seq-numbered event log for attach/replay. `AiSdkRunner` is the model-agnostic engine over the AI SDK's `ToolLoopAgent`, with tool execution behind a swappable `ToolExecutor` seam. Both implement one `Runner` interface. Pure library, no transport. |
-| [`@claude-worker/sandbox`](packages/sandbox) | The untrusted-code boundary: a QuickJS-NG WebAssembly guest with an in-memory scratch filesystem and a by-value host bridge. Deny-by-default — no filesystem, network, or timers unless granted — with interpreter-enforced memory and time limits. Leaf package; the same guest runs server-side and in a browser tab. |
-| [`@claude-worker/server`](packages/server) | The gateway: HTTP + WebSocket, session registry (create/list/attach/interrupt/kill), pluggable auth hook, optional job-queue routes. Runs anywhere Node ≥22 runs. |
-| [`@claude-worker/queue`](packages/queue) | The job queue: remote services schedule one-shot runs; jobs execute as ordinary sessions with bounded concurrency and token budgets, delivering progress + completion via webhooks. Pluggable `QueueAdapter` (in-memory bundled; redis/bullmq/pubsub can implement the same contract). |
-| [`@claude-worker/client`](packages/client) | Typed protocol client for browsers and Node: REST + WebSocket attach with auto-reconnect and replay-from-last-seq. Zero runtime deps. |
-| [`@claude-worker/react`](packages/react) | The headless React layer: `useClaudeSession` hook + pure transcript reducer. No styling opinion. |
-| [`@claude-worker/ui`](packages/ui) | The styled agent-control component library: session panel (status bar, streaming transcript, tool-call cards, permission prompts, composer), session list, and the underlying primitives. Tailwind v4 + Base UI + cva; light/dark via tokens. See `packages/ui/README.md` for consumer wiring. |
-| [`@claude-worker/web`](packages/web) | The dashboard as prebuilt static files (session list, create/resume flow, live panel, jobs, profiles, settings), for serving from your own host. Zero runtime deps — `dashboardDir` is just a path to `index.html` + hashed assets. |
-| `apps/docs` | This documentation site (Astro), deployed to GitHub Pages on push to `master`. |
+- **Close-to-real sessions.** Same skills (`.claude/skills/`), same `CLAUDE.md`, same MCP surface,
+  same permission system as Claude Code launched in that directory.
+- **Human-in-the-loop permissions.** A tool call not covered by the session's permission mode
+  becomes a pending approval; the tool blocks until someone decides, deny-on-timeout by default.
+  This is what makes it safe to point at a real checkout.
+- **Attach, replay, resume.** One ordered stream of seq-numbered events. Clients reconnect and
+  replay from their last seen seq; closed sessions resume from the SDK's on-disk store with the
+  prior transcript backfilled.
+- **Two engines on one protocol.** Claude Code, or any provider the [AI SDK](https://ai-sdk.dev)
+  supports — same client, same panel, same queue.
+- **Unattended runs.** A job queue with bounded concurrency, token budgets, retries, a wall-clock
+  watchdog, and webhooks.
+- **Work that outlives the turn.** A session can park on something nothing here is doing — a batch
+  job, a human approving on Monday — and wake days later, mid-turn, as itself.
 
-## Quickstart
-
-```bash
-pnpm install
-pnpm server   # unauthenticated dev gateway on 127.0.0.1:8787 (loopback only!)
-pnpm web      # dashboard on http://localhost:5191, proxying /v1 to the gateway
-```
-
-Create a session in the web UI: point it at a project directory, give it a prompt (plain text or
-a skill invocation like `/verify-content 42`), pick a permission mode, and watch the live
-transcript. Tool calls not covered by the permission mode surface as approve/deny cards; the tool
-blocks until you decide (deny-on-timeout after 5 minutes by default). Closed or restarted-away
-sessions can be resumed from the SDK's on-disk store (“Resume a previous session”) — the server
-backfills the prior transcript as replay events.
-
-### Embedding in your own app
-
-Server side (the host app supplies the authenticator — the worker has no auth story of its own):
+## Embed it in your app
 
 ```ts
 import { createWorkerServer } from '@claude-worker/server'
@@ -106,13 +73,11 @@ const worker = createWorkerServer({
 await worker.listen(8787)
 ```
 
-Client side:
-
 ```tsx
 import { ClaudeWorkerClient } from '@claude-worker/client'
 import { SessionPanel } from '@claude-worker/ui' // Tailwind v4 host: see packages/ui/README.md
 
-const client = new ClaudeWorkerClient({ baseUrl: 'https://my-app/worker/v1', headers: { ... } })
+const client = new ClaudeWorkerClient({ baseUrl: 'https://my-app/worker/v1', headers: { … } })
 const session = await client.createSession({
   cwd: '/srv/checkouts/my-repo',
   prompt: '/verify-content 42',
@@ -122,30 +87,70 @@ const session = await client.createSession({
 <SessionPanel client={client} sessionId={session.id} />
 ```
 
-Or use the headless layer (`useClaudeSession` from `@claude-worker/react`) with your own
-rendering, consume the stream directly (`client.attach(sessionId).on('event', …)`), or go one
-level lower and use `SessionRunner` from `@claude-worker/core` in-process with no server at all.
+There's a rung for every level of control: the styled `SessionPanel`, the headless
+`useClaudeSession` hook, the raw event stream (`client.attach(id).on('event', …)`), or
+`SessionRunner` from `@claude-worker/core` in-process with no server at all. See the
+[embedding guide](https://tobiasstrebitzer.github.io/claude-worker/docs/guides/embedding/).
 
-## Job queue
+## Two engines: Claude Code, and any provider
 
-Enable the queue in server settings to let remote services schedule unattended runs:
+A **profile** is what a session runs as — and it picks the engine. The default is Claude Code via
+the Agent SDK. `engine: 'provider'` runs the model-agnostic engine instead: no CLI process, no
+config directory, any AI SDK provider.
 
 ```ts
-const worker = createWorkerServer({
+createWorkerServer({
+  profiles: [
+    { name: 'ada', configDir: '/home/ada/.claude' },                 // Claude Code
+    {
+      name: 'kimi',
+      engine: 'provider',
+      // apiKeyEnv is a variable NAME. No credential is stored here or put on the wire.
+      provider: { id: 'moonshotai', model: 'kimi-k3', apiKeyEnv: 'MOONSHOT_API_KEY' },
+      session: { capabilities: ['web_fetch', 'deliver_file'], mcpServers: ['deepwiki'] },
+    },
+  ],
+  // The one place a model SDK and its credentials are resolved — the server package imports
+  // neither. May be async, e.g. for a per-session MCP connect.
+  createEngineRunner: ({ config, profile, bridge }) => createEngineSession({ /* … */ }),
+})
+```
+
+The provider engine trades ambient authority for a sandbox:
+
+- **Capability-scoped tools.** No shell, no host filesystem. `fs_*` operate on an in-memory
+  scratch VFS; `web_search`, `download`, `web_fetch` and `deliver_file` exist only when the
+  profile grants them, and a session request may narrow that set but never widen it.
+- **Untrusted code runs in QuickJS — possibly not on your machine.** `eval_script` is the one
+  *sandboxed* tool, and it can execute in the **user's own browser tab** over the WS bridge, so
+  client-held documents never reach the server. Everything else is *authoritative*: server-side,
+  server credentials, never bridged. The split is enforced in types.
+- **Different vocabulary, honestly.** A provider session runs `default`, `bypassPermissions` and
+  `dontAsk`; asking for `acceptEdits`/`plan`/`auto` is a 400 rather than a silent coercion. The
+  model list is whatever the operator declared, and CLI-only affordances (resumable SDK sessions,
+  context/rate-limit telemetry, setting sources) simply don't exist — the dashboard hides them,
+  keying off `SessionInfo.engine`.
+
+Both engines implement one `Runner` interface and speak the same protocol, so client, React layer,
+panel and queue are unchanged either way. Profiles also scope *who may run as what*:
+`allowedProfiles` on the authenticate principal, because each person under their own profile is
+each person using their own account. See
+[Profiles](https://tobiasstrebitzer.github.io/claude-worker/docs/guides/profiles/).
+
+## Unattended runs, and runs that park
+
+```ts
+createWorkerServer({
   authenticate,
   queue: {
     maxConcurrency: 2,          // concurrent job sessions
     sessionTokenLimit: 200_000, // tokens per job (input+output+cache); exceeding kills the run
     dailyTokenLimit: 2_000_000, // global budget per UTC day; queued jobs held once exhausted
-    maxJobDurationMs: 1_800_000,          // wall-clock watchdog: kills runs a stuck CLI would wedge
-    retention: { maxAgeMs: 86_400_000 },  // expire terminal jobs (in-memory grows unboundedly otherwise)
-    // adapter: myRedisAdapter, // defaults to the bundled in-memory adapter
+    maxJobDurationMs: 1_800_000,          // wall-clock watchdog against a wedged CLI
+    retention: { maxAgeMs: 86_400_000 },  // expire terminal jobs
   },
 })
 ```
-
-Schedule and control jobs with the client SDK (or plain REST — `POST/GET/DELETE /v1/jobs`,
-`GET /v1/queue`):
 
 ```ts
 const job = await client.createJob({
@@ -153,116 +158,19 @@ const job = await client.createJob({
   webhook: { url: 'https://my-app.test/hooks/claude', headers: { authorization: '…' } },
   attempts: 3, // failed (not canceled) runs re-queue with exponential backoff
 })
-// job_started → job_progress (per assistant message / permission request) → job_retrying (on a
-// failed attempt with attempts left) → job_completed arrive at the webhook; poll
-// client.getJob(job.id) or attach(job.sessionId) to watch live.
-
-// Or stream the whole queue over WS (`/v1/queue/ws`) instead of polling:
-const queueHandle = client.attachQueue()
-queueHandle.on('event', (e) => console.log(e.type, e.job.id))
-queueHandle.on('stats', (stats) => console.log(stats.running, 'running'))
 ```
 
-A job is one unattended run: the session executes the prompt, the first run result completes the
-job (`result`, cumulative `usage`, cost), and the session is closed. Job sessions are ordinary
-registry sessions, so the web dashboard can watch them stream in real time. The in-memory adapter
-is single-process and non-persistent — jobs and daily counters reset on restart; implement
-`QueueAdapter` against a shared store for anything beyond one trusted host.
+A job is one unattended run, executing as an ordinary registry session — so the dashboard watches
+it stream live. `job_started` → `job_progress` → `job_completed` reach the webhook, or stream the
+whole queue over `/v1/queue/ws`.
 
-## Profiles: what a session runs as
-
-A **profile** is what a session runs as. Most commonly it names a Claude Code config directory:
-sessions and jobs run under one, and the spawned CLI gets it as `CLAUDE_CONFIG_DIR` — that directory's settings, memory, skills, and
-whatever credentials the SDK resolves from it. The canonical case is a shared machine where
-several team members each keep their own config dir:
+When a tool call can't answer in the next few seconds, the session **parks**: it snapshots, the
+runner is torn down, and the run resumes when the result arrives — same id, same transcript, same
+seq numbering, mid-turn.
 
 ```ts
-const worker = createWorkerServer({
-  authenticate: async (req) => {
-    const user = await verifyMyAppToken(req.headers.authorization)
-    return user && { allowedProfiles: user.profiles } // scope per caller, e.g. ['toby']
-  },
-  profiles: [
-    { name: 'toby', configDir: '/Users/atomic/toby/.claude', defaults: { model: 'opus' } },
-    { name: 'dan',  configDir: '/Users/atomic/dan/.claude' },
-  ],
-})
-```
-
-Profiles are declared at startup, and read-only over the API unless you pass a `profileStore`
-(below). With more than one declared, every session/job create must name its `profile`;
-with exactly one it's implicit — and when the option is unset, a `default` profile is
-auto-created from `$CLAUDE_CONFIG_DIR`/`~/.claude`, so single-operator setups need nothing.
-`defaults` fill unset request fields (not enforced caps). **Scope profiles per caller** with
-`allowedProfiles` on the authenticate principal: each person running under their own profile is
-each person using their own account — a free-for-all picker over other people's accounts is
-account pooling (see the red lines below). Profiles never touch the credential chain: an
-`ANTHROPIC_API_KEY` in the server env still wins for every profile, and each session's
-`apiKeySource` shows what it actually used.
-
-**Managing them from the dashboard.** Pass a `profileStore` (a small seam; in-memory and
-JSON-file stores are bundled) to let the Profiles view create, edit, and delete profiles. It is
-doubly opt-in: the operator wires the store *and* the principal carries `canManageProfiles`.
-Profiles declared in server options stay immutable — they're code — and a managed Claude profile
-must point inside `allowedConfigDirRoots`, because naming a config directory is choosing which
-credential store a session runs on.
-
-## Two engines: Claude Code, and any provider
-
-A profile also picks the **engine**. The default is Claude Code via the Agent SDK, everything
-above. `engine: 'provider'` instead runs the model-agnostic engine — no CLI process, no config
-directory — against any provider the AI SDK supports:
-
-```ts
-createWorkerServer({
-  profiles: [
-    { name: 'toby', configDir: '/Users/atomic/toby/.claude' },      // Claude Code
-    {
-      name: 'kimi',
-      engine: 'provider',
-      // apiKeyEnv is a variable NAME. No credential is ever stored here or put on the wire.
-      provider: { id: 'moonshotai', model: 'kimi-k3', apiKeyEnv: 'MOONSHOT_API_KEY' },
-      session: { capabilities: ['web_fetch', 'deliver_file'], mcpServers: ['deepwiki'] },
-    },
-  ],
-  // The one place a model SDK and its credentials are resolved — the server package
-  // imports neither. May be async, e.g. for a per-session MCP connect.
-  createEngineRunner: ({ config, profile, bridge }) => createEngineSession({ /* ... */ }),
-})
-```
-
-What it gets you, and what it costs:
-
-- **Capability-scoped tools, no ambient authority.** There is no shell and no host filesystem.
-  `fs_*` operate on an in-memory scratch VFS; `web_search`, `download`, `web_fetch`, and
-  `deliver_file` exist only when the profile grants them, and a session request may narrow that
-  set but never widen it.
-- **Untrusted code runs in a sandbox — possibly not yours.** `eval_script` is the one *sandboxed*
-  tool, and it can execute in the **user's own browser tab** over the WS bridge, so client-held
-  documents never reach the server. Everything else is *authoritative*: server-side, with server
-  credentials, never bridged. That split is enforced in types, and it's why a client can't bring
-  its own MCP server to a provider session.
-- **Different vocabulary, honestly.** `permissionMode` is Claude Code's: a provider session runs
-  `default`, `bypassPermissions`, and `dontAsk`, and asking for `acceptEdits`/`plan`/`auto` under
-  one is a 400 rather than a silent coercion. There's no `supportedModels()`, so the model list is
-  whatever the operator declared. CLI-only affordances (resumable SDK sessions, context-usage and
-  rate-limit telemetry, setting sources) simply don't exist — and the dashboard hides them,
-  keying off `SessionInfo.engine`.
-
-Both engines implement one `Runner` interface and speak the same protocol, so the client, the
-React layer, the panel, and the job queue are unchanged either way.
-
-## Work that outlives the turn
-
-Some tool calls can't answer in the next few seconds — a batch job, a remote worker, a human who
-has to approve something on Monday. Instead of holding a process open, the provider engine
-**parks**: it snapshots the session, the server tears the live runner down, and the run resumes
-when the result arrives.
-
-```ts
-// The executor that hands work off and doesn't wait for it.
 selectExecutor: () => new DeferredExecutor({
-  timeoutMs: 86_400_000,                        // the watchdog; a timeout reaches the agent as tool output
+  timeoutMs: 86_400_000,                             // watchdog; a timeout reaches the agent as tool output
   onDispatch: (call) => enqueueForYourWorkers(call), // call.executionId is the callback address
 })
 ```
@@ -274,132 +182,102 @@ curl -X POST $SERVER/v1/executions/$EXECUTION_ID/result \
   -d '{"status":"ok","output":{"type":"json","value":{"rows":128}}}'
 ```
 
-The session comes back **as itself** — same id, same transcript, same seq numbering, mid-turn —
-and the agent continues with that as the tool's output. A queued job parks the same way: it gives
-up its concurrency slot, stops its wall-clock budget, and emits `job_parked` / `job_resumed`, so
-one worker can have a hundred runs waiting on the world and still only run three at a time. A
-failed result (including the watchdog's timeout) is ordinary tool output the agent adapts to, not
-a crashed session, and results are applied idempotently by `executionId` — a delivery racing the
-timeout can't apply twice.
+A parked job frees its concurrency slot and stops its wall-clock budget, so one worker can have a
+hundred runs waiting on the world and still only run three at a time. Failed results (the
+watchdog's timeout included) are ordinary tool output the agent adapts to, not a crashed session,
+and delivery is idempotent by `executionId`. `npx claude-worker` parks durably under
+`~/.claude-worker` by default; embedded hosts opt in with
+`parking: { store: createFileSessionStore({ dir }) }` — that directory holds whole transcripts in
+plaintext, so treat it like `~/.claude/projects`, not like a cache.
 
-Parked sessions still list, read, and serve their delivered files; attaching to one wakes it.
-
-A park is only as durable as its store. The default is in-memory — it survives a client
-disconnect, not a restart — so a server that parks for days wants the bundled file store:
-
-```ts
-import { createFileSessionStore, createWorkerServer } from '@claude-worker/server'
-
-createWorkerServer({
-  // One JSON file per parked session, adopted on listen(): the executions are re-indexed
-  // and their watchdogs re-armed, so a deploy restart no longer drops parked work.
-  parking: { store: createFileSessionStore({ dir: '/var/lib/claude-worker/parked' }) },
-  // ...
-})
-```
-
-That directory holds each parked session's **whole transcript** in plaintext — treat it like the
-SDK's own `~/.claude/projects`, not like a cache. Credentials never reach it: the record keeps the
-wire config only, and a rebuilt session resolves its provider credentials through
-`createEngineRunner` from the operator's environment, exactly as the first build did. It is
-single-process, like the bundled queue adapter — two servers over one directory would race to
-rebuild the same sessions.
-
-Durability still doesn't make a restart free: a turn actually in flight dies with the process, as
-does a pending permission request, and a running job is left claimed. `claude-worker guard` asks a
-live worker whether anything would be lost and exits non-zero while the answer is yes, so a deploy
-script can gate the restart on it:
+A restart is still not free: a turn in flight dies with the process, as does a pending approval.
+`claude-worker guard` asks a live instance whether anything would be lost and exits non-zero while
+the answer is yes:
 
 ```bash
-npx claude-worker guard --wait 300 --allow-parked && ./restart-worker
+npx claude-worker guard --wait 300 --allow-parked && systemctl restart claude-worker
 ```
 
-It needs no checkout and doesn't care what started the worker — point `--url` at any instance, and
-authenticate with `--token` (sent as `Authorization: Bearer`) or `--header name=value` for a host
-whose `authenticate` hook reads something else. In this repo, `pnpm deploy:guard` runs it from
-source.
+## Packages
 
-## Permissions are the sharp edge
+Two tiers: `@claude-worker/*` are the libraries you embed, `claude-worker` is the instance you
+run. Each package has its own README.
 
-`canUseTool` promotes a tool call into a **pending approval** the panel renders; the runner blocks
-that tool until a client resolves it, with deny-on-timeout by default. Hosts choose per session:
-`dontAsk` for unattended runs of trusted, allowlisted-tool skills vs interactive approval for
-anything touching state. This is what makes it safe to point at a real checkout. Sessions can also
-be constrained with `allowedTools`/`disallowedTools` and `allowedCwdRoots` on the server.
+| Package | What it is |
+| --- | --- |
+| [`claude-worker`](packages/cli) | The turnkey instance: gateway + dashboard on one port, shared-secret auth, durable parking, restart guard. |
+| [`@claude-worker/protocol`](packages/protocol) | The wire protocol — events, commands, REST shapes. Dependency-free, browser-safe. **The product boundary**, versioned from day one. |
+| [`@claude-worker/core`](packages/core) | The engines. `SessionRunner` (Agent SDK) and `AiSdkRunner` (any provider) behind one `Runner` interface, with tool execution on a swappable `ToolExecutor` seam and `park()`/`restore`. No transport. |
+| [`@claude-worker/sandbox`](packages/sandbox) | The untrusted-code boundary: QuickJS-NG WASM guest, in-memory scratch VFS, by-value host bridge, interpreter-enforced memory and time limits. Runs server-side or in a tab. |
+| [`@claude-worker/queue`](packages/queue) | The job queue: concurrency, token budgets, retries, watchdog, retention, webhooks. Pluggable `QueueAdapter` (in-memory bundled). |
+| [`@claude-worker/server`](packages/server) | The gateway: HTTP + WebSocket, session registry, auth hook, profiles, job routes, browser tool bridge, parked-session storage. |
+| [`@claude-worker/client`](packages/client) | Typed client for browsers and Node: REST + WS attach with auto-reconnect and replay-from-last-seq. Zero runtime deps. |
+| [`@claude-worker/react`](packages/react) | Headless React: `useClaudeSession` + a pure transcript reducer. No styling opinion. |
+| [`@claude-worker/ui`](packages/ui) | Styled agent-control components: session panel, transcript, tool-call cards, permission prompts, composer. Tailwind v4 + Base UI + cva. |
+| [`@claude-worker/web`](packages/web) | The dashboard as prebuilt static files, for serving from your own host. Zero runtime deps. |
 
 ## Auth & Anthropic's terms
 
 **claude-worker performs no Anthropic authentication of its own — by design.** It spawns the
-official Agent SDK, which spawns the official Claude Code CLI, which resolves whatever credentials
-the *operator's* environment provides: `ANTHROPIC_API_KEY`, Bedrock/Vertex platform auth, or the
-operator's own stored `claude login`. claude-worker never implements claude.ai OAuth, never reads,
-stores, or proxies tokens, and never touches `~/.claude` credentials. Which credentials your
-deployment uses — and whether that use complies with
-[Anthropic's terms](https://www.anthropic.com/legal/consumer-terms) — is the operator's
-responsibility.
+official Agent SDK, which spawns the official CLI, which resolves whatever credentials the
+*operator's* environment provides: `ANTHROPIC_API_KEY`, Bedrock/Vertex, or the operator's own
+stored `claude login`. It never implements claude.ai OAuth, never reads, stores or proxies tokens,
+and never touches `~/.claude` credentials.
 
-What we understand the lines to be (not legal advice):
+Our good-faith reading, not legal advice: **an API key (or Bedrock/Vertex) is the supported path**
+for anything that is a service — unattended runs, multi-user deployments, anything you expose to
+others — because Anthropic's Agent SDK docs are explicit that third-party developers may not offer
+claude.ai login or subscription rate limits in their products. Set `ANTHROPIC_API_KEY` and use
+`requireApiKey: true` to **fail closed** on subscription credentials. Your own subscription for
+your own single-user use (the equivalent of running `claude -p` yourself) is the one case where
+those may be appropriate; the server allows it with a one-time notice, and every session reports
+its provenance as `apiKeySource`. **The compliance and legal posture of this project is still
+under review** — with our own specialists and, where appropriate, Anthropic — so do your own
+diligence. [Full discussion](https://tobiasstrebitzer.github.io/claude-worker/docs/guides/auth/).
 
-- **API key (or Bedrock/Vertex) is the supported path** for anything that is a service:
-  unattended/scheduled runs, multi-user deployments, anything you expose to others. Anthropic's
-  Agent SDK docs are explicit that third-party developers may not offer claude.ai login or
-  subscription rate limits in their products; the Consumer Terms restrict automated access except
-  via API key. Set `ANTHROPIC_API_KEY` in the server environment, and consider
-  `requireApiKey: true` on `createWorkerServer` to **fail closed**: sessions that initialize on
-  subscription credentials (`apiKeySource: 'oauth'`) are terminated with an error.
-- **Your own subscription, your own single-user use** (the equivalent of running `claude -p`
-  yourself) is the one case where subscription credentials may be appropriate. Without
-  `requireApiKey`, the server allows it but logs a one-time notice; the auth provenance is also
-  visible per session as `apiKeySource` on `SessionInfo` and the `system_init` event.
-
-> ⚠️ **Compliance status: under review.** We are still working through greenlighting the
-> compliance and legal posture of this project — with our own legal/compliance specialists and,
-> where appropriate, explicit approval from Anthropic (whose Agent SDK docs provide for
-> previously-approved exceptions). Until that concludes, treat the guidance above as our
-> good-faith reading, not a settled position, and do your own diligence.
-
-**Red lines for contributors** (PRs crossing these will be rejected): no claude.ai OAuth flows or
+**Red lines for contributors** (PRs crossing these are rejected): no claude.ai OAuth flows or
 login UI, no extraction/storage/forwarding of subscription tokens, no spoofing of Claude Code's
-client identity, no multi-account pooling or rate-limit circumvention of any kind. The auth layer
-stays 100% Anthropic-owned code.
+client identity, no multi-account pooling or rate-limit circumvention. The auth layer stays 100%
+Anthropic-owned code.
 
 ## Honest constraints
 
-- **Hosting: no serverless.** The SDK spawns the Claude Code CLI as a long-running subprocess with
-  filesystem state. Edge/serverless functions cannot host this. Realistic targets: a VM, a
-  container with min-instances, any Node ≥22 host with a real filesystem.
-- **Sessions are single-host in V1.** Transcripts live on the server's local disk (the SDK
-  default); resume works across process restarts on the same host via `resume: sdkSessionId`.
+- **No serverless.** The SDK spawns the CLI as a long-running subprocess with filesystem state.
+  Realistic targets: a VM, a container with min-instances, any Node ≥22 host with a real disk.
+- **Sessions are single-host.** Transcripts live on the server's local disk; resume works across
+  restarts on the same host via `resume: sdkSessionId`.
 - **The server trusts its host app.** For Claude sessions `CreateSessionRequest` accepts
-  `mcpServers` and tool policy; gate session creation behind your own auth and use
-  `allowedCwdRoots` + `buildRunnerConfig` to clamp what clients may request. (Provider sessions
-  are tighter by construction: MCP is declared on the profile, never by the caller.)
-- **Parked sessions are only as durable as their store, and single-host either way.** The default
-  `SessionStore` is in-memory (a park survives a client disconnect, not a restart);
-  `createFileSessionStore()` makes it survive both, on one host — the seam is there for a shared
-  backend, and the record holds the session's whole transcript, so where it lands is a decision
-  worth making deliberately.
+  `mcpServers` and tool policy — gate creation behind your own auth and clamp with
+  `allowedCwdRoots` + `buildRunnerConfig`. (Provider sessions are tighter by construction: MCP is
+  declared on the profile, never by the caller.)
+- **Parking is single-host either way.** The file store survives a restart, but two servers over
+  one directory would race to rebuild the same sessions.
 
-## Development
+## Contributing
 
 ```bash
-pnpm typecheck   # tsgo (TypeScript 7 native preview) across the workspace
-pnpm test        # vitest (core runner, server integration, transcript reducer)
+pnpm install
+pnpm server   # unauthenticated dev gateway on 127.0.0.1:8787 (loopback only!)
+pnpm web      # dashboard on http://localhost:5191, proxying /v1 to the gateway
+
+pnpm typecheck   # tsgo (TypeScript 7 native preview)
+pnpm test        # vitest — core runner, server integration, transcript reducer
 pnpm lint        # oxlint
-pnpm build       # tsdown -> build/ (packages), vite (apps)
 ```
 
-Workspace layout follows the source-link convention: apps and tests resolve packages straight to
-TS source via the `@claude-worker/source` export condition (`node --conditions=@claude-worker/source`
-+ swc-node in dev); `build/` output exists only for publishing.
+Dev never builds: apps and tests resolve packages straight to TS source via the
+`@claude-worker/source` export condition, and `build/` exists only for publishing. Start with
+[`docs/architecture.md`](docs/architecture.md) for the package map and dependency rule, and
+[`docs/gotchas.md`](docs/gotchas.md) for the invariants that bite.
+[`CONTRIBUTING.md`](CONTRIBUTING.md) has the rest; security reports go through
+[`SECURITY.md`](SECURITY.md), not public issues.
 
 ## Status
 
-0.4.x — early but real: both engines, protocol, server, client, headless react layer, styled UI,
-web dashboard, and the job queue are all in and tested. 0.3 added the model-agnostic engine, the
-QuickJS sandbox (`@claude-worker/sandbox`, first release), browser-bridged tool execution, and
-profile management; 0.4 adds deferred execution — sessions that park on work nothing here is
-doing and wake on `POST /executions/:id/result`. Expect the protocol to evolve
-(`PROTOCOL_VERSION` guards breaking changes; it is at 4). See the
-[roadmap](docs/roadmap.md) for what's shipped, what's next, and the open questions (naming,
-compliance posture).
+**0.5.0** — early but real. Both engines, the protocol, server, client, headless React layer,
+styled UI, dashboard, job queue, sandbox, and deferred execution are all in and tested. 0.5 added
+the turnkey `npx claude-worker` instance, the dashboard as a published package, and durable parks.
+Expect the protocol to keep evolving — `PROTOCOL_VERSION` guards breaking changes and is at 4. See
+the [roadmap](docs/roadmap.md) for what's next.
+
+MIT © Tobias Strebitzer

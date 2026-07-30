@@ -9,6 +9,11 @@ claude-worker runs a **close-to-real Claude Code session** programmatically via 
 application as something it can **embed, watch, and control** — a side-panel that brings Claude
 Code into your app.
 
+It comes in two shapes. `npx claude-worker` is a
+[turnkey instance](/claude-worker/docs/getting-started/run-an-instance/): gateway plus the full
+dashboard on one port, nothing to clone. The `@claude-worker/*` packages are the libraries behind
+it, for [embedding](/claude-worker/docs/guides/embedding/) the same machinery in your own product.
+
 ## Why it exists
 
 Claude Code is a terminal program. The Agent SDK lets you run the same engine from Node, but it
@@ -33,22 +38,50 @@ Pass `settingSources: ['user', 'project']` when creating a session and it picks 
 repo's skills and `CLAUDE.md` — a prompt can be plain text or a skill invocation like
 `/verify-content 42`.
 
+## Two engines, one protocol
+
+A [profile](/claude-worker/docs/guides/profiles/) decides what a session runs as, including which
+**engine** it runs on:
+
+- **`claude`** (the default) — Claude Code via the Agent SDK, everything described above: a real
+  CLI process against a real checkout, with the full permission system.
+- **`provider`** — a model-agnostic engine over the [AI SDK](https://ai-sdk.dev), for any provider
+  it supports. No CLI process and no config directory, and no ambient authority either: tools are
+  capability-scoped, the filesystem is an in-memory scratch VFS, and untrusted code runs in a
+  QuickJS sandbox that can execute **in the user's own browser tab** instead of on the server.
+
+Both implement one `Runner` interface and speak the same protocol, so the client, the React layer,
+the panel and the job queue are unchanged either way. One worker can serve both.
+
+## Beyond the live session
+
+- [**Permissions**](/claude-worker/docs/guides/permissions/) — a tool call the session's mode
+  doesn't cover becomes a pending approval, and the tool blocks until a client decides.
+- [**Job queue**](/claude-worker/docs/guides/job-queue/) — unattended one-shot runs with bounded
+  concurrency, token budgets, retries, a watchdog, and webhooks.
+- **Deferred execution** — a session can *park* on work nothing here is doing (a batch job, a
+  human approving on Monday) and resume days later, mid-turn, as itself. See
+  [job queue](/claude-worker/docs/guides/job-queue/#deferred-execution) and
+  [deployment](/claude-worker/docs/guides/deployment/#restarts-parked-sessions-and-the-deploy-guard).
+
 ## The stack at a glance
 
-Seven packages, two apps, one dependency rule:
+Nine libraries, one instance, one dependency rule:
 
 | Package | What it is |
 | --- | --- |
+| `claude-worker` | The turnkey instance: gateway + dashboard on one port, shared-secret auth, durable parking, restart guard. |
 | `@claude-worker/protocol` | The wire protocol: session events, commands, REST shapes. Dependency-free, browser-safe. The product boundary. |
-| `@claude-worker/core` | `SessionRunner`: wraps the SDK's `query()`, promotes `canUseTool` into pending approvals, keeps a seq-numbered event log. No transport. |
+| `@claude-worker/core` | The engines — `SessionRunner` (Agent SDK) and `AiSdkRunner` (any provider) behind one `Runner` interface. No transport. |
+| `@claude-worker/sandbox` | The untrusted-code boundary: a QuickJS-NG WASM guest with interpreter-enforced limits. Runs server-side or in a tab. |
 | `@claude-worker/queue` | Job queue: one-shot unattended runs with concurrency limits, token budgets, and webhooks. |
-| `@claude-worker/server` | HTTP + WebSocket gateway: session registry, pluggable auth hook, optional job-queue routes. |
+| `@claude-worker/server` | HTTP + WebSocket gateway: session registry, pluggable auth hook, profiles, optional job routes. |
 | `@claude-worker/client` | Typed protocol client for browsers and Node. Zero runtime deps. |
 | `@claude-worker/react` | Headless React layer: `useClaudeSession` + a pure transcript reducer. |
 | `@claude-worker/ui` | Styled agent-control components: `SessionPanel`, transcript, permission prompts, composer. |
+| `@claude-worker/web` | The dashboard as prebuilt static files, for serving from your own host. |
 
-Plus `packages/web` (a full session-control dashboard). The browser side never imports the server
-side; the protocol is the only bridge. See
+The browser side never imports the server side; the protocol is the only bridge. See
 [Packages](/claude-worker/docs/reference/packages/) for the full map.
 
 ## Honest constraints
@@ -56,8 +89,9 @@ side; the protocol is the only bridge. See
 - **Hosting: no serverless.** The SDK spawns the Claude Code CLI as a long-running subprocess
   with filesystem state. Edge/serverless functions cannot host this. Realistic targets: a VM, a
   container with min-instances, any Node ≥22 host with a real filesystem.
-- **Sessions are single-host in V1.** Transcripts live on the server's local disk (the SDK
-  default); resume works across process restarts on the same host via `resume: sdkSessionId`.
+- **Sessions are single-host.** Transcripts live on the server's local disk (the SDK default);
+  resume works across process restarts on the same host via `resume: sdkSessionId`. Parked
+  sessions survive a restart with the bundled file store, but one directory serves one process.
 - **The server trusts its host app.** `CreateSessionRequest` accepts `mcpServers` and tool
   policy; gate session creation behind your own auth and use `allowedCwdRoots` +
   `buildRunnerConfig` to clamp what clients may request. See
@@ -67,8 +101,10 @@ side; the protocol is the only bridge. See
 
 ## Where to go next
 
-- [Quickstart](/claude-worker/docs/getting-started/quickstart/) — run the dev server and
-  dashboard, create your first session.
+- [Run an instance](/claude-worker/docs/getting-started/run-an-instance/) — `npx claude-worker`,
+  the flags, and the config file.
+- [Quickstart](/claude-worker/docs/getting-started/quickstart/) — the workspace from source, a
+  first session, a minimal embed.
 - [Embedding](/claude-worker/docs/guides/embedding/) — put the panel in your own app.
 - [Permissions](/claude-worker/docs/guides/permissions/) — the sharp edge that makes it safe to
   point at a real checkout.

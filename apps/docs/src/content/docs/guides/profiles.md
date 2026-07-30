@@ -13,11 +13,11 @@ use case is a shared machine where several team members each keep their own conf
 createWorkerServer({
   authenticate: async (req) => {
     const user = await verifyMyAppToken(req.headers.authorization)
-    return user && { allowedProfiles: user.profiles } // e.g. ['toby']
+    return user && { allowedProfiles: user.profiles } // e.g. ['ada']
   },
   profiles: [
-    { name: 'toby', configDir: '/Users/atomic/toby/.claude', defaults: { model: 'opus' } },
-    { name: 'dan', configDir: '/Users/atomic/dan/.claude' },
+    { name: 'ada', configDir: '/home/ada/.claude', defaults: { model: 'opus' } },
+    { name: 'sam', configDir: '/home/sam/.claude' },
   ],
 })
 ```
@@ -31,7 +31,7 @@ the `createEngineRunner` hook, which is where the operator resolves the model an
 
 ```ts
 profiles: [
-  { name: 'toby', configDir: '/Users/atomic/toby/.claude' },
+  { name: 'ada', configDir: '/home/ada/.claude' },
   {
     name: 'kimi',
     engine: 'provider',
@@ -120,7 +120,7 @@ createWorkerServer({
     const user = await verifyMyAppToken(req.headers.authorization)
     return user && { allowedProfiles: user.profiles, canManageProfiles: user.isAdmin }
   },
-  profiles: [{ name: 'toby', configDir: '/Users/atomic/toby/.claude' }], // still code, still immutable
+  profiles: [{ name: 'ada', configDir: '/home/ada/.claude' }], // still code, still immutable
   profileStore: createFileProfileStore('/var/lib/claude-worker/profiles.json'),
   allowedConfigDirRoots: ['/Users'], // omit to allow managed provider profiles only
 })

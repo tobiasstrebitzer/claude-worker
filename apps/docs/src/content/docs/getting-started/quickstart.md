@@ -1,7 +1,7 @@
 ---
 title: Quickstart
-description: Run the dev gateway and dashboard, create a first session, then embed the panel in your own app.
-order: 2
+description: Create a first session, run the workspace from source, then embed the panel in your own app.
+order: 3
 ---
 
 ## Prerequisites
@@ -12,20 +12,10 @@ order: 2
   Bedrock/Vertex, or your own `claude login`). See
   [Auth & Anthropic's terms](/claude-worker/docs/guides/auth/).
 
-## Just run an instance
-
-If you want claude-worker running rather than embedded, there is nothing to clone:
-
-```bash
-npx claude-worker
-```
-
-The gateway and the full dashboard come up together on `http://127.0.0.1:8787`, with parked
-sessions persisted under `~/.claude-worker`. Add `--auth-key <secret>` to protect it — browsers get
-a login page and a session cookie, services send the same secret as a header — and note that
-without a key it refuses to bind anything but loopback. See the
-[`claude-worker` package](https://www.npmjs.com/package/claude-worker) for the full flag and
-config-file surface.
+If you only want claude-worker *running*, you don't need this page at all: `npx claude-worker`
+serves the gateway and the dashboard together, covered in
+[Run an instance](/claude-worker/docs/getting-started/run-an-instance/). What follows is for
+developing against the source, or embedding the libraries in your own app.
 
 ## Run the workspace
 

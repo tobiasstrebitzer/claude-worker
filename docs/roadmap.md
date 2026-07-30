@@ -1,132 +1,92 @@
 # Roadmap & open questions
 
-What's shipped, what's next, and what's still undecided. Status as of 2026-07-30.
-
-## Releases
-
-| Version | npm | Notes |
-| --- | --- | --- |
-| 0.1.0 – 0.2.1 | published | V1 runner/protocol/server/client/panel, then UI + queue. |
-| 0.3.0 | published | Model-agnostic engine, `@claude-worker/sandbox` (first release), profiles. |
-| 0.4.0 | **never published** | Tagged at `19c9d15`, but the manual release ran aground on the pin/restore dance. npm went 0.3.0 → 0.4.1; the tag stays where it is. |
-| 0.4.1 | published 2026-07-30 | Deferred execution (protocol v4). First release published from CI under trusted publishing. |
-| 0.4.2 | published 2026-07-30 | Protocol errors render inside `SessionPanel`; workflow actions on current majors. First release through the pnpm-owned workflow — `workspace:*` rewriting verified in the published tarballs. |
-| 0.5.0 | 2026-07-30 | **Two new packages.** `claude-worker` (unscoped) is the turnkey instance — `npx claude-worker` serves gateway + dashboard on one port with shared-secret cookie auth — and `@claude-worker/web` publishes the dashboard as prebuilt static files. Durable parks (`createFileSessionStore`) and the server's `fallback` option ship here too. `apps/web` → `packages/web`; `scripts/deploy-guard.mjs` → `claude-worker guard`. Protocol unchanged at v4. First release of the two new names is published by hand — trusted publishing can only be configured on a package that already exists. |
+What's shipped, what's next, and what's still undecided. Status as of 2026-07-30 (0.5.0).
 
 ## Shipped
 
-- **V1 runner + protocol + server + client + panel** (2026-07-20) — the original acceptance
-  scope: create/attach/interrupt a live session, approve/deny from the panel, resume after
-  reload, prove embeddability with a second consumer.
-- **Styled UI layer + web dashboard** (2026-07-20) — `packages/ui`, `packages/web`, headless
-  `@claude-worker/react`, resume backfill, SessionInfo rollups.
-- **Model switching, slash commands, prompt-area composer** (2026-07-21).
-- **Job queue + hardening** (2026-07-21) — budgets, retries, watchdog, retention, live
-  `/queue/ws` stream, question prompts + `questionBehavior` policies.
-- **Session telemetry** (2026-07-21) — `context_usage` / `rate_limit` / `permission_mode_changed`
-  promoted first-class; StatusBar usage rings (render nothing, never 0%, until data arrives —
-  API-key sessions may never emit rate-limit events); model + permission-mode selects.
-- **Profiles** (2026-07-22) — named Claude Code config dirs (`CLAUDE_CONFIG_DIR` per session):
-  server-declared with per-profile defaults, required-unless-single on create, auto-detected
-  `default` from `~/.claude`, `allowedProfiles` scoping on the auth principal, `GET /profiles`
-  (+ `/profiles/:name` config snapshot), dashboard Profiles list/detail + pickers on both
-  create forms.
-- **Permission-mode fixes** (2026-07-22) — `allowDangerouslySkipPermissions` passthrough so
-  live sessions can switch into `bypassPermissions` (smoke-verified CLI refusal without it);
-  `dontAsk` added to the mode select; `protocol_error` frames surfaced (`onProtocolError` →
-  SessionPanel toast); pre-session model list synced to the CLI's current lineup.
-- **SDK 0.3 + bypass policy** (2026-07-22) — agent-sdk `^0.2.86` → `^0.3.217` (bundled CLI now
-  reports the current model lineup; `canUseTool` gained `requestId`, `SessionMessage` gained
-  `parent_agent_id` — tests updated, protocol mirrors unchanged); `disableBypassPermissions`
-  server policy (403 explicit mode, strip the capability, refuse the WS switch); per-job
-  bypass opt-in on the schedule form.
-
-- **Model-agnostic runtime** (2026-07-29, branch `feat/model-agnostic-runtime`) — `AiSdkRunner`
-  (AI SDK v7 ToolLoopAgent, streamed: per-token `stream_delta` + per-step messages) behind the
-  shared `Runner` interface; provider profiles +
-  `createEngineRunner`; QuickJS sandbox package with browser-bridged execution; capability-scoped
-  tools (`fs_*`, `eval_script`, `web_search`, `download`, `web_fetch` with SSRF guard + model
-  digest, `deliver_file` → `file_delivered` + `GET /sessions/:id/files` routes + download card);
-  live MCP over http/sse (`connectMcpTools`, DeepWiki-verified `smoke:mcp`). Protocol v3.
-
-- **Deferred execution** (2026-07-29) — a session can now park on work nothing here is doing:
-  `DeferredExecutor` + per-call `describe()` on the executor seam, `Runner.park()` →
-  `RunnerSnapshot` → `restore` (same id, same event log, same seq numbering, mid-turn),
-  `SessionParkManager` + the `SessionStore` seam in the server, `POST /executions/:id/result`
-  with idempotent-by-`executionId` application, an execution watchdog whose timeout reaches the
-  agent as ordinary tool output, and `parked` job runs that free their concurrency slot and stop
-  their wall-clock budget (`job_parked` / `job_resumed`, `maxParkedDurationMs`). Parked sessions
-  stay readable and downloadable from their snapshot; attaching wakes them. Protocol v4.
-
-- **Release pipeline** (2026-07-30) — a `v*` tag publishes all packages from CI under npm
-  trusted publishing (OIDC, no NPM_TOKEN, automatic provenance). Inter-package deps went back to
-  `workspace:*` now that `pnpm publish -r` does the packing, which retired the exact-pin scheme,
-  both release scripts, and the `check:versions` guard. 0.4.1 is the first release through it.
-
-- **Durable parks** (2026-07-30, released in 0.5.0) —
-  `createFileSessionStore()`: one JSON file per parked session,
-  temp-file+rename writes, adopted by `hydrate()` inside `listen()` so a restart re-indexes the
-  executions and re-arms their watchdogs (no sooner than `parking.expiredGraceMs`, since nothing
-  could have been delivered while the process was down). `toDurableRecord` keeps credentials,
-  injected functions, and SDK options out of the file — all four are Claude-engine fields, and
-  the Claude engine cannot park. The other half of a safe restart is `claude-worker guard`
-  (`pnpm deploy:guard`), which exits non-zero while a session is mid-turn, awaiting an approval,
-  or parked without durability behind it — a durable store still can't preserve an in-flight turn.
-
-- **Turnkey instance** (2026-07-30, released in 0.5.0) — `claude-worker` (unscoped) is a new package:
-  `npx claude-worker` runs the gateway *and* the dashboard on one port, with durable parking on by
-  default, a `claude-worker.config.mjs` for the options that are functions, and `claude-worker
-  guard` (which replaced `scripts/deploy-guard.mjs`). Single-origin is the load-bearing part: a tab
-  cannot put a header on a WebSocket handshake, so a same-origin cookie is the only credential it
-  can present on a session attach — hence `--auth-key`, one secret over two transports (login-page
-  cookie for browsers, header for services), with an explicit `Origin` check because upgrades are
-  exempt from CORS, and a Host allowlist against DNS rebinding on the unauthenticated loopback
-  default. Enabled by a new `fallback` option on the server for requests outside `basePath`.
-  `apps/web` moved to `packages/web` (all three release invariants only agree under `packages/`)
-  and is now published itself, as prebuilt static files with zero runtime deps.
+- **Runner + protocol + server + client + panel** — create/attach/interrupt a live session,
+  approve/deny from the panel, resume after a reload, and a second consumer proving
+  embeddability. One ordered stream of seq-numbered events; `PROTOCOL_VERSION` guards breaking
+  changes.
+- **Styled UI layer + web dashboard** — `@claude-worker/ui`, the dashboard, headless
+  `@claude-worker/react` (hook + pure transcript reducer), resume backfill, `SessionInfo`
+  rollups.
+- **Model switching, slash commands, prompt-area composer.**
+- **Job queue + hardening** — token budgets, retries with backoff, a wall-clock watchdog,
+  retention, a live `/queue/ws` stream, and question prompts with `questionBehavior` policies.
+- **Session telemetry** — `context_usage`, `rate_limit` and `permission_mode_changed` promoted to
+  first-class events; usage rings in the status bar; model and permission-mode selects.
+- **Permission-mode completeness** — `bypassPermissions` passthrough for live sessions, `dontAsk`,
+  `protocol_error` frames surfaced as panel toasts, and the `disableBypassPermissions` server
+  policy (403 on an explicit mode, capability stripped, WS switch refused).
+- **Profiles** — named Claude Code config dirs applied as `CLAUDE_CONFIG_DIR` per session, with
+  per-profile defaults, required-unless-single on create, an auto-detected `default` from
+  `~/.claude`, `allowedProfiles` scoping on the auth principal, and a config-snapshot view.
+  Later: profile *management* (`profileStore` seam with memory + JSON-file stores,
+  `canManageProfiles` on the principal, `allowedConfigDirRoots` bounding managed Claude profiles,
+  create/edit/delete in the dashboard). Startup-declared profiles stay immutable — they're code.
+- **Model-agnostic runtime** — `AiSdkRunner` (AI SDK v7, streamed: per-token `stream_delta` plus
+  per-step messages) behind the shared `Runner` interface; provider profiles built through
+  `createEngineRunner`; the QuickJS sandbox package with browser-bridged execution;
+  capability-scoped tools (`fs_*`, `eval_script`, `web_search`, `download`, `web_fetch` with an
+  SSRF guard, `deliver_file` → `file_delivered` + `GET /sessions/:id/files`); live MCP over
+  http/sse.
+- **Dual-engine surfaces** — `SessionInfo.engine` reported by each runner and
+  `supportsPermissionMode` as the single source of truth for the restriction (forms filter, the
+  gateway 400s, startup refuses a bad profile default); operator-declared `provider.models`
+  driving the model picker; CLI-only affordances hidden for provider profiles. Session grants live
+  on the profile (`capabilities` / `mcpServers` / `instructions`), with a request able to narrow
+  but never widen, and client-supplied MCP refused for provider sessions.
+- **Deferred execution** — a session can park on work nothing here is doing: `DeferredExecutor`
+  plus per-call `describe()` on the executor seam, `Runner.park()` → `RunnerSnapshot` → `restore`
+  (same id, same event log, same seq numbering, mid-turn), `SessionParkManager` and the
+  `SessionStore` seam in the server, `POST /executions/:id/result` applied idempotently by
+  `executionId`, and a watchdog whose timeout reaches the agent as ordinary tool output. Parked
+  job runs free their concurrency slot and stop their wall-clock budget (`job_parked` /
+  `job_resumed`, `maxParkedDurationMs`); parked sessions stay readable and downloadable from their
+  snapshot, and attaching wakes one.
+- **Durable parks** — `createFileSessionStore()`: one JSON file per parked session, temp-file +
+  rename writes, adopted by `hydrate()` inside `listen()` so a restart re-indexes the executions
+  and re-arms their watchdogs (no sooner than `parking.expiredGraceMs`, since nothing could have
+  been delivered while the process was down). The record deliberately excludes credentials,
+  injected functions and SDK options. The other half of a safe restart is `claude-worker guard`,
+  which exits non-zero while a session is mid-turn, awaiting an approval, or parked without
+  durability behind it — a durable store still cannot preserve an in-flight turn.
+- **Turnkey instance** — `npx claude-worker` runs the gateway *and* the dashboard on one port,
+  durable parking on by default, a `claude-worker.config.mjs` for the options that are functions,
+  and `claude-worker guard`. Single-origin is the load-bearing part: a tab cannot put a header on
+  a WebSocket handshake, so a same-origin cookie is the only credential it can present on an
+  attach — hence `--auth-key`, one secret over two transports, with an explicit `Origin` check
+  (upgrades are exempt from CORS) and a Host allowlist against DNS rebinding on the
+  unauthenticated loopback default. The dashboard is published as prebuilt static files with zero
+  runtime deps.
 
 ## Next
 
-1. **Dual-engine as the product shape.** The model-agnostic runner is the new direction — not a
-   side experiment. Both engines (Claude Code via the Agent SDK, and the AI SDK runner) as
-   cleanly co-equal options, aligned with the web UI.
-   *Done (2026-07-29):* engine-aware create forms and session surfaces — `SessionInfo.engine`
-   reported by each runner, `supportsPermissionMode` as the single source of truth for the
-   restriction (forms filter, gateway 400s, startup refuses a bad profile default), operator-
-   declared `provider.models` driving the model picker, CLI-only affordances (resumable SDK
-   sessions, setting sources, bypass pre-authorization, the config-dir card) hidden for provider
-   profiles; `createEngineRunner` may now be async, which unblocks per-session MCP connects.
-   Also done: session grants on the profile (`session.capabilities` / `mcpServers` /
-   `instructions`), with `CreateSessionRequest.capabilities` narrowing but never widening (400
-   otherwise), MCP named-not-configured on the wire, and client-supplied MCP refused for provider
-   sessions.
-   Also done: profile management (`profileStore` seam with memory + JSON-file stores,
-   `canManageProfiles` on the principal, `allowedConfigDirRoots` bounding managed Claude
-   profiles, create/edit/delete in the dashboard). Startup-declared profiles stay immutable.
-   *Left:* nothing structural — the dual-engine work is feature-complete for M4.5.
-2. **Shared-backend `QueueAdapter`** (BullMQ or plain redis) — the reason the adapter contract
+1. **Shared-backend `QueueAdapter`** (BullMQ or plain redis) — the reason the adapter contract
    exists. `claimNext` must stay atomic (BullMQ free; raw redis needs LMOVE/Lua) and honor
    `nextRunAt` (BullMQ delayed jobs); daily counters map to `INCRBY` on a dated key with TTL.
-   Caveat: JobQueue assumes the claiming process runs the job — multi-worker deployments need a
+   Caveat: `JobQueue` assumes the claiming process runs the job — multi-worker deployments need a
    claim-lease/heartbeat so a dead worker doesn't strand jobs in `running`, and webhook ordering
    is per-process.
-3. **Promote remaining `sdk_event` passthroughs** UIs care about: tool progress, task/subagent
-   events, todo lists.
-4. **Managed sandbox tier-2** — a hosted execution backend (Vercel/E2B) behind the existing
+2. **Promote the remaining `sdk_event` passthroughs** UIs care about: tool progress,
+   task/subagent events, todo lists.
+3. **Managed sandbox tier-2** — a hosted execution backend (Vercel/E2B) behind the existing
    `ToolExecutor` seam. Deliberately after deferred execution: if a third backend needs no
    runner-loop or protocol change, the seam held.
-5. **Multi-host sessions** — the durable half landed (`createFileSessionStore`), but it is
+4. **Multi-host sessions** — the durable half landed (`createFileSessionStore`), but it is
    single-process by construction: two servers over one directory would both hydrate and both
-   rebuild. A shared-backend store (redis/sqlite/a table) with a claim on rebuild, and — for
-   Claude-engine sessions — cross-host resume over the SDK's on-disk transcripts, is what's left.
-   Also unproven against a real provider: `smoke:deferred`, a live park → POST result → finish.
+   rebuild. What's left is a shared-backend store (redis/sqlite/a table) with a claim on rebuild
+   and, for Claude-engine sessions, cross-host resume over the SDK's on-disk transcripts. Also
+   unproven against a real provider: a live park → POST result → finish smoke.
+
+## Non-goals
+
+Settled, not open for relitigation: serverless hosting (the SDK spawns a long-running subprocess
+with filesystem state), multi-tenant SaaS, and claude.ai authentication of any kind.
 
 ## Open questions
 
-- **Naming.** `claude-worker` says "queue worker"; the product is a session runner/remote
-  control. Also: "claude" in an npm scope needs care re Anthropic trademark guidelines. Decide
-  before or shortly after the repo goes public.
 - **Compliance posture.** Legal/compliance review of the auth stance is in progress — see
-  README "Auth & Anthropic's terms". Keep that section honest as it settles.
-- **Small:** the Jobs schedule form's cwd input is React-controlled with localStorage state;
-  automation-driven `fill` won't change it (fine for humans).
+  [Auth & Anthropic's terms](https://tobiasstrebitzer.github.io/claude-worker/docs/guides/auth/).
+  That section stays honest as things settle.
