@@ -1,0 +1,11 @@
+# SwiftPM build products (agents use suffixed scratch paths too)
+.build/
+.build-*/
+# XcodeGen output — regenerate with `xcodegen generate`
+*.xcodeproj
+# Generated from project.yml's `info.properties` — edit that, not this
+App/Info.plist
+# Xcode user state
+xcuserdata/
+.swiftpm/
+DerivedData/

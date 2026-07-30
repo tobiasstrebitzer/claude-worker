@@ -1,0 +1,836 @@
+import Foundation
+
+/// Swift mirror of `@claude-worker/protocol` (packages/protocol/src/index.ts).
+///
+/// Kept in lockstep with the TypeScript source of truth — when the wire protocol
+/// changes there, `PROTOCOL_VERSION` bumps and this file must follow. Decoding is
+/// deliberately lenient: an event type (or a payload shape) this version doesn't
+/// model becomes `.unknown` instead of failing the stream, matching the protocol's
+/// "extend the protocol, don't parse client-side" contract.
+///
+/// Keys are spelled explicitly per type: claude-worker's own types use camelCase,
+/// while Anthropic API mirrors (`ApiMessage`, content blocks) use snake_case.
+/// Never decode with a global key-conversion strategy.
+public enum WorkerProtocol {
+  /// Mirror of PROTOCOL_VERSION. Compare against `AttachedFrame.protocolVersion`.
+  public static let version = 4
+}
+
+// MARK: - Session lifecycle
+
+public enum SessionStatus: String, Codable, Sendable {
+  case starting
+  case running
+  case awaitingApproval = "awaiting_approval"
+  case idle
+  case parked
+  case failed
+  case closed
+}
+
+public enum PermissionMode: String, Codable, Sendable, CaseIterable {
+  case `default`
+  case acceptEdits
+  case bypassPermissions
+  case plan
+  case dontAsk
+  case auto
+}
+
+// MARK: - API message content (structural mirror of Anthropic message shapes)
+
+public struct ToolResultPart: Codable, Sendable, Equatable {
+  public let type: String
+  public let text: String?
+
+  public init(type: String, text: String?) {
+    self.type = type
+    self.text = text
+  }
+}
+
+public enum ToolResultContent: Sendable, Equatable {
+  case text(String)
+  case parts([ToolResultPart])
+
+  /// Flattened text, mirroring the reference reducer's `blockText`.
+  public var joinedText: String {
+    switch self {
+    case .text(let value): return value
+    case .parts(let parts):
+      return parts.compactMap { $0.text }.filter { !$0.isEmpty }.joined(separator: "\n")
+    }
+  }
+}
+
+extension ToolResultContent: Codable {
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.singleValueContainer()
+    if let value = try? container.decode(String.self) {
+      self = .text(value)
+    } else {
+      self = .parts(try container.decode([ToolResultPart].self))
+    }
+  }
+
+  public func encode(to encoder: Encoder) throws {
+    var container = encoder.singleValueContainer()
+    switch self {
+    case .text(let value): try container.encode(value)
+    case .parts(let parts): try container.encode(parts)
+    }
+  }
+}
+
+public struct ToolResultBlock: Sendable, Equatable {
+  public let toolUseId: String
+  public let content: ToolResultContent?
+  public let isError: Bool?
+
+  public init(toolUseId: String, content: ToolResultContent?, isError: Bool?) {
+    self.toolUseId = toolUseId
+    self.content = content
+    self.isError = isError
+  }
+}
+
+public enum ContentBlock: Sendable, Equatable {
+  case text(String)
+  case thinking(String)
+  case toolUse(id: String, name: String, input: JSONValue)
+  case toolResult(ToolResultBlock)
+  /// Forward-compatible fallback for block types this protocol version doesn't model.
+  case unknown(type: String, raw: JSONValue)
+}
+
+extension ContentBlock: Decodable {
+  private enum CodingKeys: String, CodingKey {
+    case type, text, thinking, id, name, input
+    case toolUseId = "tool_use_id"
+    case content
+    case isError = "is_error"
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    let type = try container.decode(String.self, forKey: .type)
+    do {
+      switch type {
+      case "text":
+        self = .text(try container.decode(String.self, forKey: .text))
+      case "thinking":
+        // Encrypted thinking arrives signature-only: `thinking` may be absent or ''.
+        self = .thinking(try container.decodeIfPresent(String.self, forKey: .thinking) ?? "")
+      case "tool_use":
+        self = .toolUse(
+          id: try container.decode(String.self, forKey: .id),
+          name: try container.decode(String.self, forKey: .name),
+          input: try container.decodeIfPresent(JSONValue.self, forKey: .input) ?? .null
+        )
+      case "tool_result":
+        self = .toolResult(
+          ToolResultBlock(
+            toolUseId: try container.decode(String.self, forKey: .toolUseId),
+            content: try container.decodeIfPresent(ToolResultContent.self, forKey: .content),
+            isError: try container.decodeIfPresent(Bool.self, forKey: .isError)
+          ))
+      default:
+        self = .unknown(type: type, raw: (try? JSONValue(from: decoder)) ?? .null)
+      }
+    } catch {
+      self = .unknown(type: type, raw: (try? JSONValue(from: decoder)) ?? .null)
+    }
+  }
+}
+
+public enum MessageContent: Sendable, Equatable {
+  case text(String)
+  case blocks([ContentBlock])
+
+  /// Normalized block list, mirroring the reference reducer's `contentToBlocks`.
+  public var asBlocks: [ContentBlock] {
+    switch self {
+    case .text(let value): return [.text(value)]
+    case .blocks(let blocks): return blocks
+    }
+  }
+}
+
+extension MessageContent: Decodable {
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.singleValueContainer()
+    if let value = try? container.decode(String.self) {
+      self = .text(value)
+    } else {
+      self = .blocks(try container.decode([ContentBlock].self))
+    }
+  }
+}
+
+public struct ApiUsage: Codable, Sendable, Equatable {
+  public let inputTokens: Int?
+  public let outputTokens: Int?
+  public let cacheCreationInputTokens: Int?
+  public let cacheReadInputTokens: Int?
+
+  private enum CodingKeys: String, CodingKey {
+    case inputTokens = "input_tokens"
+    case outputTokens = "output_tokens"
+    case cacheCreationInputTokens = "cache_creation_input_tokens"
+    case cacheReadInputTokens = "cache_read_input_tokens"
+  }
+
+  public init(
+    inputTokens: Int? = nil, outputTokens: Int? = nil,
+    cacheCreationInputTokens: Int? = nil, cacheReadInputTokens: Int? = nil
+  ) {
+    self.inputTokens = inputTokens
+    self.outputTokens = outputTokens
+    self.cacheCreationInputTokens = cacheCreationInputTokens
+    self.cacheReadInputTokens = cacheReadInputTokens
+  }
+}
+
+public struct ApiMessage: Decodable, Sendable, Equatable {
+  /// 'user' | 'assistant'; kept as String for forward compatibility.
+  public let role: String
+  public let content: MessageContent
+  public let model: String?
+  public let stopReason: String?
+  public let usage: ApiUsage?
+
+  private enum CodingKeys: String, CodingKey {
+    case role, content, model, usage
+    case stopReason = "stop_reason"
+  }
+
+  public init(
+    role: String, content: MessageContent, model: String? = nil,
+    stopReason: String? = nil, usage: ApiUsage? = nil
+  ) {
+    self.role = role
+    self.content = content
+    self.model = model
+    self.stopReason = stopReason
+    self.usage = usage
+  }
+}
+
+// MARK: - Permission requests
+
+public struct PermissionRequest: Decodable, Sendable, Equatable, Identifiable {
+  public let id: String
+  public let toolName: String
+  public let input: JSONValue
+  public let toolUseId: String
+  /// Full prompt sentence from the SDK, e.g. "Claude wants to read foo.txt".
+  public let title: String?
+  /// Short noun phrase for the tool action, e.g. "Read file".
+  public let displayName: String?
+  public let description: String?
+  public let decisionReason: String?
+  /// If raised from within a subagent, that subagent's id.
+  public let agentId: String?
+  /// Epoch ms after which the server resolves it via its timeout policy.
+  public let expiresAt: Double?
+
+  public init(
+    id: String, toolName: String, input: JSONValue, toolUseId: String,
+    title: String? = nil, displayName: String? = nil, description: String? = nil,
+    decisionReason: String? = nil, agentId: String? = nil, expiresAt: Double? = nil
+  ) {
+    self.id = id
+    self.toolName = toolName
+    self.input = input
+    self.toolUseId = toolUseId
+    self.title = title
+    self.displayName = displayName
+    self.description = description
+    self.decisionReason = decisionReason
+    self.agentId = agentId
+    self.expiresAt = expiresAt
+  }
+}
+
+/// 'client' | 'timeout' | 'policy'; kept as String so a new source never breaks decoding.
+public typealias PermissionDecisionSource = String
+
+public enum PermissionBehavior: String, Codable, Sendable {
+  case allow
+  case deny
+}
+
+// MARK: - User questions (the AskUserQuestion tool)
+
+public struct UserQuestionOption: Decodable, Sendable, Equatable {
+  public let label: String
+  public let description: String?
+  public let preview: String?
+}
+
+public struct UserQuestion: Decodable, Sendable, Equatable {
+  public let question: String
+  public let header: String
+  public let options: [UserQuestionOption]
+  public let multiSelect: Bool?
+}
+
+/// The AskUserQuestion tool's input shape, for rendering a question form from a
+/// `PermissionRequest` whose `toolName` is "AskUserQuestion". Decode via
+/// `request.input.decoded(as: UserQuestionInput.self)`.
+public struct UserQuestionInput: Decodable, Sendable, Equatable {
+  public let questions: [UserQuestion]
+}
+
+public enum QuestionBehavior: String, Codable, Sendable {
+  case ask
+  case auto
+  case deny
+}
+
+// MARK: - Capabilities (models / slash commands)
+
+public struct ModelOption: Decodable, Sendable, Equatable, Identifiable {
+  /// Model id for createSession.model / set_model.
+  public let value: String
+  public let displayName: String
+  public let description: String?
+
+  public var id: String { value }
+
+  public init(value: String, displayName: String, description: String? = nil) {
+    self.value = value
+    self.displayName = displayName
+    self.description = description
+  }
+}
+
+public struct SlashCommandInfo: Decodable, Sendable, Equatable, Identifiable {
+  /// Command name without the leading slash.
+  public let name: String
+  public let description: String?
+  public let argumentHint: String?
+  public let aliases: [String]?
+
+  public var id: String { name }
+
+  public init(
+    name: String, description: String? = nil, argumentHint: String? = nil, aliases: [String]? = nil
+  ) {
+    self.name = name
+    self.description = description
+    self.argumentHint = argumentHint
+    self.aliases = aliases
+  }
+}
+
+// MARK: - Usage telemetry
+
+public struct ContextUsageCategory: Decodable, Sendable, Equatable {
+  public let name: String
+  public let tokens: Int
+  /// Often a CLI theme token name ('inactive', ...), not a CSS color — validate before styling.
+  public let color: String
+
+  public init(name: String, tokens: Int, color: String) {
+    self.name = name
+    self.tokens = tokens
+    self.color = color
+  }
+}
+
+public struct ContextUsage: Decodable, Sendable, Equatable {
+  public let categories: [ContextUsageCategory]
+  public let totalTokens: Int
+  public let maxTokens: Int
+  /// Used share of the window, 0–100.
+  public let percentage: Double
+  public let model: String?
+
+  public init(
+    categories: [ContextUsageCategory], totalTokens: Int, maxTokens: Int,
+    percentage: Double, model: String? = nil
+  ) {
+    self.categories = categories
+    self.totalTokens = totalTokens
+    self.maxTokens = maxTokens
+    self.percentage = percentage
+    self.model = model
+  }
+}
+
+/// Emitted only for claude.ai subscription sessions — API-key sessions may never
+/// produce one, so clients must render nothing (not 0%) until data arrives.
+public struct RateLimitInfo: Decodable, Sendable, Equatable {
+  /// 'allowed' | 'allowed_warning' | 'rejected' — kept as String, the SDK union may grow.
+  public let status: String
+  /// 'five_hour' | 'seven_day' | ... — kept as String, the SDK union may grow.
+  public let rateLimitType: String?
+  /// Used share of the window, 0–100. Absent = unknown, never 0.
+  public let utilization: Double?
+  /// Epoch **seconds** when the window resets.
+  public let resetsAt: Double?
+  public let isUsingOverage: Bool?
+
+  public init(
+    status: String, rateLimitType: String? = nil, utilization: Double? = nil,
+    resetsAt: Double? = nil, isUsingOverage: Bool? = nil
+  ) {
+    self.status = status
+    self.rateLimitType = rateLimitType
+    self.utilization = utilization
+    self.resetsAt = resetsAt
+    self.isUsingOverage = isUsingOverage
+  }
+}
+
+// MARK: - Tool execution
+
+/// 'server' | 'browser' | 'managed' | 'remote'; kept as String (advisory, for display).
+public typealias ToolExecutionBackend = String
+
+public enum ToolExecutionOutput: Sendable, Equatable {
+  case text(String)
+  case json(JSONValue)
+}
+
+extension ToolExecutionOutput: Codable {
+  private enum CodingKeys: String, CodingKey { case type, value }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    switch try container.decode(String.self, forKey: .type) {
+    case "text":
+      self = .text(try container.decode(String.self, forKey: .value))
+    default:
+      self = .json(try container.decodeIfPresent(JSONValue.self, forKey: .value) ?? .null)
+    }
+  }
+
+  public func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    switch self {
+    case .text(let value):
+      try container.encode("text", forKey: .type)
+      try container.encode(value, forKey: .value)
+    case .json(let value):
+      try container.encode("json", forKey: .type)
+      try container.encode(value, forKey: .value)
+    }
+  }
+}
+
+// MARK: - Session events (server -> client)
+
+public struct SystemInitEvent: Decodable, Sendable, Equatable {
+  public let sdkSessionId: String
+  public let model: String
+  public let cwd: String
+  /// 'oauth' = claude.ai subscription; other values are API-key provenance. Kept as String.
+  public let apiKeySource: String
+  public let tools: [String]
+  public let skills: [String]
+  public let slashCommands: [String]
+  public let permissionMode: PermissionMode
+  public let claudeCodeVersion: String
+  public let mcpServers: [McpServerStatus]
+
+  public struct McpServerStatus: Decodable, Sendable, Equatable {
+    public let name: String
+    public let status: String
+
+    public init(name: String, status: String) {
+      self.name = name
+      self.status = status
+    }
+  }
+
+  public init(
+    sdkSessionId: String, model: String, cwd: String, apiKeySource: String,
+    tools: [String] = [], skills: [String] = [], slashCommands: [String] = [],
+    permissionMode: PermissionMode = .default, claudeCodeVersion: String = "",
+    mcpServers: [McpServerStatus] = []
+  ) {
+    self.sdkSessionId = sdkSessionId
+    self.model = model
+    self.cwd = cwd
+    self.apiKeySource = apiKeySource
+    self.tools = tools
+    self.skills = skills
+    self.slashCommands = slashCommands
+    self.permissionMode = permissionMode
+    self.claudeCodeVersion = claudeCodeVersion
+    self.mcpServers = mcpServers
+  }
+}
+
+public struct AssistantMessageEvent: Decodable, Sendable, Equatable {
+  public let message: ApiMessage
+  /// Set when the message was produced inside a subagent (Task tool).
+  public let parentToolUseId: String?
+  /// True when backfilled from a resumed session's history.
+  public let replay: Bool?
+  public let uuid: String
+
+  public init(message: ApiMessage, parentToolUseId: String? = nil, replay: Bool? = nil, uuid: String) {
+    self.message = message
+    self.parentToolUseId = parentToolUseId
+    self.replay = replay
+    self.uuid = uuid
+  }
+}
+
+public struct UserMessageEvent: Decodable, Sendable, Equatable {
+  public let message: ApiMessage
+  public let parentToolUseId: String?
+  public let replay: Bool?
+  /// True for tool results and other synthetic user-role messages.
+  public let synthetic: Bool?
+  public let uuid: String?
+
+  public init(
+    message: ApiMessage, parentToolUseId: String? = nil, replay: Bool? = nil,
+    synthetic: Bool? = nil, uuid: String? = nil
+  ) {
+    self.message = message
+    self.parentToolUseId = parentToolUseId
+    self.replay = replay
+    self.synthetic = synthetic
+    self.uuid = uuid
+  }
+}
+
+/// Raw Anthropic streaming event; only the fields the transcript needs are modeled.
+public struct StreamDeltaEvent: Decodable, Sendable, Equatable {
+  public let event: Body
+  public let parentToolUseId: String?
+  public let uuid: String
+
+  public struct Body: Decodable, Sendable, Equatable {
+    public let type: String
+    public let delta: Delta?
+
+    public init(type: String, delta: Delta? = nil) {
+      self.type = type
+      self.delta = delta
+    }
+  }
+
+  public struct Delta: Decodable, Sendable, Equatable {
+    public let type: String?
+    public let text: String?
+    public let thinking: String?
+
+    public init(type: String? = nil, text: String? = nil, thinking: String? = nil) {
+      self.type = type
+      self.text = text
+      self.thinking = thinking
+    }
+  }
+
+  public init(event: Body, parentToolUseId: String? = nil, uuid: String) {
+    self.event = event
+    self.parentToolUseId = parentToolUseId
+    self.uuid = uuid
+  }
+}
+
+public struct TurnResultEvent: Decodable, Sendable, Equatable {
+  /// 'success' | 'error_during_execution' | 'error_max_turns' | ... — kept as String.
+  public let subtype: String
+  public let isError: Bool
+  public let durationMs: Double
+  public let numTurns: Int
+  public let totalCostUsd: Double
+  /// Final text of the turn (success only).
+  public let result: String?
+  public let errors: [String]?
+  public let usage: JSONValue?
+
+  public init(
+    subtype: String, isError: Bool, durationMs: Double, numTurns: Int, totalCostUsd: Double,
+    result: String? = nil, errors: [String]? = nil, usage: JSONValue? = nil
+  ) {
+    self.subtype = subtype
+    self.isError = isError
+    self.durationMs = durationMs
+    self.numTurns = numTurns
+    self.totalCostUsd = totalCostUsd
+    self.result = result
+    self.errors = errors
+    self.usage = usage
+  }
+}
+
+public enum SessionEventBody: Sendable, Equatable {
+  case systemInit(SystemInitEvent)
+  case statusChanged(status: SessionStatus, detail: String?)
+  case capabilities(models: [ModelOption], commands: [SlashCommandInfo])
+  /// `model` nil = back to the server default.
+  case modelChanged(model: String?)
+  case permissionModeChanged(mode: PermissionMode)
+  case contextUsage(ContextUsage)
+  case rateLimit(RateLimitInfo)
+  case assistantMessage(AssistantMessageEvent)
+  case userMessage(UserMessageEvent)
+  case streamDelta(StreamDeltaEvent)
+  case turnResult(TurnResultEvent)
+  case permissionRequested(PermissionRequest)
+  case permissionResolved(
+    requestId: String, behavior: PermissionBehavior,
+    resolvedBy: PermissionDecisionSource, message: String?)
+  case executionDispatched(
+    executionId: String, toolName: String, backend: ToolExecutionBackend,
+    deferred: Bool, expiresAt: Double?)
+  case executionResult(
+    executionId: String, output: ToolExecutionOutput, logs: [String]?, durationMs: Double?)
+  case executionFailed(
+    executionId: String, reason: String, error: String, logs: [String]?, durationMs: Double?)
+  case fileDelivered(path: String, bytes: Int, description: String?)
+  /// Any SDKMessage this protocol version doesn't model first-class.
+  case sdkEvent(payload: JSONValue)
+  case sessionError(message: String)
+  /// reason: 'client' | 'server' | 'error'; kept as String.
+  case sessionClosed(reason: String)
+  /// An event type (or payload shape) this Swift mirror doesn't model — never a stream error.
+  case unknown(type: String, raw: JSONValue)
+}
+
+public struct SessionEvent: Sendable, Equatable {
+  /// Monotonic per-session sequence number, starting at 1.
+  public let seq: Int
+  /// Epoch ms when the server emitted the event.
+  public let ts: Double
+  public let body: SessionEventBody
+
+  public init(seq: Int, ts: Double, body: SessionEventBody) {
+    self.seq = seq
+    self.ts = ts
+    self.body = body
+  }
+}
+
+extension SessionEvent: Decodable {
+  private enum CodingKeys: String, CodingKey {
+    case seq, ts, type, status, detail, models, commands, model, mode, usage, info
+    case requestId, behavior, resolvedBy, message, request
+    case executionId, toolName, backend, deferred, expiresAt, output, logs, durationMs
+    case reason, error, path, bytes, description, payload
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    seq = try container.decode(Int.self, forKey: .seq)
+    ts = try container.decode(Double.self, forKey: .ts)
+    let type = try container.decode(String.self, forKey: .type)
+    do {
+      switch type {
+      case "system_init":
+        body = .systemInit(try SystemInitEvent(from: decoder))
+      case "status_changed":
+        body = .statusChanged(
+          status: try container.decode(SessionStatus.self, forKey: .status),
+          detail: try container.decodeIfPresent(String.self, forKey: .detail))
+      case "capabilities":
+        body = .capabilities(
+          models: try container.decode([ModelOption].self, forKey: .models),
+          commands: try container.decode([SlashCommandInfo].self, forKey: .commands))
+      case "model_changed":
+        body = .modelChanged(model: try container.decodeIfPresent(String.self, forKey: .model))
+      case "permission_mode_changed":
+        body = .permissionModeChanged(mode: try container.decode(PermissionMode.self, forKey: .mode))
+      case "context_usage":
+        body = .contextUsage(try container.decode(ContextUsage.self, forKey: .usage))
+      case "rate_limit":
+        body = .rateLimit(try container.decode(RateLimitInfo.self, forKey: .info))
+      case "assistant_message":
+        body = .assistantMessage(try AssistantMessageEvent(from: decoder))
+      case "user_message":
+        body = .userMessage(try UserMessageEvent(from: decoder))
+      case "stream_delta":
+        body = .streamDelta(try StreamDeltaEvent(from: decoder))
+      case "turn_result":
+        body = .turnResult(try TurnResultEvent(from: decoder))
+      case "permission_requested":
+        body = .permissionRequested(try container.decode(PermissionRequest.self, forKey: .request))
+      case "permission_resolved":
+        body = .permissionResolved(
+          requestId: try container.decode(String.self, forKey: .requestId),
+          behavior: try container.decode(PermissionBehavior.self, forKey: .behavior),
+          resolvedBy: try container.decode(String.self, forKey: .resolvedBy),
+          message: try container.decodeIfPresent(String.self, forKey: .message))
+      case "execution_dispatched":
+        body = .executionDispatched(
+          executionId: try container.decode(String.self, forKey: .executionId),
+          toolName: try container.decode(String.self, forKey: .toolName),
+          backend: try container.decode(String.self, forKey: .backend),
+          deferred: try container.decodeIfPresent(Bool.self, forKey: .deferred) ?? false,
+          expiresAt: try container.decodeIfPresent(Double.self, forKey: .expiresAt))
+      case "execution_result":
+        body = .executionResult(
+          executionId: try container.decode(String.self, forKey: .executionId),
+          output: try container.decode(ToolExecutionOutput.self, forKey: .output),
+          logs: try container.decodeIfPresent([String].self, forKey: .logs),
+          durationMs: try container.decodeIfPresent(Double.self, forKey: .durationMs))
+      case "execution_failed":
+        body = .executionFailed(
+          executionId: try container.decode(String.self, forKey: .executionId),
+          reason: try container.decode(String.self, forKey: .reason),
+          error: try container.decode(String.self, forKey: .error),
+          logs: try container.decodeIfPresent([String].self, forKey: .logs),
+          durationMs: try container.decodeIfPresent(Double.self, forKey: .durationMs))
+      case "file_delivered":
+        body = .fileDelivered(
+          path: try container.decode(String.self, forKey: .path),
+          bytes: try container.decode(Int.self, forKey: .bytes),
+          description: try container.decodeIfPresent(String.self, forKey: .description))
+      case "sdk_event":
+        body = .sdkEvent(payload: try container.decodeIfPresent(JSONValue.self, forKey: .payload) ?? .null)
+      case "session_error":
+        body = .sessionError(message: try container.decode(String.self, forKey: .message))
+      case "session_closed":
+        body = .sessionClosed(reason: try container.decode(String.self, forKey: .reason))
+      default:
+        body = .unknown(type: type, raw: (try? JSONValue(from: decoder)) ?? .null)
+      }
+    } catch {
+      // A known type whose payload doesn't decode (a newer server extended it in a
+      // way this mirror doesn't model) degrades to .unknown, never a stream error.
+      body = .unknown(type: type, raw: (try? JSONValue(from: decoder)) ?? .null)
+    }
+  }
+}
+
+// MARK: - Commands (client -> server)
+
+public enum SessionCommand: Sendable, Equatable {
+  case userMessage(text: String)
+  case permissionDecision(
+    requestId: String, behavior: PermissionBehavior,
+    updatedInput: [String: JSONValue]? = nil, message: String? = nil, interrupt: Bool? = nil)
+  case interrupt
+  case setPermissionMode(PermissionMode)
+  /// nil model = back to the server default.
+  case setModel(String?)
+  case toolCallResult(executionId: String, output: ToolExecutionOutput, logs: [String]? = nil)
+  case toolCallError(executionId: String, reason: String, error: String, logs: [String]? = nil)
+  case close
+}
+
+extension SessionCommand: Encodable {
+  private enum CodingKeys: String, CodingKey {
+    case type, text, requestId, behavior, updatedInput, message, interrupt, mode, model
+    case executionId, output, logs, reason, error
+  }
+
+  public func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    switch self {
+    case .userMessage(let text):
+      try container.encode("user_message", forKey: .type)
+      try container.encode(text, forKey: .text)
+    case .permissionDecision(let requestId, let behavior, let updatedInput, let message, let interrupt):
+      try container.encode("permission_decision", forKey: .type)
+      try container.encode(requestId, forKey: .requestId)
+      try container.encode(behavior, forKey: .behavior)
+      try container.encodeIfPresent(updatedInput, forKey: .updatedInput)
+      try container.encodeIfPresent(message, forKey: .message)
+      try container.encodeIfPresent(interrupt, forKey: .interrupt)
+    case .interrupt:
+      try container.encode("interrupt", forKey: .type)
+    case .setPermissionMode(let mode):
+      try container.encode("set_permission_mode", forKey: .type)
+      try container.encode(mode, forKey: .mode)
+    case .setModel(let model):
+      try container.encode("set_model", forKey: .type)
+      try container.encodeIfPresent(model, forKey: .model)
+    case .toolCallResult(let executionId, let output, let logs):
+      try container.encode("tool_call_result", forKey: .type)
+      try container.encode(executionId, forKey: .executionId)
+      try container.encode(output, forKey: .output)
+      try container.encodeIfPresent(logs, forKey: .logs)
+    case .toolCallError(let executionId, let reason, let error, let logs):
+      try container.encode("tool_call_error", forKey: .type)
+      try container.encode(executionId, forKey: .executionId)
+      try container.encode(reason, forKey: .reason)
+      try container.encode(error, forKey: .error)
+      try container.encodeIfPresent(logs, forKey: .logs)
+    case .close:
+      try container.encode("close", forKey: .type)
+    }
+  }
+}
+
+// MARK: - WebSocket frames
+
+/// First frame the server sends after a successful attach.
+public struct AttachedFrame: Decodable, Sendable, Equatable {
+  public let protocolVersion: Int
+  public let session: SessionInfo
+  /// Events with seq > the client's `afterSeq` follow as `event` frames.
+  public let replayingFrom: Int
+
+  public init(protocolVersion: Int, session: SessionInfo, replayingFrom: Int) {
+    self.protocolVersion = protocolVersion
+    self.session = session
+    self.replayingFrom = replayingFrom
+  }
+}
+
+/// Ask the attached client to execute a tool call in its own sandbox (browser
+/// bridge). An iOS remote-control client typically ignores these — the server
+/// fails the execution at `expiresAt`.
+public struct ToolCallRequestFrame: Decodable, Sendable, Equatable {
+  public let executionId: String
+  public let toolName: String
+  public let input: JSONValue
+  public let vfsSeed: [String: String]?
+  public let limits: Limits?
+  public let expiresAt: Double?
+
+  public struct Limits: Decodable, Sendable, Equatable {
+    public let timeoutMs: Double?
+    public let memoryLimitBytes: Double?
+  }
+}
+
+public enum ServerFrame: Sendable, Equatable {
+  case attached(AttachedFrame)
+  case event(SessionEvent)
+  case toolCallRequest(ToolCallRequestFrame)
+  case toolCallCanceled(executionId: String, reason: String)
+  case protocolError(message: String)
+  /// A frame type this mirror doesn't model — ignore, never a stream error.
+  case unknown(type: String, raw: JSONValue)
+}
+
+extension ServerFrame: Decodable {
+  private enum CodingKeys: String, CodingKey {
+    case type, event, executionId, reason, message
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    let type = try container.decode(String.self, forKey: .type)
+    do {
+      switch type {
+      case "attached":
+        self = .attached(try AttachedFrame(from: decoder))
+      case "event":
+        self = .event(try container.decode(SessionEvent.self, forKey: .event))
+      case "tool_call_request":
+        self = .toolCallRequest(try ToolCallRequestFrame(from: decoder))
+      case "tool_call_canceled":
+        self = .toolCallCanceled(
+          executionId: try container.decode(String.self, forKey: .executionId),
+          reason: try container.decode(String.self, forKey: .reason))
+      case "protocol_error":
+        self = .protocolError(message: try container.decode(String.self, forKey: .message))
+      default:
+        self = .unknown(type: type, raw: (try? JSONValue(from: decoder)) ?? .null)
+      }
+    } catch {
+      self = .unknown(type: type, raw: (try? JSONValue(from: decoder)) ?? .null)
+    }
+  }
+}

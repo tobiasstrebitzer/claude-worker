@@ -70,6 +70,11 @@ protocol. Read these before changing scope or structure:
   files here stay literal — no env indirection, they are meant to be edited). `docs/assets` —
   brand assets (rules in `BRAND.md`); the mark is inlined in `BrandMark.tsx`, `Header.astro` and
   both favicons — keep geometry identical.
+- `apps/ios` — native iOS remote control (SwiftUI + XcodeGen; invisible to pnpm/turbo — no
+  package.json). `ClaudeWorkerKit/` is a hand-written Swift mirror of `packages/protocol` plus a
+  client and a port of the react transcript reducer — protocol or transcript changes must be
+  mirrored there (`WorkerProtocol.version` tracks `PROTOCOL_VERSION`); see `apps/ios/README.md`.
+  Zero third-party Swift deps; auth is the header transport (no cookie machinery).
 
 Dependency direction: `protocol ← core ← queue ← server ← cli`, `protocol ← client ← react ← ui ← web`,
 `sandbox` a leaf either side may use. The browser side (client/react/ui/apps) must never import
