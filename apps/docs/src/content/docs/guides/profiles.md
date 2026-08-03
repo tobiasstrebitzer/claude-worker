@@ -106,6 +106,10 @@ session is actually granted, so withholding one is a profile edit rather than a 
   defaults, not enforced caps; an explicit request value wins.
 - Profile pinning composes with `buildRunnerConfig`: the hook runs first, then the profile's
   `CLAUDE_CONFIG_DIR` is applied on top — the profile wins even if the hook set its own `env`.
+  The one exception: when the session env would already land the CLI in the profile's directory
+  (the auto-detected `default` profile, typically), nothing is pinned at all — setting
+  `CLAUDE_CONFIG_DIR` even to its default value changes where the CLI looks for credentials
+  (see [Credentials](#credentials) below).
 
 ## Managing profiles from the dashboard
 
@@ -162,3 +166,13 @@ official CLI reads, via its own `CLAUDE_CONFIG_DIR` mechanism. Two consequences:
   normal precedence). Per-session provenance stays visible as `apiKeySource` on `SessionInfo`.
 - The subscription-credentials notice logs once **per profile**, and `requireApiKey: true`
   fails closed regardless of profile.
+- **`CLAUDE_CONFIG_DIR` selects the credential source, not just the config dir.** With the
+  variable set, the CLI reads `<dir>/.credentials.json`; unset, it runs its own resolution —
+  on macOS that is the login Keychain, where `claude login` stores a claude.ai login. This is
+  why the default profile is never pinned, and why a profile pointing at any *other* directory
+  needs credentials of its own: run `CLAUDE_CONFIG_DIR=<dir> claude auth login` there, or
+  inject a long-lived `CLAUDE_CODE_OAUTH_TOKEN` via `buildRunnerConfig`. The server's
+  `checkCredentials` option (on by default in the `claude-worker` CLI) probes each profile
+  with `claude auth status` at startup and warns — never fails — when a profile looks
+  logged out. Only the logged-in/logged-out verdict is read; no credential or account
+  material is touched.

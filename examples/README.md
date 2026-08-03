@@ -21,7 +21,8 @@ MOONSHOT_API_KEY=...    # → profile 'moonshot'  (kimi-k3)
 pnpm example:server
 ```
 
-This replaces `pnpm server` (same port 8787). It logs the profiles it built — you want at
+This replaces `pnpm server` (same port 8787, gateway only — pair it with `pnpm web` for a
+dashboard). It logs the profiles it built — you want at
 least one `(provider: ...)` line. Keys never leave the server; the profile only carries the
 env var *name*.
 

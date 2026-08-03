@@ -40,9 +40,27 @@ are exempt from CORS.
 Neither transport establishes *who* the person is; the secret is a door key. Put an
 identity-aware proxy in front if you need more than that.
 
-**Without `--auth-key` the instance refuses to bind anything but a loopback address.** An
-unauthenticated gateway on a routable interface is a Claude Code shell for anyone who can reach
-the port. `--insecure` overrides that, for when something in front is doing the authenticating.
+**Off loopback, auth is not optional — but the key is.** An unauthenticated gateway on a
+routable interface is a Claude Code shell for anyone who can reach the port, so binding one
+without `--auth-key` generates a key instead of serving open: printed once at first start,
+stored in `<state-dir>/auth-key` (mode 600), and reused silently on later starts — a restart
+doesn't un-pair the clients that saved it. With `--no-parking-store` there is nowhere to keep
+it, so the key is ephemeral per run and the banner says so.
+
+Mind where that lands. The state dir defaults to `~/.claude-worker`, but *beside the config
+file* whenever there is one — so a `claude-worker.config.mjs` checked into a repo puts the key,
+and the plaintext parked transcripts next to it, inside that repo. Add `.claude-worker/` to its
+`.gitignore`, or point `--state-dir` somewhere outside the working tree.
+
+Two explicit opt-outs actually serve without auth. `--insecure` is the blanket one, for when
+something in front is doing the authenticating. `--insecure-host <name>` (repeatable; config:
+`insecureHosts`) is the narrow one — a declaration that *this* bind host may run open. One
+declaration covers both roles: it waives the key for that bind host *and* is accepted as a Host
+header, so `claude-worker --host toby --insecure-host toby` needs nothing else. Entries name a
+host, never an endpoint (a port is rejected), and match the bind host literally — `0.0.0.0`
+means the all-interfaces bind itself, not "any host". The Host-header fence stays up either way:
+an unauthenticated instance answers only to loopback names plus what you declared, which is what
+stands between it and DNS rebinding.
 
 Behind TLS termination, add `--trust-proxy` — otherwise the session cookie loses its `Secure`
 flag and the origin check computes `http://` where the browser says `https://`.
@@ -53,12 +71,13 @@ flag and the origin check computes `http://` where the browser says `https://`.
 | --- | --- | --- |
 | `--port <n>` | `CLAUDE_WORKER_PORT` | `8787` |
 | `--host <addr>` | `CLAUDE_WORKER_HOST` | `127.0.0.1` |
-| `--auth-key <secret>` | `CLAUDE_WORKER_AUTH_KEY` | none (no auth, loopback only) |
+| `--auth-key <secret>` | `CLAUDE_WORKER_AUTH_KEY` | none — no auth on loopback, generated elsewhere |
 | `--cwd-root <path>` (repeatable) | `CLAUDE_WORKER_CWD_ROOTS` (`:`-separated) | unrestricted |
 | `--profile <name=dir>` (repeatable) | — | auto-detected from `~/.claude` |
 | `--state-dir <path>` | `CLAUDE_WORKER_STATE_DIR` | beside the config file, else `~/.claude-worker` |
 | `--trust-proxy` | — | off |
 | `--allowed-origin <o>` / `--allowed-host <name>` (repeatable) | — | loopback names only |
+| `--insecure-host <name>` (repeatable) | — | none (config: `insecureHosts`) |
 | `--no-parking-store` | — | durable parking on |
 | `--config <path>` | — | `./claude-worker.config.mjs` |
 | `--insecure`, `--open`, `--help`, `--version` | | |

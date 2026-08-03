@@ -162,10 +162,36 @@ change is the wrong one. Grouped by where they bite. Architecture lives in
 - Cookie auth means ambient authority, so CSRF is live: WebSocket upgrades are **exempt from
   CORS**, which makes an explicit `Origin` check — not `SameSite` alone — the actual defense on an
   attach.
+- The CLI's generated auth key is two halves of one promise. `resolveInstanceConfig` is pure (no
+  I/O), so when auth is required off loopback with no key it only *records* `generateAuthKey` —
+  and already stands the Host-header guard down (`allowedHosts: null`) on the strength of it.
+  `startInstance` materializes the key (`<stateDir>/auth-key`, 0600, regenerated if corrupt,
+  ephemeral when `stateDir` is null) and then refuses to serve if `allowedHosts === null` while
+  the built-in auth came up disabled. Keep that assert: it is what turns "auth believed on,
+  secret undefined" — a silently open gateway wearing an authenticated banner — into a failed
+  start. Relatedly, `insecureHosts` entries match the **bind host** literally (`0.0.0.0` waives
+  auth only for the all-interfaces bind, never "any host") and fold into `allowedHosts`, which
+  still fences an unauthenticated instance to loopback + declared names against DNS rebinding.
 - Profiles pin `CLAUDE_CONFIG_DIR` *after* the `buildRunnerConfig` hook (profile wins over
   hook-set env); profile `defaults` fill unset request fields only. An `ANTHROPIC_API_KEY` in the
   server env still outranks every profile's config-dir credentials (SDK chain) — surface, don't
   fight it. The oauth notice is per-profile.
+- **Setting `CLAUDE_CONFIG_DIR` at all changes the CLI's credential source**, not just its config
+  dir: set, credentials come from `<dir>/.credentials.json`; unset, the CLI's own resolution runs
+  — which on macOS is the login Keychain, where `claude login` puts a claude.ai login. So pinning
+  even the CLI's default `~/.claude` turns a working Mac login into "Not logged in · Please run
+  /login" (reproduced: same prompt, same cwd, only the env var differs; `apiKeySource` is 'none'
+  both ways, so it can't discriminate). `claudeSessionEnv` in server.ts therefore *skips* the pin
+  when the baseline env already lands the CLI in the profile's dir — that skip is load-bearing
+  (it's what makes the auto-detected `default` profile work on a Mac), and so is its converse:
+  a baseline carrying a *different* `CLAUDE_CONFIG_DIR` is still overridden by the profile, or
+  two profiles collapse into one identity. A profile whose dir is NOT the default needs its own
+  credentials: run `CLAUDE_CONFIG_DIR=<dir> claude auth login` (writes `<dir>/.credentials.json`),
+  or inject a long-lived `CLAUDE_CODE_OAUTH_TOKEN` via `buildRunnerConfig` (the launchd pattern
+  in `examples/claude-worker.config.mjs`). The `checkCredentials` preflight probes each profile's
+  exact session env with `claude auth status` at `listen()` and warns on a logged-out verdict —
+  warn-only, silent on "couldn't check", off by default in the library, on in the CLI, and it
+  reads nothing but the `loggedIn` boolean (never credential material or account identity).
 - Profile management is doubly opt-in (a `profileStore` AND `canManageProfiles`) and the two
   profile sets never mix: `profiles` from server options are code — immutable over HTTP, and they
   win a name collision — while the store holds UI-created ones. `validateProfile` is shared by

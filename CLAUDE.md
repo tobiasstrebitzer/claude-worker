@@ -32,7 +32,10 @@ protocol. Read these before changing scope or structure:
   optional `/jobs` + `/queue` routes, profiles (+ `profileStore` CRUD), `GET /sessions/:id/files`,
   `SessionParkManager` (`parking.ts`) owning deferred execution over the `SessionStore` seam
   (`session-store.ts`: memory + JSON-file, the file one durable across restarts). Imports no model
-  SDK — a provider profile is built by the host's `createEngineRunner` hook.
+  SDK — a provider profile is built by the host's `createEngineRunner` hook. A Claude profile pins
+  `CLAUDE_CONFIG_DIR` *except* when that would be a no-op — setting it at all moves the CLI off the
+  macOS Keychain, so pinning the default dir breaks a working login (`docs/gotchas.md`);
+  `checkCredentials` probes each profile at launch and warns.
 - `packages/client` — REST + WS client on platform `fetch`/`WebSocket`; zero runtime deps. Owns
   the WS frame surface, so new frames need `SessionHandle` methods/events here.
 - `packages/react` — headless: `useClaudeSession`, the pure transcript reducer
@@ -53,13 +56,20 @@ protocol. Read these before changing scope or structure:
   is load-bearing, not cosmetic — a tab can't put a header on a WS handshake, so a cookie is the
   only credential it can present on an attach, and cookies are per-origin. `--auth-key` is one
   secret over two transports (login-page cookie for browsers, header for services); a config file
-  supplying its own `authenticate` turns the built-in off entirely rather than layering. The web
+  supplying its own `authenticate` turns the built-in off entirely rather than layering. Loopback
+  runs keyless; off loopback the CLI *generates* a key rather than serving open (persisted at
+  `<stateDir>/auth-key`, 0600), and only an explicit `--insecure` / `insecureHosts` declaration
+  serves unauthenticated — `insecureHosts` entries double as accepted Host headers. The
+  resolve/materialize seam has an assert that must stay: see `docs/gotchas.md`. The web
   dashboard is a real runtime dep on `@claude-worker/web` — `resolveWebRoot()` is just its exported
   `dashboardDir` — so there is one dashboard, versioned in lockstep, not a vendored copy. Also
   hosts `claude-worker guard`.
 - `apps/docs` — Astro site → Pages via `docs.yml`. `examples` — dev entries with root-level deps
-  the packages must not take. `docs/assets` — brand assets (rules in `BRAND.md`); the mark is
-  inlined in `BrandMark.tsx`, `Header.astro` and both favicons — keep geometry identical.
+  the packages must not take, plus `dev-server.config.mjs`, which is what `pnpm server` runs: dev
+  goes through the real CLI, so there is no second server entry point to keep in sync (config
+  files here stay literal — no env indirection, they are meant to be edited). `docs/assets` —
+  brand assets (rules in `BRAND.md`); the mark is inlined in `BrandMark.tsx`, `Header.astro` and
+  both favicons — keep geometry identical.
 
 Dependency direction: `protocol ← core ← queue ← server ← cli`, `protocol ← client ← react ← ui ← web`,
 `sandbox` a leaf either side may use. The browser side (client/react/ui/apps) must never import

@@ -1,6 +1,8 @@
 /**
  * Dev server for trying the model-agnostic engine from the browser dashboard.
- * Drop-in replacement for `pnpm server` (same port, NO AUTH, loopback only):
+ * Drop-in replacement for `pnpm server` (same port, NO AUTH, loopback only). Unlike
+ * `pnpm server` this is a bare gateway, not the CLI, so it serves no dashboard —
+ * pair it with `pnpm web`:
  *
  *   pnpm example:server        # reads .env for provider keys (see below)
  *   pnpm web                   # then open http://localhost:5191

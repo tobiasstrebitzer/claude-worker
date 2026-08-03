@@ -42,6 +42,17 @@ export type ClaudeWorkerConfig = WorkerServerOptions & {
    * loopback names; see `resolveInstanceConfig` for why this exists at all.
    */
   allowedHosts?: string[]
+  /**
+   * Bind hosts that may serve without auth. One declaration, two effects:
+   * binding a listed host waives the auth requirement (no key demanded, none
+   * generated), and while unauthenticated every entry is also accepted as a
+   * Host header, so the operator states the intent once. Entries name a host,
+   * never an endpoint — a port is rejected — and match the bind host literally
+   * and case-insensitively: nothing is inferred from DNS or the network, and
+   * `0.0.0.0` means the all-interfaces bind itself, not "any host". When auth
+   * is on this widens nothing.
+   */
+  insecureHosts?: string[]
   /** Serve a dashboard build from here instead of the bundled one. */
   webRoot?: string
 }
@@ -55,6 +66,7 @@ export type CliFlags = {
   cwdRoots: string[]
   allowedOrigins: string[]
   allowedHosts: string[]
+  insecureHosts: string[]
   trustProxy?: boolean
   stateDir?: string
   parking?: boolean
@@ -80,7 +92,13 @@ function parsePort(raw: string, source: string): number {
  * of it.
  */
 export function parseArgs(argv: string[]): CliFlags {
-  const flags: CliFlags = { profiles: [], cwdRoots: [], allowedOrigins: [], allowedHosts: [] }
+  const flags: CliFlags = {
+    profiles: [],
+    cwdRoots: [],
+    allowedOrigins: [],
+    allowedHosts: [],
+    insecureHosts: [],
+  }
   const next = (i: number, name: string): string => {
     const value = argv[i + 1]
     if (value === undefined || value.startsWith('-')) {
@@ -141,6 +159,10 @@ export function parseArgs(argv: string[]): CliFlags {
         break
       case '--allowed-host':
         flags.allowedHosts.push(next(i, arg))
+        i++
+        break
+      case '--insecure-host':
+        flags.insecureHosts.push(next(i, arg))
         i++
         break
       case '--trust-proxy':
@@ -229,6 +251,15 @@ export type ResolvedConfig = {
   /** True when the config file supplied its own `authenticate` — built-in auth stands down. */
   hostAuthenticates: boolean
   /**
+   * Auth is required here but no key was supplied: `startInstance` must
+   * materialize one (stored under `stateDir`, ephemeral without one). This is a
+   * *promise* rather than a key because resolution is pure and synchronous while
+   * reading a key file is I/O — and the promise is load-bearing: `allowedHosts`
+   * is already null on the strength of it, so `startInstance` refuses to serve
+   * if materialization ever fails to arm the built-in auth.
+   */
+  generateAuthKey: boolean
+  /**
    * Host header values to accept, or null to accept any. Non-null only for an
    * unauthenticated instance — see `resolveInstanceConfig`.
    */
@@ -266,6 +297,35 @@ export function isLoopbackHostname(hostname: string): boolean {
   return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname)
 }
 
+/**
+ * An `insecureHosts` entry names a host, never an endpoint: it is compared
+ * against the bind host and against Host headers, and both are portless by the
+ * time they are compared. An entry carrying a port would therefore never match
+ * anything — a gate that looks armed and is not — so it is rejected loudly, as
+ * is anything that does not parse as a host name or address. Bare IPv6 is
+ * bracketed before parsing (WHATWG URL requires that), and the result is
+ * lowercased to match `hostnameOf`'s normal form.
+ */
+function normalizeInsecureHost(raw: string): string {
+  const entry = raw.trim()
+  const looksLikeNamePort = /^[^:]+:\d+$/.test(entry)
+  const candidate =
+    entry.includes(':') && !entry.startsWith('[') && !looksLikeNamePort ? `[${entry}]` : entry
+  let url: URL
+  try {
+    url = new URL(`http://${candidate}`)
+  } catch {
+    throw new ConfigError(`not a host name or address in insecureHosts: ${JSON.stringify(raw)}`)
+  }
+  if (url.port !== '') {
+    throw new ConfigError(
+      `insecureHosts entry ${JSON.stringify(raw)} carries a port — name the host alone; ` +
+        `the bind host and the Host header are both compared portless`,
+    )
+  }
+  return url.hostname.replace(/^\[|\]$/g, '').toLowerCase()
+}
+
 export function resolveInstanceConfig(
   flags: CliFlags,
   loaded: LoadedConfig,
@@ -284,19 +344,28 @@ export function resolveInstanceConfig(
     flags.authKey || env.CLAUDE_WORKER_AUTH_KEY || loaded.options.auth?.secret || undefined
   const hostAuthenticates = typeof loaded.options.authenticate === 'function'
 
-  // Refusing here rather than warning: an unauthenticated Claude Code gateway on
-  // a routable interface is a shell for anyone who can reach the port, and a
-  // warning in a log nobody reads is not a boundary.
-  if (!authKey && !hostAuthenticates && !loaded.options.allowUnauthenticated) {
-    if (!isLoopback(host) && !flags.insecure) {
-      throw new ConfigError(
-        `refusing to serve without auth on ${host}: anyone who can reach that ` +
-          `interface would get a Claude Code session.\n` +
-          `  set --auth-key <secret> (or CLAUDE_WORKER_AUTH_KEY), or pass --insecure if ` +
-          `something in front of it is doing the authenticating.`,
-      )
-    }
-  }
+  const insecureHosts = new Set(
+    [...flags.insecureHosts, ...(loaded.options.insecureHosts ?? [])].map(normalizeInsecureHost),
+  )
+  /** The bind host in the same normal form the entries were put in. It never
+   * carries a port — that is a separate flag — so only brackets and case vary. */
+  const bindHost = host.trim().replace(/^\[|\]$/g, '').toLowerCase()
+
+  // An unauthenticated Claude Code gateway on a routable interface is a shell
+  // for anyone who can reach the port, so serving one takes an explicit opt-out:
+  // `--insecure`, `allowUnauthenticated`, or the bind host declared in
+  // `insecureHosts`. Absent all three and absent a key, auth still goes ON — a
+  // key gets generated at startup rather than the old refusal, because "secure
+  // by default" beats "off by default". Materializing it is I/O, which this
+  // function must stay free of, so the decision is recorded as `generateAuthKey`
+  // and `startInstance` does the reading and writing.
+  const generateAuthKey =
+    !authKey &&
+    !hostAuthenticates &&
+    !loaded.options.allowUnauthenticated &&
+    !isLoopback(host) &&
+    !flags.insecure &&
+    !insecureHosts.has(bindHost)
 
   const stateDir =
     flags.parking === false || loaded.options.stateDir === null
@@ -327,11 +396,23 @@ export function resolveInstanceConfig(
    * puts in Host. With auth on this is moot (their origin holds no cookie), and
    * for a deliberately exposed instance the operator has said what they want, so
    * only the unauthenticated case is fenced.
+   *
+   * `generateAuthKey` counts as auth here on the promise that `startInstance`
+   * materializes the key — and `startInstance` asserts the promise was kept
+   * before serving. Entries are lowercased because the guard compares them
+   * against `hostnameOf`'s lowercased hostnames; `insecureHosts` folds in so
+   * declaring a bind host once also names it as an acceptable Host header.
    */
-  const authEnabled = Boolean(authKey) || hostAuthenticates
+  const authEnabled = Boolean(authKey) || hostAuthenticates || generateAuthKey
   const allowedHosts = authEnabled
     ? null
-    : new Set([...LOOPBACK, ...flags.allowedHosts, ...(loaded.options.allowedHosts ?? [])])
+    : new Set([
+        ...LOOPBACK,
+        ...[...flags.allowedHosts, ...(loaded.options.allowedHosts ?? [])].map((name) =>
+          name.toLowerCase(),
+        ),
+        ...insecureHosts,
+      ])
 
   // Strip the instance-level keys: what's left is exactly WorkerServerOptions.
   const {
@@ -340,6 +421,7 @@ export function resolveInstanceConfig(
     auth: _a,
     stateDir: _s,
     allowedHosts: _ah,
+    insecureHosts: _ih,
     webRoot: _w,
     ...serverOptions
   } = loaded.options
@@ -357,6 +439,7 @@ export function resolveInstanceConfig(
     stateDir,
     configPath: loaded.path,
     hostAuthenticates,
+    generateAuthKey,
     allowedHosts,
     webRoot: loaded.options.webRoot,
     open: flags.open ?? false,

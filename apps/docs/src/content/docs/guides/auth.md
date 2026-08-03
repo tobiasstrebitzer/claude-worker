@@ -64,7 +64,10 @@ For an embedded deployment that is the `authenticate` hook: it gets the raw requ
 principal or nothing, and it guards REST **and** the WebSocket upgrade. For the turnkey
 [`claude-worker`](https://www.npmjs.com/package/claude-worker) instance it is `--auth-key`, one
 shared secret over two transports — a login page trades it for an `HttpOnly` cookie for browsers,
-while services send it as a header.
+while services send it as a header. Bound off loopback with no key supplied, the instance
+generates one and stores it under its state dir rather than serving open; the explicit opt-outs
+(`--insecure`, `insecureHosts`) are covered in
+[Run an instance](/claude-worker/docs/getting-started/run-an-instance/#protecting-it).
 
 That split isn't arbitrary. **A browser cannot set a header on a WebSocket handshake**; the
 constructor takes a URL and subprotocols and nothing else. So a browser-facing deployment has

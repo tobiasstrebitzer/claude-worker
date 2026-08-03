@@ -103,6 +103,25 @@ describe('resolveInstanceConfig and the host guard', () => {
     expect(config.auth.allowedOrigins).toEqual(['https://ops.example.com'])
   })
 
+  it('lowercases allowed hosts so they can actually match a Host header', () => {
+    // hostnameOf lowercases what the guard compares, so an uppercase entry
+    // would otherwise be a gate that looks armed and never opens.
+    const config = resolveInstanceConfig(parseArgs(['--allowed-host', 'DevBox.Local']), noConfig, {})
+    const guard = createHostGuard(config.allowedHosts)
+    expect(guard(req('devbox.local:8787'))).toBe(true)
+  })
+
+  it('lets the guard honour an insecure host end to end', () => {
+    const config = resolveInstanceConfig(
+      parseArgs(['--host', 'toby', '--insecure-host', 'toby']),
+      noConfig,
+      {},
+    )
+    const guard = createHostGuard(config.allowedHosts)
+    expect(guard(req('toby:8787'))).toBe(true)
+    expect(guard(req('attacker.example:8787'))).toBe(false)
+  })
+
   it('reads port, host and auth from the config file, with flags still winning', () => {
     const loaded = {
       path: '/x/c.mjs',

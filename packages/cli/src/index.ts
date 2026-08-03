@@ -22,6 +22,8 @@ export type {
   ResolvedConfig,
 } from './config.ts'
 export { runGuard } from './guard.ts'
+export { materializeAuthKey } from './auth-key.ts'
+export type { MaterializedAuthKey } from './auth-key.ts'
 export { createCliAuth } from './auth.ts'
 export type { CliAuth, CliAuthOptions, CliPrincipal } from './auth.ts'
 export { renderLoginPage } from './login-page.ts'

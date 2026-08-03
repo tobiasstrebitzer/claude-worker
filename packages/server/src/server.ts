@@ -1,11 +1,13 @@
-import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { homedir } from 'node:os'
 import type { Duplex } from 'node:stream'
 import { join, resolve as resolvePath, sep } from 'node:path'
 import { WebSocketServer, type WebSocket } from 'ws'
 import { listSessions as sdkListSessions } from '@anthropic-ai/claude-agent-sdk'
+import { checkClaudeAuth } from '@claude-worker/core'
 import type {
+  ClaudeAuthProbe,
   Runner,
   RunnerSnapshot,
   SessionRunnerConfig,
@@ -148,6 +150,19 @@ export type WorkerServerOptions = {
    * operator's own subscription; the server then logs a one-time notice instead.
    */
   requireApiKey?: boolean
+  /**
+   * Launch-time credential sanity check: once `listen()` binds, each Claude
+   * profile's session environment — exactly what `buildRunnerConfig` would hand
+   * a session, host hook included — is probed with the SDK-bundled CLI's
+   * `claude auth status`, concurrently and fire-and-forget, and a profile that
+   * reports logged-out gets one console warning. Warn, never fail: the operator
+   * may be about to log in, and a probe that cannot run at all (missing binary,
+   * a CLI without `auth status`, unparseable output) stays silent — "couldn't
+   * check" is not "not logged in". No credential material is read or logged.
+   * Off by default (this is a library; tests must spawn nothing) — the turnkey
+   * CLI turns it on. Pass an object to inject the probe (tests) or a timeout.
+   */
+  checkCredentials?: boolean | { probe?: ClaudeAuthProbe; timeoutMs?: number }
   /** Injectable lister for GET /sdk-sessions (tests). Defaults to the SDK's listSessions,
    * which reads the Agent SDK's on-disk session store. */
   listSdkSessions?: SdkSessionLister
@@ -361,10 +376,48 @@ function isProviderProfile(profile: ProfileInfo): boolean {
   return profile.engine === 'provider'
 }
 
+/** Where the CLI's own resolution lands for a given environment: an explicit
+ * CLAUDE_CONFIG_DIR, else ~/.claude. */
+function cliConfigDir(env: Record<string, string | undefined>): string {
+  return env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude')
+}
+
 /** Auto-created profile when none are declared: the operator's own config dir. */
 function detectDefaultProfiles(): ProfileInfo[] {
-  const dir = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude')
+  const dir = cliConfigDir(process.env)
   return existsSync(dir) ? [{ name: 'default', configDir: dir }] : []
+}
+
+/** Compare config dirs by what they name on disk: declared paths arrive with
+ * trailing slashes or symlinked prefixes (`/var` vs `/private/var` on macOS); a
+ * path that doesn't exist falls back to plain normalization. */
+function canonicalDir(path: string): string {
+  try {
+    return realpathSync(path)
+  } catch {
+    return resolvePath(path)
+  }
+}
+
+/**
+ * The env a Claude session under `profile` is spawned with, starting from
+ * `base` (the host hook's env, else the server's own). The pin is skipped when
+ * `base` would already land the CLI in the profile's dir, and that skip is
+ * load-bearing, not an optimisation: CLAUDE_CONFIG_DIR *set at all* switches
+ * the CLI's credential source to `<dir>/.credentials.json` — on macOS a
+ * claude.ai login lives in the login Keychain, consulted only while the
+ * variable is UNSET, so pinning even the CLI's own default `~/.claude` turns a
+ * working login into "Not logged in". When `base` names a *different* dir than
+ * the profile, the pin stands: the profile must win over hook- or operator-set
+ * env, or sessions under two profiles quietly collapse into one identity.
+ */
+function claudeSessionEnv(
+  profile: ProfileInfo,
+  base: Record<string, string | undefined>,
+): Record<string, string | undefined> {
+  return canonicalDir(profile.configDir!) === canonicalDir(cliConfigDir(base))
+    ? base
+    : { ...base, CLAUDE_CONFIG_DIR: profile.configDir! }
 }
 
 function cwdAllowed(cwd: string, roots: string[] | undefined): boolean {
@@ -590,7 +643,8 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
 
   /** Profile-aware config hook: fill the profile's defaults into unset request fields,
    * run the host hook, then pin CLAUDE_CONFIG_DIR — the profile wins even when the
-   * host hook set its own env. Handed to the queue too, so jobs inherit profiles. */
+   * host hook set its own env (see `claudeSessionEnv` for the one case the pin is
+   * skipped, and why). Handed to the queue too, so jobs inherit profiles. */
   const buildRunnerConfig = (req: CreateSessionRequest): SessionRunnerConfig => {
     const profile = req.profile !== undefined ? profileFor(req.profile) : undefined
     if (!profile) return hostBuildRunnerConfig(req)
@@ -602,10 +656,11 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
     // Provider profiles have no config dir to pin: their credentials come from
     // the operator's environment through the engine factory.
     if (isProviderProfile(profile)) return config
-    return {
-      ...config,
-      env: { ...(config.env ?? process.env), CLAUDE_CONFIG_DIR: profile.configDir! },
-    }
+    const base = config.env ?? process.env
+    const env = claudeSessionEnv(profile, base)
+    // A skipped pin returns `base` itself — leave the config alone so an unset
+    // `env` stays unset (the SDK then spawns on process.env, unmaterialized).
+    return env === base ? config : { ...config, env }
   }
 
   /** Build a runner for a session, choosing the engine from its profile. Async
@@ -775,6 +830,46 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
         )
       }
     })
+  }
+
+  /**
+   * Probe each Claude profile's credentials the way its sessions will actually
+   * experience them: the env the real assembly path produces, so anything the
+   * host hook injects (a CLAUDE_CODE_OAUTH_TOKEN, say) counts as logged in.
+   * Provider profiles resolve credentials in the engine factory and are not
+   * probed. Fire-and-forget by design — see the `checkCredentials` option doc.
+   */
+  const preflightCredentials = (): void => {
+    if (!options.checkCredentials) return
+    const conf = options.checkCredentials === true ? {} : options.checkCredentials
+    const probe: ClaudeAuthProbe =
+      conf.probe ?? ((env) => checkClaudeAuth(env, { timeoutMs: conf.timeoutMs }))
+    for (const profile of allProfiles()) {
+      if (isProviderProfile(profile)) continue
+      let env: Record<string, string | undefined>
+      try {
+        env = buildRunnerConfig({ cwd: process.cwd(), profile: profile.name }).env ?? process.env
+      } catch {
+        // A host hook may choke on a probe-shaped request; fall back to the
+        // profile pin alone, applied exactly as the real path applies it.
+        env = claudeSessionEnv(profile, process.env)
+      }
+      void probe(env)
+        .then((status) => {
+          if (status !== 'logged_out') return
+          console.warn(
+            `[claude-worker] Profile '${profile.name}' (${profile.configDir}) has no usable ` +
+              'Claude credentials: `claude auth status` reports logged out for the environment ' +
+              'its sessions run with, so they will fail with "Not logged in". Log in under ' +
+              `that dir (CLAUDE_CONFIG_DIR=${profile.configDir} claude auth login), inject a ` +
+              'long-lived token via buildRunnerConfig (CLAUDE_CODE_OAUTH_TOKEN), or set ' +
+              'ANTHROPIC_API_KEY. `checkCredentials: false` disables this check.',
+          )
+        })
+        .catch(() => {
+          // a probe that breaks is 'unknown', and unknown stays silent
+        })
+    }
   }
 
   type AuthContext = { ok: boolean; allowedProfiles?: string[]; canManageProfiles?: boolean }
@@ -1435,6 +1530,9 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
       return new Promise((resolve, reject) => {
         server.once('error', reject)
         server.listen(port, host, () => {
+          // After the bind and after refreshStored(), so stored profiles are
+          // probed too; advisory, so it must never delay or wedge the listen.
+          preflightCredentials()
           const address = server.address()
           resolve({ port: typeof address === 'object' && address ? address.port : port })
         })

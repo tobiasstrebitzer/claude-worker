@@ -7,11 +7,32 @@ reports with a reproduction, and PRs that stay inside one package's boundary.
 
 ```bash
 pnpm install
-pnpm server   # unauthenticated dev gateway on 127.0.0.1:8787 (loopback only!)
-pnpm web      # dashboard on http://localhost:5191, proxying /v1 to the gateway
+pnpm server   # gateway + dashboard on http://127.0.0.1:8787, no auth (loopback only!)
+pnpm web      # optional: vite dashboard on :5191 with HMR, proxying /v1 to the gateway
 ```
 
-Nothing needs building first: apps and tests resolve packages straight to TypeScript source
+`pnpm server` is the real `claude-worker` CLI pointed at
+[`examples/dev-server.config.mjs`](examples/dev-server.config.mjs) — there is no separate dev
+entry point, so what you develop against and what `npx claude-worker` ships are one code path.
+Edit that config directly; flags still win (`pnpm server --port 9000`). The dashboard is the one
+thing that must be compiled, so the script builds it first (`pnpm dashboard`, turbo-cached); run
+`pnpm web` alongside when you want HMR.
+
+To reach the gateway from another device — a phone on the same Tailscale network, say — bind a
+routable interface:
+
+```bash
+pnpm server --host 0.0.0.0
+```
+
+Auth off loopback is not optional: anyone who can reach the port would get a Claude Code
+session. Pass `--auth-key <secret>`, or let the CLI generate one — printed once, kept in the
+state dir, reused on later starts. Native clients send it as `Authorization: Bearer <key>`;
+browsers post it once at the login page and ride a cookie. To genuinely serve without auth on a
+trusted network, declare the bind host (`--insecure-host <name>`, config `insecureHosts`) — the
+declared name doubles as an accepted Host header.
+
+Nothing else needs building: apps and tests resolve packages straight to TypeScript source
 through the `@claude-worker/source` export condition, and `build/` output exists only for
 publishing. In-package imports use explicit `.ts` extensions.
 

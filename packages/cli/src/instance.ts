@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { join } from 'node:path'
 import { createFileSessionStore, createWorkerServer, type WorkerServer } from '@claude-worker/server'
 import { dashboardDir } from '@claude-worker/web'
+import { materializeAuthKey, type MaterializedAuthKey } from './auth-key.ts'
 import { createCliAuth, type CliAuth } from './auth.ts'
 import { hostnameOf, isLoopbackHostname, type ResolvedConfig } from './config.ts'
 import { renderLoginPage } from './login-page.ts'
@@ -72,7 +73,9 @@ function createFallback(
       res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
       res.end(
         'unrecognised Host header.\n\nThis instance runs without auth, so it only answers to ' +
-          'loopback host names. Use --allowed-host <name>, or set --auth-key.\n',
+          'loopback host names and the ones it was told to expect. Declare this name with ' +
+          '--insecure-host <name> (which also lets it be bound without a key) or --allowed-host ' +
+          '<name>, or set --auth-key.\n',
       )
       return
     }
@@ -131,9 +134,30 @@ export async function startInstance(
   options: { quiet?: boolean } = {},
 ): Promise<Instance> {
   const webRoot = config.webRoot ?? resolveWebRoot()
+  // The other half of `generateAuthKey`: resolution promised auth without doing
+  // I/O, this is where the key actually comes to exist.
+  const generated: MaterializedAuthKey | null =
+    config.generateAuthKey && !config.hostAuthenticates
+      ? await materializeAuthKey(config.stateDir)
+      : null
   const auth = createCliAuth(
-    config.hostAuthenticates ? { ...config.auth, secret: undefined } : config.auth,
+    config.hostAuthenticates
+      ? { ...config.auth, secret: undefined }
+      : generated
+        ? { ...config.auth, secret: generated.key }
+        : config.auth,
   )
+  // The failure mode this seam must make impossible: a resolved config that
+  // stood down the Host-header guard (allowedHosts null) believing auth would
+  // be on, while `createCliAuth` ended up with no secret — that instance would
+  // be wide open and reporting itself authenticated. Every start passes through
+  // here, so a bug on either side of the seam dies loudly instead of serving.
+  if (config.allowedHosts === null && !config.hostAuthenticates && !auth.enabled) {
+    throw new Error(
+      'refusing to serve: the resolved config expects auth but no shared secret was ' +
+        'materialized — this instance would be open while believing itself authenticated',
+    )
+  }
   const hostAllowed = createHostGuard(config.allowedHosts)
   const fallback = createFallback(auth, webRoot, hostAllowed)
 
@@ -152,6 +176,10 @@ export async function startInstance(
 
   const server = createWorkerServer({
     ...config.options,
+    // The turnkey instance checks profile credentials at startup by default —
+    // a mispointed config dir should say so here, not as the first session's
+    // "Not logged in" error. A config file can set `checkCredentials: false`.
+    checkCredentials: config.options.checkCredentials ?? true,
     parking,
     fallback,
     // A config file's own `authenticate` wins outright — mixing two auth schemes
@@ -180,7 +208,17 @@ export async function startInstance(
     line('')
     line(`  claude-worker  ${url}`)
     if (config.hostAuthenticates) line('  auth: the config file supplies its own `authenticate`')
-    else if (auth.enabled) line('  auth: shared key — browsers sign in, services send a header')
+    else if (generated?.source === 'created') {
+      // Printed exactly once, at creation — later starts reuse the file and
+      // point at it instead of spraying the secret into every log.
+      line(`  auth: generated key  ${generated.key}`)
+      line(`        stored in ${generated.path} — later starts reuse it without printing it`)
+    } else if (generated?.source === 'ephemeral') {
+      line(`  auth: generated key  ${generated.key}`)
+      line('        ephemeral — no state dir to keep it, so the next start mints a new one')
+    } else if (generated?.source === 'stored') {
+      line(`  auth: shared key from ${generated.path}`)
+    } else if (auth.enabled) line('  auth: shared key — browsers sign in, services send a header')
     else line('  NO AUTH — anyone who can reach this port gets a session')
     line(
       config.stateDir

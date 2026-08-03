@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { request } from 'node:http'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -82,7 +82,12 @@ async function fakeWebRoot(): Promise<string> {
   return dir
 }
 
-async function start(argv: string[]): Promise<{ base: string; wsBase: string }> {
+/** `overrides` lands after resolution, so a test can resolve routable-host
+ * semantics (generated keys, insecure hosts) while still binding loopback. */
+async function start(
+  argv: string[],
+  overrides: Partial<ResolvedConfig> = {},
+): Promise<{ base: string; wsBase: string; stateDir: string | null }> {
   const webRoot = await fakeWebRoot()
   const stateDir = await mkdtemp(join(import.meta.dirname, '.tmp-state-'))
   dirs.push(stateDir)
@@ -90,6 +95,7 @@ async function start(argv: string[]): Promise<{ base: string; wsBase: string }> 
     ...resolveInstanceConfig(parseArgs(['--port', '0', ...argv]), { path: null, options: {} }, {}),
     webRoot,
     stateDir,
+    ...overrides,
   }
   config.options.profiles = []
   config.options.allowedCwdRoots = ['/tmp']
@@ -98,6 +104,7 @@ async function start(argv: string[]): Promise<{ base: string; wsBase: string }> 
   return {
     base: `http://127.0.0.1:${instance.port}`,
     wsBase: `ws://127.0.0.1:${instance.port}`,
+    stateDir: config.stateDir,
   }
 }
 
@@ -237,6 +244,76 @@ describe('an instance with --auth-key', () => {
     })
     // The server-side entry is gone, so a stolen copy of the cookie is dead too.
     expect((await fetch(`${base}/v1/sessions`, { headers: { cookie } })).status).toBe(401)
+  })
+})
+
+describe('an instance that generates its own key', () => {
+  // Resolved as if bound to 0.0.0.0 (which is what plans the generated key),
+  // then actually bound to loopback so the test never opens a routable port.
+  const routable = ['--host', '0.0.0.0']
+  const bindLoopback = { host: '127.0.0.1' }
+
+  it('materializes a key into the state dir and requires it', async () => {
+    const { base, stateDir } = await start(routable, bindLoopback)
+    const key = (await readFile(join(stateDir!, 'auth-key'), 'utf8')).trim()
+    expect(key).toMatch(/^[0-9a-f]{48}$/)
+
+    // No credential: login page, not dashboard; API refused.
+    expect((await fetch(`${base}/`)).status).toBe(401)
+    expect((await fetch(`${base}/v1/sessions`)).status).toBe(401)
+    // The stored key is the live secret on both transports.
+    expect(
+      (await fetch(`${base}/v1/sessions`, { headers: { 'x-claude-worker-key': key } })).status,
+    ).toBe(200)
+  })
+
+  it('reuses the stored key across restarts — clients stay paired', async () => {
+    const first = await start(routable, bindLoopback)
+    const key = (await readFile(join(first.stateDir!, 'auth-key'), 'utf8')).trim()
+    await instance!.close()
+    instance = undefined
+
+    const second = await start(routable, { ...bindLoopback, stateDir: first.stateDir })
+    const res = await fetch(`${second.base}/v1/sessions`, {
+      headers: { 'x-claude-worker-key': key },
+    })
+    expect(res.status).toBe(200)
+  })
+
+  it('still authenticates with an ephemeral key when parking is off', async () => {
+    const { base } = await start(routable, { ...bindLoopback, stateDir: null })
+    expect((await fetch(`${base}/v1/sessions`)).status).toBe(401)
+  })
+
+  it('refuses to serve when resolve promised auth but nothing materialized a secret', async () => {
+    // The catastrophic seam bug, asserted where it cannot be skipped: the
+    // Host-header guard stood down (allowedHosts null) yet no key will exist.
+    const webRoot = await fakeWebRoot()
+    const config: ResolvedConfig = {
+      ...resolveInstanceConfig(parseArgs(['--port', '0']), { path: null, options: {} }, {}),
+      webRoot,
+      stateDir: null,
+      allowedHosts: null,
+      generateAuthKey: false,
+    }
+    await expect(startInstance(config, { quiet: true })).rejects.toThrow(/no shared secret/)
+  })
+})
+
+describe('an instance with insecure hosts', () => {
+  it('serves unauthenticated on the declared name, Host gate still fenced', async () => {
+    await start(['--host', '0.0.0.0', '--insecure-host', '0.0.0.0', '--insecure-host', 'devbox'], {
+      host: '127.0.0.1',
+    })
+    const port = instance!.port
+    // The declared name works with no key anywhere…
+    expect((await rawGet(port, '/', `devbox:${port}`)).status).toBe(200)
+    expect((await rawGet(port, '/v1/sessions', `devbox:${port}`)).status).toBe(200)
+    // …loopback still does…
+    expect((await rawGet(port, '/', `127.0.0.1:${port}`)).status).toBe(200)
+    // …and a rebound public name still bounces.
+    expect((await rawGet(port, '/', 'attacker.example')).status).toBe(403)
+    expect((await rawGet(port, '/v1/sessions', 'attacker.example')).status).toBe(401)
   })
 })
 

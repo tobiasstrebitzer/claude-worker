@@ -7,6 +7,8 @@ export type {
   ToolCallOutput,
 } from './ai-sdk-runner.ts'
 export type { HistoryFn, QueryFn, SessionRunnerConfig } from './runner.ts'
+export { checkClaudeAuth, resolveBundledClaudeExecutable } from './claude-auth.ts'
+export type { ClaudeAuthProbe, ClaudeAuthStatus } from './claude-auth.ts'
 export type {
   ParkedExecution,
   PermissionDecision,

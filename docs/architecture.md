@@ -91,7 +91,9 @@ boundary: anything a client needs must be expressible as protocol events and com
   Profiles (`profiles` option) bind names to Claude Code config dirs: creation resolves the
   request's profile (required when several are declared, implicit with one, auto-detected from
   `~/.claude` when unset), applies its defaults, and pins `CLAUDE_CONFIG_DIR` after the
-  `buildRunnerConfig` hook; the principal's `allowedProfiles` scopes creation and
+  `buildRunnerConfig` hook — except when the session env already lands the CLI in the profile's
+  dir, where the pin is skipped because setting the variable at all would change the CLI's
+  credential source (see gotchas); the principal's `allowedProfiles` scopes creation and
   `GET /profiles`. With the `profileStore` option (a small seam, memory and JSON-file
   implementations bundled) the dashboard can also create, edit, and delete profiles — gated by
   `canManageProfiles` on the principal, and never touching the ones declared in server options,

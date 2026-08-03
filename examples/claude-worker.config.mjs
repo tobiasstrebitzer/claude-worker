@@ -19,6 +19,7 @@
  * credential the browser can actually present (a cookie your own middleware
  * sets, typically). Use `--auth-key` instead unless you need this.
  */
+/** @type {import('claude-worker').ClaudeWorkerConfig['authenticate']} */
 const authenticate = (req) => {
   const key = req.headers['x-agent-proxy-key']
   if (typeof key !== 'string' || key !== process.env.AGENT_PROXY_KEY) return null
@@ -27,6 +28,7 @@ const authenticate = (req) => {
   return { id: 'gtm' }
 }
 
+/** @type {import('claude-worker').ClaudeWorkerConfig} */
 export default {
   authenticate,
 

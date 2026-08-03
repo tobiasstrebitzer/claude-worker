@@ -34,8 +34,9 @@ npx claude-worker --host 0.0.0.0 --auth-key "$SECRET" --cwd-root ~/projects
 ```
 
 `--auth-key` is one secret over two transports: browsers get a login page and an `HttpOnly`
-cookie, services send the same secret as `x-claude-worker-key`. Without a key the instance
-refuses to bind anything but loopback. Options that are *functions* — `authenticate`,
+cookie, services send the same secret as `x-claude-worker-key`. Off loopback without a key, the
+instance generates one rather than serving open — printed once, kept in `<state-dir>/auth-key`,
+reused across restarts. Options that are *functions* — `authenticate`,
 `buildRunnerConfig`, `createEngineRunner` — go in a `claude-worker.config.mjs`
 ([example](examples/claude-worker.config.mjs)). Full flag surface:
 [Run an instance](https://tobiasstrebitzer.github.io/claude-worker/docs/getting-started/run-an-instance/).
@@ -257,8 +258,8 @@ Anthropic-owned code.
 
 ```bash
 pnpm install
-pnpm server   # unauthenticated dev gateway on 127.0.0.1:8787 (loopback only!)
-pnpm web      # dashboard on http://localhost:5191, proxying /v1 to the gateway
+pnpm server   # gateway + dashboard on http://127.0.0.1:8787, no auth (loopback only!)
+pnpm web      # optional: vite dashboard on :5191 with HMR, proxying /v1 to the gateway
 
 pnpm typecheck   # tsgo (TypeScript 7 native preview)
 pnpm test        # vitest — core runner, server integration, transcript reducer

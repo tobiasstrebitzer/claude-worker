@@ -49,6 +49,11 @@ describe('parseArgs', () => {
     expect(() => parseArgs(['--profile', 'toby='])).toThrow(ConfigError)
   })
 
+  it('accepts repeated insecure hosts', () => {
+    const flags = parseArgs(['--insecure-host', 'toby', '--insecure-host', '0.0.0.0'])
+    expect(flags.insecureHosts).toEqual(['toby', '0.0.0.0'])
+  })
+
   it('rejects unknown options rather than ignoring them', () => {
     expect(() => parseArgs(['--porrt', '9000'])).toThrow(/unknown option/)
   })
@@ -80,26 +85,55 @@ describe('resolveInstanceConfig', () => {
     expect(config.authKey).toBe('from-env')
   })
 
-  it('refuses to serve unauthenticated on a routable address', () => {
-    expect(() => resolveInstanceConfig(parseArgs(['--host', '0.0.0.0']), noConfig, {})).toThrow(
-      /refusing to serve without auth/,
-    )
+  it('plans a generated key instead of serving open on a routable address', () => {
+    const config = resolveInstanceConfig(parseArgs(['--host', '0.0.0.0']), noConfig, {})
+    expect(config.generateAuthKey).toBe(true)
+    expect(config.authKey).toBeUndefined()
+    // The Host-header guard stands down on the promise of that key —
+    // startInstance asserts the promise was kept before serving.
+    expect(config.allowedHosts).toBeNull()
   })
 
-  it('allows it with a key, with --insecure, or on loopback', () => {
-    expect(() =>
-      resolveInstanceConfig(parseArgs(['--host', '0.0.0.0', '--auth-key', 'k']), noConfig, {}),
-    ).not.toThrow()
-    expect(() =>
-      resolveInstanceConfig(parseArgs(['--host', '0.0.0.0', '--insecure']), noConfig, {}),
-    ).not.toThrow()
-    expect(() => resolveInstanceConfig(parseArgs(['--host', '::1']), noConfig, {})).not.toThrow()
+  it('never plans generation with a key, with --insecure, or on loopback', () => {
+    const withKey = resolveInstanceConfig(
+      parseArgs(['--host', '0.0.0.0', '--auth-key', 'k']),
+      noConfig,
+      {},
+    )
+    expect(withKey.generateAuthKey).toBe(false)
+    expect(withKey.authKey).toBe('k')
+
+    const insecure = resolveInstanceConfig(
+      parseArgs(['--host', '0.0.0.0', '--insecure']),
+      noConfig,
+      {},
+    )
+    expect(insecure.generateAuthKey).toBe(false)
+    expect(insecure.allowedHosts).not.toBeNull()
+
+    const loopback = resolveInstanceConfig(parseArgs(['--host', '::1']), noConfig, {})
+    expect(loopback.generateAuthKey).toBe(false)
+    expect(loopback.authKey).toBeUndefined()
+  })
+
+  it('keeps the zero-config loopback instance keyless', () => {
+    const config = resolveInstanceConfig(parseArgs([]), noConfig, {})
+    expect(config.generateAuthKey).toBe(false)
+    expect(config.authKey).toBeUndefined()
+    expect(config.allowedHosts).not.toBeNull()
+  })
+
+  it('never plans generation under allowUnauthenticated', () => {
+    const loaded = { path: '/x/c.mjs', options: { allowUnauthenticated: true } }
+    const config = resolveInstanceConfig(parseArgs(['--host', '0.0.0.0']), loaded, {})
+    expect(config.generateAuthKey).toBe(false)
   })
 
   it('accepts a config file that authenticates for itself', () => {
     const loaded = { path: '/x/claude-worker.config.mjs', options: { authenticate: () => ({}) } }
     const config = resolveInstanceConfig(parseArgs(['--host', '0.0.0.0']), loaded, {})
     expect(config.hostAuthenticates).toBe(true)
+    expect(config.generateAuthKey).toBe(false)
   })
 
   it('enables durable parking by default and --no-parking-store turns it off', () => {
@@ -116,6 +150,102 @@ describe('resolveInstanceConfig', () => {
 
   it('puts state beside the config file when there is one', () => {
     expect(defaultStateDir('/srv/worker/claude-worker.config.mjs')).toBe('/srv/worker/.claude-worker')
+  })
+})
+
+describe('insecureHosts', () => {
+  const withInsecure = (hosts: string[]) => ({
+    path: '/x/c.mjs',
+    options: { insecureHosts: hosts },
+  })
+
+  it('lets a declared bind host serve without auth, and accepts it as a Host header', () => {
+    const config = resolveInstanceConfig(parseArgs(['--host', 'toby']), withInsecure(['toby']), {})
+    expect(config.generateAuthKey).toBe(false)
+    expect(config.authKey).toBeUndefined()
+    // One declaration, both roles: the entry also joins the Host-header gate.
+    expect(config.allowedHosts?.has('toby')).toBe(true)
+    expect(config.allowedHosts?.has('localhost')).toBe(true)
+  })
+
+  it('works as a repeatable --insecure-host flag too', () => {
+    const config = resolveInstanceConfig(
+      parseArgs(['--host', 'toby', '--insecure-host', 'toby']),
+      noConfig,
+      {},
+    )
+    expect(config.generateAuthKey).toBe(false)
+    expect(config.allowedHosts?.has('toby')).toBe(true)
+  })
+
+  it('matches case-insensitively in both directions', () => {
+    const upper = resolveInstanceConfig(parseArgs(['--host', 'TOBY']), withInsecure(['toby']), {})
+    expect(upper.generateAuthKey).toBe(false)
+    const upperEntry = resolveInstanceConfig(parseArgs(['--host', 'toby']), withInsecure(['TOBY']), {})
+    expect(upperEntry.generateAuthKey).toBe(false)
+    expect(upperEntry.allowedHosts?.has('toby')).toBe(true)
+  })
+
+  it('matches the bind host literally — a declaration is not a wildcard', () => {
+    // 'toby' is declared but 0.0.0.0 is what would be exposed: auth stays on.
+    const config = resolveInstanceConfig(parseArgs(['--host', '0.0.0.0']), withInsecure(['toby']), {})
+    expect(config.generateAuthKey).toBe(true)
+    expect(config.allowedHosts).toBeNull()
+  })
+
+  it('accepts 0.0.0.0 as "every interface", with the Host gate still fenced', () => {
+    const config = resolveInstanceConfig(
+      parseArgs(['--host', '0.0.0.0']),
+      withInsecure(['0.0.0.0', 'toby']),
+      {},
+    )
+    expect(config.generateAuthKey).toBe(false)
+    // The layered defence survives: loopback + declared names only, so a
+    // rebound public name still bounces off the Host-header guard.
+    expect(config.allowedHosts?.has('0.0.0.0')).toBe(true)
+    expect(config.allowedHosts?.has('toby')).toBe(true)
+    expect(config.allowedHosts?.has('attacker.example')).toBe(false)
+  })
+
+  it('handles bare IPv6 entries', () => {
+    const config = resolveInstanceConfig(
+      parseArgs(['--host', 'fd7a::1234']),
+      withInsecure(['fd7a::1234']),
+      {},
+    )
+    expect(config.generateAuthKey).toBe(false)
+    expect(config.allowedHosts?.has('fd7a::1234')).toBe(true)
+  })
+
+  it('rejects an entry carrying a port rather than silently never matching', () => {
+    expect(() =>
+      resolveInstanceConfig(parseArgs(['--host', 'toby']), withInsecure(['toby:8787']), {}),
+    ).toThrow(/carries a port/)
+    expect(() =>
+      resolveInstanceConfig(parseArgs(['--host', '::1']), withInsecure(['[::1]:8787']), {}),
+    ).toThrow(/carries a port/)
+  })
+
+  it('rejects an entry that is not a host at all', () => {
+    expect(() =>
+      resolveInstanceConfig(parseArgs([]), withInsecure(['a b c']), {}),
+    ).toThrow(ConfigError)
+    expect(() =>
+      resolveInstanceConfig(parseArgs([]), withInsecure(['http://toby']), {}),
+    ).toThrow(ConfigError)
+  })
+
+  it('weakens nothing when auth is on', () => {
+    const config = resolveInstanceConfig(
+      parseArgs(['--host', 'toby', '--auth-key', 'long-enough-secret']),
+      withInsecure(['toby']),
+      {},
+    )
+    // A key wins: the instance authenticates, and allowedHosts stays null — a
+    // rebound origin holds no cookie, so the Host gate has nothing to add.
+    expect(config.authKey).toBe('long-enough-secret')
+    expect(config.generateAuthKey).toBe(false)
+    expect(config.allowedHosts).toBeNull()
   })
 })
 

@@ -25,12 +25,16 @@ To develop against the source, or to embed the libraries:
 git clone https://github.com/tobiasstrebitzer/claude-worker
 cd claude-worker
 pnpm install
-pnpm server   # unauthenticated dev gateway on 127.0.0.1:8787 (loopback only!)
-pnpm web      # dashboard on http://localhost:5191, proxying /v1 to the gateway
+pnpm server   # gateway + dashboard on http://127.0.0.1:8787, no auth (loopback only!)
+pnpm web      # optional: vite dashboard on :5191 with HMR, proxying /v1 to the gateway
 ```
 
-The dev gateway runs with `allowUnauthenticated: true`, which `createWorkerServer` only permits
-as an explicit opt-in — never expose it beyond loopback.
+`pnpm server` is the same `claude-worker` CLI as above, pointed at
+`examples/dev-server.config.mjs` — there is no separate dev entry point, so the thing you develop
+against and the thing you ship are one code path. Edit that config directly; flags still win
+(`pnpm server --port 9000`). It runs without auth, which the CLI only permits on loopback: bind
+a routable interface to reach it from another device (`pnpm server --host 0.0.0.0`) and the CLI
+generates an auth key for you — printed once, reused across restarts.
 
 ## Create a first session
 

@@ -17,8 +17,10 @@ Options
       --host <addr>         interface to bind (default 127.0.0.1, CLAUDE_WORKER_HOST)
       --auth-key <secret>   shared secret, min 12 chars; browsers log in with it,
                             services send it as x-claude-worker-key
-                            (CLAUDE_WORKER_AUTH_KEY). Unset = no auth, which is
-                            refused on anything but a loopback address.
+                            (CLAUDE_WORKER_AUTH_KEY). Unset = no auth on loopback;
+                            on any other interface a key is generated instead,
+                            printed once, and stored in <state-dir>/auth-key for
+                            later starts to reuse.
       --trust-proxy         trust x-forwarded-proto/-host/-for from one reverse
                             proxy. Required behind TLS termination, or the session
                             cookie loses its Secure flag and the origin check
@@ -27,6 +29,11 @@ Options
                             proxy rewrites Host (repeatable)
       --allowed-host <name> extra Host header accepted when running without auth
                             (repeatable; loopback names are always accepted)
+      --insecure-host <name>
+                            bind host that may serve without auth — no key demanded,
+                            none generated — and, while unauthenticated, also
+                            accepted as a Host header (repeatable; config:
+                            insecureHosts). Names the host alone, no port.
       --profile <name=dir>  Claude config dir a session may run under (repeatable)
       --cwd-root <path>     restrict session cwds to this root (repeatable,
                             CLAUDE_WORKER_CWD_ROOTS as a ':'-separated list)

@@ -21,8 +21,7 @@
     "build": "tsdown",
     "prepack": "pnpm clean && pnpm build",
     "typecheck": "tsgo -p tsconfig.json",
-    "test": "vitest run",
-    "dev": "node --conditions=@claude-worker/source --import @swc-node/register/esm-register src/dev.ts"
+    "test": "vitest run"
   },
   "dependencies": {
     "@claude-worker/core": "workspace:*",

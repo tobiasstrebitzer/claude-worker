@@ -59,7 +59,10 @@ What's shipped, what's next, and what's still undecided. Status as of 2026-07-30
   attach — hence `--auth-key`, one secret over two transports, with an explicit `Origin` check
   (upgrades are exempt from CORS) and a Host allowlist against DNS rebinding on the
   unauthenticated loopback default. The dashboard is published as prebuilt static files with zero
-  runtime deps.
+  runtime deps. Off loopback the CLI generates and persists a key rather than refusing to start,
+  and serving genuinely open requires naming the bind host (`--insecure-host` / `insecureHosts`),
+  which doubles as the accepted Host header. Dev goes through the same binary — there is no
+  separate dev entry point, only `examples/dev-server.config.mjs`.
 
 ## Next
 

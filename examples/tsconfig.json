@@ -5,6 +5,8 @@
     "moduleResolution": "NodeNext",
     "customConditions": ["@claude-worker/source"],
     "allowImportingTsExtensions": true,
+    "allowJs": true,
+    "checkJs": true,
     "lib": ["ES2022"],
     "strict": true,
     "esModuleInterop": true,
@@ -12,6 +14,6 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["**/*.ts"],
+  "include": ["**/*.ts", "**/*.mjs"],
   "exclude": ["node_modules"]
 }
