@@ -1,6 +1,6 @@
 {
   "name": "claude-worker",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "type": "module",
   "description": "Turnkey claude-worker instance: `npx claude-worker` runs the session gateway and the full dashboard on one port. The @claude-worker/* packages are the libraries you embed; this is the service you run.",
   "license": "MIT",
