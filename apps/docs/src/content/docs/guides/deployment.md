@@ -1,7 +1,7 @@
 ---
 title: Deployment
 description: Hosting realities — no serverless, single-host sessions, mandatory auth hook, and clamping client requests.
-order: 5
+order: 6
 ---
 
 ## No serverless — and why

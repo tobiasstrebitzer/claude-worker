@@ -83,6 +83,11 @@ bare `SessionCommand`s.
 - `SdkSessionSummary` — the Agent SDK's on-disk sessions, listed to offer resume.
 - Response wrappers: `ListSessionsResponse`, `CreateSessionResponse`, `GetSessionResponse`,
   `ResolvePermissionResponse`, `ListSdkSessionsResponse`, `ErrorResponse`.
+- `SessionNotification` / `SessionNotificationType` / `SessionWebhookConfig` — the out-of-band
+  channel for a person who isn't attached (`permission_requested`, `turn_completed`,
+  `session_error`, `session_closed`), carrying the `SessionInfo` snapshot, the event's `seq`, a
+  one-line `preview`, and — on a permission — the full request to answer over REST. See
+  [Notifications](/claude-worker/docs/guides/notifications/).
 
 ## Queue frames
 

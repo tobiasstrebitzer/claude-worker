@@ -88,6 +88,12 @@ boundary: anything a client needs must be expressible as protocol events and com
   `authenticate` hook (refuses to start without one unless `allowUnauthenticated: true`), and —
   when the `queue` option is set — `/jobs` + `/queue` routes plus a `/queue/ws` stream of job
   events and stats. Job sessions are ordinary registry sessions, so dashboards can watch them.
+  `SessionNotifier` is the outbound half of the same idea for *interactive* sessions: the four
+  moments a person acts on (`permission_requested`, `turn_completed`, `session_error`,
+  `session_closed`) POSTed to a server-wide webhook and/or a local observer, ordered per session
+  and retried with backoff. It subscribes through `SessionRegistry`'s `onRegister` hook — the one
+  chokepoint every path funnels into, the rebuild of a parked session included — and stays
+  transport-agnostic, so the gateway holds no push credentials.
   Profiles (`profiles` option) bind names to Claude Code config dirs: creation resolves the
   request's profile (required when several are declared, implicit with one, auto-detected from
   `~/.claude` when unset), applies its defaults, and pins `CLAUDE_CONFIG_DIR` after the

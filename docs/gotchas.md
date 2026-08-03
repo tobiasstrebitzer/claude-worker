@@ -210,6 +210,16 @@ change is the wrong one. Grouped by where they bite. Architecture lives in
   session request carrying its own `mcpServers` is refused (MCP tools are authoritative — a
   client that could name one could point an authoritative tool anywhere); Claude sessions still
   bring their own, since the CLI spawns them under the operator's own config dir.
+- **Session notifications subscribe through `SessionRegistry.onRegister`, and three details of
+  that seam are load-bearing.** (1) `register()` fires the hook per *runner object*, not per call
+   — `prepare()` lists a runner and its caller registers what it returned, so a per-call hook
+  fires twice for every Claude session and every notification is delivered twice. (2) The
+  subscription starts at `runner.info().lastSeq`, because `Runner.subscribe(fn, afterSeq = 0)`
+  **replays the log**: at 0, a session rebuilt from a park re-announces every permission request
+  it ever made. (3) The `SessionInfo` snapshot is taken a microtask after the event, since
+  listeners run *inside* `#emit`, before the runner has applied what the event means — read
+  synchronously, a `session_closed` notification reports `status: 'starting'`. Seq and ts still
+  come from the event, so identity and ordering are untouched.
 
 ## Build, test & packaging
 

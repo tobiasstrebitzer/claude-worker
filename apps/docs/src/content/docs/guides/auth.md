@@ -1,7 +1,7 @@
 ---
 title: Auth & Anthropic's terms
 description: claude-worker performs no Anthropic authentication of its own — what that means for operators and contributors.
-order: 6
+order: 7
 ---
 
 **claude-worker performs no Anthropic authentication of its own — by design.** It spawns the
