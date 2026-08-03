@@ -145,6 +145,32 @@ the same `buildRunnerConfig` hook and auth-provenance watcher as client sessions
 adapter is single-process and non-persistent; implement `QueueAdapter` against a shared store for
 anything beyond one trusted host.
 
+## Session notifications
+
+The live WebSocket only reaches someone who has one open. `notifications` is the outbound
+channel for everyone else — the four moments a person acts on, POSTed to a URL you control:
+
+```ts
+const worker = createWorkerServer({
+  authenticate,
+  notifications: {
+    webhook: { url: 'https://my-app.test/hooks/session', headers: { authorization: '…' } },
+    // events: ['permission_requested'],       // default: all four
+    onNotification: (n) => log(n.type, n.sessionId, n.preview), // unfiltered, in-process
+  },
+})
+```
+
+`permission_requested`, `turn_completed`, `session_error`, `session_closed` — delivered as a
+`SessionNotification`, ordered per session, retried with exponential backoff. Server-wide, unlike
+the queue's per-job `webhook`: the point is hearing about sessions you neither created nor are
+attached to, and every registry session qualifies (job runs and rebuilt parked sessions included).
+
+`permission_requested` carries the whole `PermissionRequest`, so a consumer can answer it with
+`POST /sessions/:id/permissions/:requestId` — the mechanism behind an Approve button in a chat
+message or on a phone's lock screen. The server holds no push credentials and knows nothing about
+APNs, FCM or Slack; forwarding to one of those is a separate process's job.
+
 ## Auth posture
 
 Each session's credential provenance surfaces as `apiKeySource` on `SessionInfo` and the

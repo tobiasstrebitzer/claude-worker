@@ -8,6 +8,9 @@ export type {
   WorkerServerOptions,
 } from './server.ts'
 export { SessionRegistry } from './registry.ts'
+export type { SessionRegistryOptions } from './registry.ts'
+export { SessionNotifier } from './notifications.ts'
+export type { SessionNotificationOptions } from './notifications.ts'
 export { BridgeHub } from './bridge.ts'
 export type { BridgeHubOptions } from './bridge.ts'
 export { SessionParkManager } from './parking.ts'

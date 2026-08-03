@@ -199,6 +199,28 @@ the answer is yes:
 npx claude-worker guard --wait 300 --allow-parked && systemctl restart claude-worker
 ```
 
+## Reaching a person who isn't watching
+
+A session blocked on an approval is useless if nobody is looking at it, and the live WebSocket
+only helps someone who has one open. `notifications` POSTs the four moments a human acts on —
+permission requested, turn finished, error, closed — to a URL you control:
+
+```ts
+const worker = createWorkerServer({
+  authenticate,
+  notifications: {
+    webhook: { url: 'https://my-app.test/hooks/session', headers: { authorization: '…' } },
+    // events: ['permission_requested'],  // default: all four
+  },
+})
+```
+
+Server-wide, unlike the queue's per-job webhook: the point is hearing about sessions you neither
+created nor are attached to. `permission_requested` carries the whole request, so a consumer can
+answer it over REST (`POST /v1/sessions/:id/permissions/:requestId`) — which is what makes an
+Approve button in a chat message, or on a phone's lock screen, work. The server itself holds no
+push credentials and knows nothing about APNs or Slack; it speaks HTTP to your URL.
+
 ## Packages
 
 Two tiers: `@claude-worker/*` are the libraries you embed, `claude-worker` is the instance you
@@ -211,7 +233,7 @@ run. Each package has its own README.
 | [`@claude-worker/core`](packages/core) | The engines. `SessionRunner` (Agent SDK) and `AiSdkRunner` (any provider) behind one `Runner` interface, with tool execution on a swappable `ToolExecutor` seam and `park()`/`restore`. No transport. |
 | [`@claude-worker/sandbox`](packages/sandbox) | The untrusted-code boundary: QuickJS-NG WASM guest, in-memory scratch VFS, by-value host bridge, interpreter-enforced memory and time limits. Runs server-side or in a tab. |
 | [`@claude-worker/queue`](packages/queue) | The job queue: concurrency, token budgets, retries, watchdog, retention, webhooks. Pluggable `QueueAdapter` (in-memory bundled). |
-| [`@claude-worker/server`](packages/server) | The gateway: HTTP + WebSocket, session registry, auth hook, profiles, job routes, browser tool bridge, parked-session storage. |
+| [`@claude-worker/server`](packages/server) | The gateway: HTTP + WebSocket, session registry, auth hook, profiles, job routes, session notifications, browser tool bridge, parked-session storage. |
 | [`@claude-worker/client`](packages/client) | Typed client for browsers and Node: REST + WS attach with auto-reconnect and replay-from-last-seq. Zero runtime deps. |
 | [`@claude-worker/react`](packages/react) | Headless React: `useClaudeSession` + a pure transcript reducer. No styling opinion. |
 | [`@claude-worker/ui`](packages/ui) | Styled agent-control components: session panel, transcript, tool-call cards, permission prompts, composer. Tailwind v4 + Base UI + cva. |

@@ -773,6 +773,63 @@ export type GetProfileResponse = { profile: ProfileInfo; config: ProfileConfigSn
 export type ErrorResponse = { error: string }
 
 // ---------------------------------------------------------------------------
+// Session notifications (the out-of-band "something wants you" channel)
+// ---------------------------------------------------------------------------
+
+/**
+ * The moments in an *interactive* session a person needs to hear about when they
+ * are not watching it — the whole point being that a phone cannot hold a
+ * WebSocket open in the background, so the server has to reach out.
+ *
+ * Deliberately four: this is a human-attention channel, not an event mirror. The
+ * event log stays on the session WS (attach with `afterSeq` to catch up); if you
+ * want every assistant message, subscribe there instead.
+ */
+export type SessionNotificationType =
+  /** The agent is blocked on an approval — the one that matters most. */
+  | 'permission_requested'
+  /** A turn finished; the session is idle and waiting for the human. */
+  | 'turn_completed'
+  /** The session failed (`session_error`). */
+  | 'session_error'
+  /** The session ended (`session_closed`), whoever ended it. */
+  | 'session_closed'
+
+/** One delivery on the session-notification channel (JSON body of a webhook POST). */
+export type SessionNotification = {
+  type: SessionNotificationType
+  sessionId: string
+  /** Snapshot at notification time — status, title, cwd, cost, `lastSeq`. */
+  session: SessionInfo
+  /** Seq of the event behind this notification; attach with `afterSeq: seq - 1` to
+   * land on it. */
+  seq: number
+  ts: number
+  /** One line fit for a notification body: the permission title, the turn's final
+   * text, the error message. */
+  preview?: string
+  /** `permission_requested` only: the full request, so a consumer can answer it via
+   * `POST {basePath}/sessions/:id/permissions/:requestId` — which is what makes an
+   * Approve/Deny action on a lock-screen notification possible. */
+  request?: PermissionRequest
+  /** `turn_completed` only. */
+  result?: { isError: boolean; durationMs: number; numTurns: number; totalCostUsd: number }
+  /** `session_closed` only. */
+  reason?: 'client' | 'server' | 'error'
+}
+
+/** Where session notifications are POSTed (JSON body = {@link SessionNotification}).
+ * Server-wide, not per session: the point is to hear about sessions you did not
+ * create yourself and are not attached to. */
+export type SessionWebhookConfig = {
+  url: string
+  /** Extra headers sent with every delivery (auth tokens etc.). */
+  headers?: Record<string, string>
+  /** Types to deliver. Default: all of them. */
+  events?: SessionNotificationType[]
+}
+
+// ---------------------------------------------------------------------------
 // Job queue (one-shot scheduled runs over the session runner)
 // ---------------------------------------------------------------------------
 

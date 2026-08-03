@@ -30,6 +30,9 @@ protocol. Read these before changing scope or structure:
   Jobs are one-shot, but a run that parks frees its slot and stops its duration clock.
 - `packages/server` — HTTP + WS gateway (`node:http` + `ws`): session registry, auth hook,
   optional `/jobs` + `/queue` routes, profiles (+ `profileStore` CRUD), `GET /sessions/:id/files`,
+  `SessionNotifier` (`notifications.ts`) — server-wide session webhooks for the four
+  human-attention moments, subscribed through `SessionRegistry`'s `onRegister` so a rebuilt
+  parked session is covered too; transport-agnostic on purpose (no push credentials here),
   `SessionParkManager` (`parking.ts`) owning deferred execution over the `SessionStore` seam
   (`session-store.ts`: memory + JSON-file, the file one durable across restarts). Imports no model
   SDK — a provider profile is built by the host's `createEngineRunner` hook. A Claude profile pins

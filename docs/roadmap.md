@@ -63,6 +63,13 @@ What's shipped, what's next, and what's still undecided. Status as of 2026-07-30
   and serving genuinely open requires naming the bind host (`--insecure-host` / `insecureHosts`),
   which doubles as the accepted Host header. Dev goes through the same binary — there is no
   separate dev entry point, only `examples/dev-server.config.mjs`.
+- **Session notifications** — the out-of-band channel for a person who isn't watching:
+  `permission_requested` / `turn_completed` / `session_error` / `session_closed` POSTed to a
+  server-wide webhook and/or a local observer, ordered per session, retried with backoff, with the
+  full `PermissionRequest` on board so a consumer can answer over REST. Subscribed through the
+  registry's `onRegister`, so a session rebuilt after a park is covered too. Deliberately
+  transport-agnostic: the server holds no push credentials, and turning a notification into an
+  APNs push is a forwarder's job.
 
 ## Next
 

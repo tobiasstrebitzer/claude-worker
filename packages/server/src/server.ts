@@ -33,6 +33,7 @@ import {
   type UpdateProfileRequest,
 } from '@claude-worker/protocol'
 import { SessionRegistry } from './registry.ts'
+import { SessionNotifier, type SessionNotificationOptions } from './notifications.ts'
 import { BridgeHub, type BridgeHubOptions } from './bridge.ts'
 import { SessionParkManager } from './parking.ts'
 import { MemorySessionStore, type SessionStore } from './session-store.ts'
@@ -169,6 +170,22 @@ export type WorkerServerOptions = {
   /** Enable the job queue (`/jobs` + `/queue` routes). Jobs run as ordinary registry
    * sessions — attachable over the sessions WS — governed by these limits. */
   queue?: QueueServerOptions
+  /**
+   * Out-of-band notification for interactive sessions: the four moments a person
+   * away from the screen needs (permission requested, turn done, error, closed)
+   * POSTed to a webhook and/or handed to a local observer. Off unless configured.
+   *
+   * Server-wide, unlike the queue's per-job webhook — the point is to hear about
+   * sessions you neither created nor are attached to, which is the situation a
+   * mobile client is in permanently (iOS will not hold a WebSocket open in the
+   * background). Every registry session qualifies, job runs included, so a job
+   * carrying its own webhook is reported on both channels.
+   *
+   * This is the primitive, and it stays transport-agnostic on purpose: the OSS
+   * server holds no push credentials. Turning a notification into an APNs push is
+   * a forwarder's job — see the turnkey CLI.
+   */
+  notifications?: SessionNotificationOptions
   /** Browser-bridged tool execution: how long a bridged call may go unanswered
    * before it fails (default 60000), and where terminal results are delivered.
    * The hub is always available on the returned server as `bridge`. */
@@ -727,7 +744,11 @@ export function createWorkerServer(options: WorkerServerOptions = {}): WorkerSer
     return { ok: true, profile }
   }
 
-  const registry = new SessionRegistry()
+  // Notifications ride the registry hook rather than the create paths, because the
+  // session that most needs to reach a phone may be one that parked and was
+  // rebuilt — and that path never goes near `createRunner`.
+  const notifier = new SessionNotifier(options.notifications ?? {})
+  const registry = new SessionRegistry({ onRegister: (runner) => notifier.watch(runner) })
   const bridge = new BridgeHub({
     ...options.bridge,
     onResult: (sessionId, executionId, result) => {
