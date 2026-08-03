@@ -90,6 +90,19 @@ final class TranscriptViewModel {
 
   var pendingApproval: PermissionRequest? { state.pendingApprovals.first }
 
+  /// File-store operations bound to this session. Downloads go through the
+  /// client rather than the bare URL because the bytes need the auth header.
+  var fileAccess: SessionFileAccess {
+    let client = client
+    let sessionId = sessionId
+    return SessionFileAccess(
+      list: { try await client.listSessionFiles(sessionId: sessionId) },
+      download: { path in
+        let data = try await client.fetchSessionFile(sessionId: sessionId, path: path)
+        return try SessionFileAccess.writeTemporary(data, named: Fmt.lastComponent(path))
+      })
+  }
+
   var rateLimitWindows: [(key: String, info: RateLimitInfo)] {
     // A window with no utilization is unknown, not zero — drop it entirely
     // rather than draw an empty bar that reads as "plenty left".

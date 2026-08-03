@@ -8,8 +8,10 @@ struct SessionDetailSheet: View {
   let state: TranscriptState
   let session: SessionInfo?
   let rateLimits: [(key: String, info: RateLimitInfo)]
+  let fileAccess: SessionFileAccess?
 
   @Environment(\.dismiss) private var dismiss
+  @State private var downloader = FileDownloader()
 
   var body: some View {
     NavigationStack {
@@ -32,6 +34,8 @@ struct SessionDetailSheet: View {
             }
           }
         }
+
+        SessionFilesSection(access: fileAccess, downloader: downloader)
 
         if !rateLimits.isEmpty {
           Section("Rate limits") {
@@ -68,6 +72,8 @@ struct SessionDetailSheet: View {
       }
       .navigationTitle("Session details")
       .navigationBarTitleDisplayMode(.inline)
+      .fileDownloadPresentation(downloader)
+      .task { downloader.access = fileAccess }
       .toolbar {
         ToolbarItem(placement: .confirmationAction) {
           Button("Done") { dismiss() }
@@ -81,9 +87,16 @@ private struct CategoryRow: View {
   let category: ContextUsageCategory
   let maxTokens: Int
 
+  /// The protocol's `color` is *usually* a CLI theme token rather than a real
+  /// color, so it is honoured only when it parses — same rule as the dashboard.
+  private var tint: Color { Color(cliToken: category.color) ?? .accentColor }
+
   var body: some View {
     VStack(alignment: .leading, spacing: 4) {
-      HStack {
+      HStack(spacing: 6) {
+        Circle()
+          .fill(tint)
+          .frame(width: 7, height: 7)
         Text(category.name)
           .font(.caption)
         Spacer(minLength: 0)
@@ -91,11 +104,9 @@ private struct CategoryRow: View {
           .font(.caption.monospacedDigit())
           .foregroundStyle(.secondary)
       }
-      // The protocol's `color` is usually a CLI theme token, not a CSS/UIColor —
-      // so it is deliberately ignored and every bar uses the accent tint.
       ProgressView(value: Double(category.tokens), total: Double(maxTokens))
         .progressViewStyle(.linear)
-        .tint(.accentColor)
+        .tint(tint)
     }
     .padding(.vertical, 2)
   }
@@ -118,8 +129,8 @@ private struct RateLimitRow: View {
       }
       HStack(spacing: 8) {
         Text(info.status)
-        if let resetsAt = info.resetsAt, let countdown = Fmt.until(epochSeconds: resetsAt) {
-          Text("resets \(countdown)")
+        if let resetsAt = info.resetsAt {
+          ResetCountdown(resetsAt: resetsAt, prefix: "resets")
         }
         if info.isUsingOverage == true {
           Text("overage")

@@ -90,6 +90,26 @@ struct ContextBar: View {
   }
 }
 
+/// A countdown to a rate-limit reset, ticking on its own.
+///
+/// `rate_limit` events are sparse — one per turn at best — so a countdown drawn
+/// from the last event would sit at "in 3h" for an hour. Minute resolution is the
+/// finest thing `Fmt.until` prints, so tick once a minute and no faster.
+/// A window whose reset time has passed renders as nothing at all, prefix
+/// included — hence the prefix living here rather than in the caller's layout.
+struct ResetCountdown: View {
+  let resetsAt: Double
+  var prefix: String?
+
+  var body: some View {
+    TimelineView(.periodic(from: .now, by: 60)) { context in
+      if let countdown = Fmt.until(epochSeconds: resetsAt, now: context.date) {
+        Text(prefix.map { "\($0) \(countdown)" } ?? countdown)
+      }
+    }
+  }
+}
+
 /// One rate-limit window. Only rendered for windows that reported a utilization —
 /// an absent one means unknown, and 0% would be a lie.
 struct RateLimitChip: View {
@@ -104,8 +124,8 @@ struct RateLimitChip: View {
         Text(Fmt.percent(utilization))
           .monospacedDigit()
           .foregroundStyle(tint(utilization))
-        if let resetsAt = info.resetsAt, let countdown = Fmt.until(epochSeconds: resetsAt) {
-          Text(countdown)
+        if let resetsAt = info.resetsAt {
+          ResetCountdown(resetsAt: resetsAt)
             .foregroundStyle(.tertiary)
         }
       }

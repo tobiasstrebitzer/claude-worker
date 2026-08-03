@@ -50,6 +50,50 @@ extension PermissionMode {
   }
 }
 
+extension Color {
+  /// A color the CLI reported for a context-usage category.
+  ///
+  /// The protocol warns that `color` is *often* one of the CLI's own theme token
+  /// names ('inactive', 'promptBorder', …) rather than a real color. The web
+  /// dashboard passes it through only when `CSS.supports('color', …)` accepts it;
+  /// this is the same rule with the vocabulary UIKit can actually resolve —
+  /// `#rgb`/`#rrggbb`/`#rrggbbaa` and the handful of CSS basic color keywords the
+  /// CLI themes use. Anything else is a token, and the caller falls back.
+  init?(cliToken token: String) {
+    let value = token.trimmingCharacters(in: .whitespaces).lowercased()
+    if value.hasPrefix("#") {
+      guard let rgba = Color.hexComponents(String(value.dropFirst())) else { return nil }
+      self.init(.sRGB, red: rgba.0, green: rgba.1, blue: rgba.2, opacity: rgba.3)
+      return
+    }
+    guard let named = Color.cssKeywords[value] else { return nil }
+    self = named
+  }
+
+  private static let cssKeywords: [String: Color] = [
+    "black": .black, "blue": .blue, "brown": .brown, "cyan": .cyan, "gray": .gray,
+    "grey": .gray, "green": .green, "indigo": .indigo, "magenta": .purple, "mint": .mint,
+    "orange": .orange, "pink": .pink, "purple": .purple, "red": .red, "teal": .teal,
+    "white": .white, "yellow": .yellow,
+  ]
+
+  private static func hexComponents(_ hex: String) -> (Double, Double, Double, Double)? {
+    guard hex.allSatisfy(\.isHexDigit) else { return nil }
+    let digits: [String]
+    switch hex.count {
+    case 3, 4: digits = hex.map { "\($0)\($0)" }
+    case 6, 8: digits = stride(from: 0, to: hex.count, by: 2).map {
+      let start = hex.index(hex.startIndex, offsetBy: $0)
+      return String(hex[start..<hex.index(start, offsetBy: 2)])
+    }
+    default: return nil
+    }
+    let values = digits.compactMap { UInt8($0, radix: 16) }.map { Double($0) / 255 }
+    guard values.count == digits.count else { return nil }
+    return (values[0], values[1], values[2], values.count == 4 ? values[3] : 1)
+  }
+}
+
 /// A filled dot + label, used for both the session list rows and the live header.
 struct StatusBadge: View {
   let status: SessionStatus

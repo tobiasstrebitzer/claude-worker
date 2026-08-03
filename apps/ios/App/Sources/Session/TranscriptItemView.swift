@@ -77,9 +77,7 @@ private struct AssistantText: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 4) {
-      Text(Markdown.inline(text))
-        .font(.body)
-        .textSelection(.enabled)
+      MarkdownText(text: text)
         .frame(maxWidth: .infinity, alignment: .leading)
       if streaming {
         // Subtle: a caret-sized bar, not a spinner — the text itself is the
@@ -170,28 +168,47 @@ private struct NoticeRow: View {
   }
 }
 
+/// A file the agent delivered. Tapping downloads it through the gateway (the
+/// bytes need the auth header, so the raw URL is not shareable) and hands it to
+/// the system share sheet.
 private struct FileDeliveredCard: View {
   let path: String
   let bytes: Int
   let description: String?
 
+  @Environment(\.fileDownloader) private var downloader
+
   var body: some View {
-    HStack(spacing: 10) {
-      Image(systemName: "doc.badge.arrow.up")
-        .imageScale(.large)
-        .foregroundStyle(Color.accentColor)
-      VStack(alignment: .leading, spacing: 2) {
-        Text(Fmt.lastComponent(path))
-          .font(.callout.weight(.medium))
-          .lineLimit(1)
-        Text(description.map { "\($0) · \(Fmt.bytes(bytes))" } ?? Fmt.bytes(bytes))
-          .font(.caption2)
-          .foregroundStyle(.secondary)
-          .lineLimit(2)
+    Button {
+      downloader?.download(path)
+    } label: {
+      HStack(spacing: 10) {
+        Image(systemName: "doc.badge.arrow.up")
+          .imageScale(.large)
+          .foregroundStyle(Color.accentColor)
+        VStack(alignment: .leading, spacing: 2) {
+          Text(Fmt.lastComponent(path))
+            .font(.callout.weight(.medium))
+            .lineLimit(1)
+          Text(description.map { "\($0) · \(Fmt.bytes(bytes))" } ?? Fmt.bytes(bytes))
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .lineLimit(2)
+        }
+        Spacer(minLength: 0)
+        if downloader?.inFlight == path {
+          ProgressView().controlSize(.mini)
+        } else if downloader != nil {
+          Image(systemName: "square.and.arrow.down")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
       }
-      Spacer(minLength: 0)
+      .padding(10)
+      .background(Color.secondary.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
+      .contentShape(Rectangle())
     }
-    .padding(10)
-    .background(Color.secondary.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
+    .buttonStyle(.plain)
+    .disabled(downloader == nil)
   }
 }

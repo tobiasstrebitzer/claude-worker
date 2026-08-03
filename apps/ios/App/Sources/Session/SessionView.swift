@@ -15,6 +15,9 @@ struct SessionView: View {
   @State private var draft = ""
   @State private var showDetails = false
   @State private var showCloseConfirmation = false
+  /// Owns the share sheet for files tapped in the transcript. The details sheet
+  /// has its own — a sheet can't raise another sheet from underneath itself.
+  @State private var downloader = FileDownloader()
 
   init(sessionId: String, client: WorkerClient) {
     _vm = State(initialValue: TranscriptViewModel(sessionId: sessionId, client: client))
@@ -27,13 +30,19 @@ struct SessionView: View {
       .navigationTitle(vm.title)
       .navigationBarTitleDisplayMode(.inline)
       .toolbar { toolbarMenu }
-      .task { await vm.run() }
+      .environment(\.fileDownloader, downloader)
+      .fileDownloadPresentation(downloader)
+      .task {
+        downloader.access = vm.fileAccess
+        await vm.run()
+      }
       .onChange(of: scenePhase) { _, phase in
         if phase == .active { vm.reconnectNow() }
       }
       .sheet(isPresented: $showDetails) {
         SessionDetailSheet(
-          state: vm.state, session: vm.session, rateLimits: vm.rateLimitWindows)
+          state: vm.state, session: vm.session, rateLimits: vm.rateLimitWindows,
+          fileAccess: vm.fileAccess)
       }
       .confirmationDialog(
         "Close this session?", isPresented: $showCloseConfirmation, titleVisibility: .visible

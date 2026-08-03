@@ -21,6 +21,9 @@ Plan and research: `_docs/plans/mobile-client.md` (gitignored, local).
     cookie machinery the web dashboard uses.
   - `Transcript.swift` — pure transcript reducer, a 1:1 port of
     `packages/react/src/transcript.ts`. Keep the two in sync when transcript semantics change.
+  - `MarkdownBlocks.swift` — splits assistant text into prose and fenced code blocks, tolerating
+    the unterminated fence that streaming produces. Pure, so it lives here (this package is the
+    only part of the app under test); the SwiftUI rendering stays in `App/`.
 - `App/` — the SwiftUI app (hosts, sessions, transcript, permissions, HUD). Hosts + auth keys
   are stored in the Keychain.
 - `project.yml` — [XcodeGen](https://github.com/yonaskolb/XcodeGen) spec; the `.xcodeproj` is
