@@ -10,6 +10,8 @@ _docs/
 .mcp.json
 *.pem
 *.key
+# Apple signing/APNs keys — a p8 downloads exactly once and serves the whole team.
+*.p8
 .npmrc
 .astro/
 
