@@ -23,3 +23,15 @@ _docs/
 
 # The CLI's on-disk test fixtures (config files, fake dashboard roots).
 packages/cli/test/.tmp-*/
+
+# iOS app build output. The sources live on `feat/ios-app` and carry their own
+# apps/ios/.gitignore, but the generated files survive a branch switch — so they
+# have to be ignored here too, or master shows 1400+ untracked artifacts.
+# `xcodegen generate` rebuilds the project; Info.plist comes from project.yml.
+apps/ios/**/.build/
+apps/ios/**/.build-*/
+apps/ios/**/.swiftpm/
+apps/ios/*.xcodeproj/
+apps/ios/App/Info.plist
+DerivedData/
+xcuserdata/
